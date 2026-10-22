@@ -31,7 +31,16 @@ export function UpdateBanner() {
   if (!isUpdatePending) return null;
   return (
     <Pressable
-      onPress={() => Updates.reloadAsync()}
+      onPress={() =>
+        // The default reload screen is plain white; match the app and fade into the new bundle.
+        Updates.reloadAsync({
+          reloadScreenOptions: {
+            backgroundColor: theme.background,
+            spinner: { color: theme.accent },
+            fade: true,
+          },
+        })
+      }
       style={({ pressed }) => [styles.banner, { backgroundColor: theme.accent, opacity: pressed ? 0.7 : 1 }]}>
       <ThemedText type="smallBold" style={styles.text}>
         Update ready. Tap to restart.

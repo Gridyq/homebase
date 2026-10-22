@@ -35,3 +35,20 @@ for (const dir of old) rmSync(path.join(runtimeDir, dir), { recursive: true, for
 
 console.log(`\nPublished update ${updateId} for runtime ${runtimeVersion}.`);
 console.log('Open Homebase on your phone; it downloads the update and offers to restart into it.');
+
+// Ping the phone through the self-hosted ntfy server. Tapping the notification opens Homebase,
+// which checks for the update as it comes to the foreground.
+const git = (args) => execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim();
+const commit = git(['log', '-1', '--format=%h %s']);
+const dirty = git(['status', '--porcelain']) ? ' (+ uncommitted changes)' : '';
+try {
+  const res = await fetch(process.env.NTFY_URL ?? 'http://localhost:2586/Homebase', {
+    method: 'POST',
+    headers: { Title: 'Homebase update ready', Tags: 'arrows_counterclockwise', Click: 'homebase://' },
+    body: `${commit}${dirty}\nOpen Homebase to download it.`,
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  console.log('Sent ntfy notification.');
+} catch (e) {
+  console.warn(`Couldn't send ntfy notification: ${e.message}`);
+}
