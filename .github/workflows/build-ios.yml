@@ -1,0 +1,95 @@
+# Builds an unsigned .ipa for SideStore to sign with a free Apple ID.
+#
+# - Run it from the Actions tab ("Run workflow") and pick a configuration:
+#     Release: standalone app, JavaScript bundled in.
+#     Debug:   development build that loads code live from `npx expo start` on your computer.
+#   The result is published to the rolling release `latest-release` or `latest-debug`.
+# - Pushing a tag like `v1.2.0` builds Release and publishes a release for that tag.
+name: Build iOS
+
+on:
+  workflow_dispatch:
+    inputs:
+      configuration:
+        description: Build configuration
+        type: choice
+        options: [Release, Debug]
+        default: Release
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-ios-${{ github.ref }}-${{ inputs.configuration || 'Release' }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    env:
+      CONFIGURATION: ${{ inputs.configuration || 'Release' }}
+      APP_NAME: Homebase
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Generate native iOS project
+        run: npx expo prebuild --platform ios --clean
+
+      - name: Build app (unsigned)
+        run: |
+          xcodebuild \
+            -workspace "ios/$APP_NAME.xcworkspace" \
+            -scheme "$APP_NAME" \
+            -configuration "$CONFIGURATION" \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            -quiet \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Package .ipa
+        id: package
+        run: |
+          IPA="$APP_NAME-$CONFIGURATION.ipa"
+          mkdir Payload
+          cp -R "build/Build/Products/$CONFIGURATION-iphoneos/$APP_NAME.app" Payload/
+          zip -qry "$IPA" Payload
+          echo "ipa=$IPA" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.ipa }}
+          path: ${{ steps.package.outputs.ipa }}
+          retention-days: 14
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IPA: ${{ steps.package.outputs.ipa }}
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            gh release create "$GITHUB_REF_NAME" "$IPA" --title "$APP_NAME $GITHUB_REF_NAME" --generate-notes
+          else
+            TAG="latest-$(echo "$CONFIGURATION" | tr '[:upper:]' '[:lower:]')"
+            gh release delete "$TAG" --yes --cleanup-tag || true
+            gh release create "$TAG" "$IPA" --prerelease --target "$GITHUB_SHA" \
+              --title "$APP_NAME $CONFIGURATION (latest)" \
+              --notes "Built from ${GITHUB_SHA::7}. Download the .ipa on your iPhone and open it with SideStore."
+          fi
