@@ -1259,6 +1259,9 @@ const ARR_DIR = process.env.ARR_DIR ?? path.join(os.homedir(), '.local/share/arr
 const xmlApiKey = async (app) =>
   /<ApiKey>([^<]+)<\/ApiKey>/.exec(await readFile(path.join(ARR_DIR, app, 'config.xml'), 'utf8'))?.[1];
 
+/** The only Sonarr/Radarr commands the phone may start: fixing downloads stuck on import. */
+const ARR_COMMANDS = new Set(['ManualImport', 'RefreshMonitoredDownloads']);
+
 const ARR_APPS = {
   seerr: {
     label: 'Seerr',
@@ -1271,8 +1274,8 @@ const ARR_APPS = {
     base: 'http://localhost:8989/api/v3',
     key: () => xmlApiKey('sonarr'),
     routes: {
-      GET: /^(queue|calendar|release|series|series\/\d+|episodefile|qualityprofile|diskspace)$/,
-      POST: /^release$/,
+      GET: /^(queue|calendar|release|series|series\/\d+|episodefile|qualityprofile|diskspace|manualimport)$/,
+      POST: /^(release|command)$/,
       PUT: /^series\/\d+$/,
       DELETE: /^(queue\/\d+|series\/\d+|episodefile\/bulk)$/,
     },
@@ -1282,8 +1285,8 @@ const ARR_APPS = {
     base: 'http://localhost:7878/api/v3',
     key: () => xmlApiKey('radarr'),
     routes: {
-      GET: /^(queue|calendar|release|movie|movie\/\d+|qualityprofile)$/,
-      POST: /^release$/,
+      GET: /^(queue|calendar|release|movie|movie\/\d+|qualityprofile|manualimport)$/,
+      POST: /^(release|command)$/,
       DELETE: /^(queue\/\d+|movie\/\d+)$/,
     },
   },
@@ -1352,13 +1355,21 @@ async function proxyArr(req, res, appName, apiPath, search) {
   const key = await app.key().catch(() => undefined);
   if (!key) throw new HttpError(503, `${appName} isn't set up on the server`);
   if (req.method !== 'GET') log(req, `${req.method} ${appName}/${apiPath}`);
+  const body = req.method === 'GET' ? undefined : await readBody(req);
+  if (apiPath === 'command') {
+    let name;
+    try {
+      name = JSON.parse(body?.toString() ?? '').name;
+    } catch {}
+    if (!ARR_COMMANDS.has(name)) throw new HttpError(403, `The ${name ?? 'unnamed'} command isn't allowed`);
+  }
 
   let upstream;
   try {
     upstream = await fetch(`${app.base}/${apiPath}${search}`, {
       method: req.method,
       headers: { 'X-Api-Key': key, 'Content-Type': 'application/json' },
-      body: req.method === 'GET' ? undefined : await readBody(req),
+      body,
       signal: AbortSignal.timeout(ARR_TIMEOUT_MS),
     });
   } catch (e) {

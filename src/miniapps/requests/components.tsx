@@ -130,6 +130,7 @@ const DOWNLOAD_STATE_LABELS: Record<Download['state'], string> = {
   queued: 'Queued',
   paused: 'Paused',
   importing: 'Importing',
+  blocked: "Can't import",
   stalled: 'Stalled',
   warning: 'Needs attention',
   failed: 'Failed',
@@ -139,7 +140,7 @@ const DOWNLOAD_STATE_LABELS: Record<Download['state'], string> = {
 export function DownloadRow({ download, first, onPress }: { download: Download; first: boolean; onPress: () => void }) {
   const theme = useTheme();
   const done = download.size ? 1 - download.sizeLeft / download.size : 0;
-  const trouble = download.state === 'failed' || download.state === 'warning' || download.state === 'stalled';
+  const trouble = ['failed', 'warning', 'stalled', 'blocked'].includes(download.state);
   const color = download.state === 'failed' ? theme.danger : trouble ? StatusColors.warn : StatusColors.good;
   const left = download.state === 'downloading' ? formatTimeLeft(download.timeLeft) : undefined;
   const line = [

@@ -10,8 +10,10 @@ import { useTheme } from '@/hooks/use-theme';
 import { Centered, SectionTitle, usePosterGrid, useRowCardWidth } from '@/miniapps/jellyfin/components';
 import { useAsync } from '@/miniapps/jellyfin/use-async';
 import {
+  checkDownloads,
   details,
   downloads,
+  importAnyway,
   recentRequests,
   removeDownload,
   search,
@@ -123,29 +125,61 @@ function Overview({ conn }: { conn: Connection }) {
   );
 
   const showActions = (d: Download) => {
-    const options = [d.tmdbId ? 'Open title' : undefined, 'Remove', 'Remove and find another'].filter(
-      (o): o is string => !!o,
-    );
+    const finished = d.state === 'blocked' || d.state === 'importing';
+    const options = [
+      d.state === 'blocked' ? 'Import anyway' : undefined,
+      finished ? 'Check again' : undefined,
+      d.tmdbId ? 'Open title' : undefined,
+      'Remove',
+      'Remove and find another',
+      d.arrId !== undefined ? 'Remove and choose a release' : undefined,
+    ].filter((o): o is string => !!o);
+    const removals = ['Remove', 'Remove and find another', 'Remove and choose a release'];
     ActionSheetIOS.showActionSheetWithOptions(
       {
         title: d.title,
-        message: d.release,
+        message: [d.release, d.problem].filter(Boolean).join('\n\n'),
         options: [...options, 'Cancel'],
         cancelButtonIndex: options.length,
-        destructiveButtonIndex: [options.indexOf('Remove'), options.indexOf('Remove and find another')],
+        destructiveButtonIndex: removals.map((r) => options.indexOf(r)).filter((i) => i >= 0),
       },
       async (index) => {
         const choice = options[index];
+        if (!choice) return;
         if (choice === 'Open title' && d.tmdbId) {
           router.push(titleHref(d.arr === 'sonarr' ? 'tv' : 'movie', d.tmdbId));
           return;
         }
-        if (!choice) return;
         try {
-          // Blocklisting the release makes Sonarr or Radarr search for a different one.
-          await removeDownload(conn, d, choice === 'Remove and find another');
+          if (choice === 'Import anyway') {
+            const { imported, skipped } = await importAnyway(conn, d);
+            Alert.alert(
+              'Importing',
+              `${imported} file${imported === 1 ? '' : 's'} sent to ${d.arr === 'sonarr' ? 'Sonarr' : 'Radarr'}.` +
+                (skipped ? ` ${skipped} skipped (samples, extras or not an upgrade).` : ''),
+            );
+          } else if (choice === 'Check again') {
+            await checkDownloads(conn, d.arr);
+          } else if (choice === 'Remove and choose a release' && d.arrId !== undefined) {
+            // Blocklist it so it isn't offered again, but don't let Sonarr or Radarr grab a
+            // replacement on their own while we're choosing.
+            await removeDownload(conn, d, true, false);
+            router.push({
+              pathname: '/requests/releases',
+              params: {
+                app: d.arr,
+                id: String(d.arrId),
+                title: d.title,
+                ...(d.arr === 'sonarr' && d.seasonNumber !== undefined ? { season: String(d.seasonNumber) } : {}),
+              },
+            });
+          } else {
+            // Blocklisting the release makes Sonarr or Radarr search for a different one.
+            await removeDownload(conn, d, choice === 'Remove and find another');
+          }
         } catch (e) {
-          Alert.alert(`Couldn't remove ${d.title}`, e instanceof Error ? e.message : String(e));
+          const failed = choice === 'Import anyway' ? 'import' : choice === 'Check again' ? 'check' : 'remove';
+          Alert.alert(`Couldn't ${failed} ${d.title}`, e instanceof Error ? e.message : String(e));
         }
         await queue.refresh();
       },

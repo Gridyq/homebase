@@ -123,6 +123,8 @@ type ArrImage = { coverType: string; remoteUrl?: string };
 
 type QueueRecord = {
   id: number;
+  seriesId?: number;
+  movieId?: number;
   downloadId?: string;
   title: string;
   size: number;
@@ -146,6 +148,12 @@ export type Download = {
   arr: Arr;
   /** Queue record ids it covers, for removing it. */
   queueIds: number[];
+  /** The download client's id for it (the torrent hash), for importing it by hand. */
+  downloadId?: string;
+  /** Sonarr series id or Radarr movie id, for finding another release. */
+  arrId?: number;
+  /** The season it's for, or the first one when it spans several. */
+  seasonNumber?: number;
   title: string;
   /** "Season 3", "S03E04", or the year for a movie. */
   subtitle: string;
@@ -155,7 +163,8 @@ export type Download = {
   size: number;
   sizeLeft: number;
   timeLeft?: string;
-  state: 'downloading' | 'queued' | 'paused' | 'importing' | 'stalled' | 'warning' | 'failed' | 'completed';
+  /** `blocked`: finished, but Sonarr or Radarr won't import it without being told to. */
+  state: 'downloading' | 'queued' | 'paused' | 'importing' | 'blocked' | 'stalled' | 'warning' | 'failed' | 'completed';
   problem?: string;
 };
 
@@ -164,6 +173,7 @@ const pad = (n: number) => String(n).padStart(2, '0');
 
 function downloadState(r: QueueRecord): Download['state'] {
   if (r.trackedDownloadStatus === 'error' || r.status === 'failed') return 'failed';
+  if (r.trackedDownloadState === 'importBlocked') return 'blocked';
   if (r.trackedDownloadState === 'importPending' || r.trackedDownloadState === 'importing') return 'importing';
   if (r.trackedDownloadState === 'imported') return 'completed';
   if (r.trackedDownloadStatus === 'warning') return r.status === 'warning' ? 'stalled' : 'warning';
@@ -200,6 +210,9 @@ async function queueOf(conn: Connection, app: Arr) {
       key,
       arr: app,
       queueIds: records.map((x) => x.id),
+      downloadId: r.downloadId,
+      arrId: r.seriesId ?? r.movieId ?? r.series?.id ?? r.movie?.id,
+      seasonNumber: seasons[0] ?? r.seasonNumber,
       title: r.series?.title ?? r.movie?.title ?? r.title,
       subtitle,
       release: r.title,
@@ -221,12 +234,84 @@ export async function downloads(conn: Connection) {
   return results.flatMap((r) => (r.status === 'fulfilled' ? r.value : []));
 }
 
-/** Remove a download, optionally blocklisting the release so it isn't picked again. */
-export async function removeDownload(conn: Connection, download: Download, blocklist: boolean) {
-  const query = `removeFromClient=true&blocklist=${blocklist}&skipRedownload=false`;
+/**
+ * Remove a download, optionally blocklisting the release so it isn't picked again. A blocklisted
+ * release makes Sonarr or Radarr search for another, unless `searchAgain` is false (for picking
+ * one by hand instead).
+ */
+export async function removeDownload(conn: Connection, download: Download, blocklist: boolean, searchAgain = true) {
+  const query = `removeFromClient=true&blocklist=${blocklist}&skipRedownload=${!searchAgain}`;
   for (const id of download.queueIds) {
     await arr(conn, `${download.arr}/queue/${id}?${query}`, { method: 'DELETE' });
   }
+}
+
+/** Have Sonarr or Radarr look at finished downloads again now, instead of on their next round. */
+export function checkDownloads(conn: Connection, app: Arr) {
+  return arr(conn, `${app}/command`, { method: 'POST', body: JSON.stringify({ name: 'RefreshMonitoredDownloads' }) });
+}
+
+type ManualImportItem = {
+  path: string;
+  folderName?: string;
+  series?: { id: number };
+  episodes?: { id: number }[];
+  movie?: { id: number };
+  quality: unknown;
+  languages: unknown;
+  releaseGroup?: string;
+  indexerFlags?: number;
+  releaseType?: string;
+  rejections?: { reason: string; type: 'permanent' | 'temporary' }[];
+};
+
+/** Rejections that block an automatic import but are fine to override by hand. */
+const OVERRIDABLE = /unable to determine if file is a sample/i;
+
+/**
+ * Import a finished download that Sonarr or Radarr held back (often because the release name
+ * didn't match the title it was grabbed for), the way Manual Import does. Files they matched to a
+ * show and episodes, or a movie, go in; samples, files that aren't an upgrade and the like are
+ * skipped. Returns how many files were sent.
+ */
+export async function importAnyway(conn: Connection, download: Download) {
+  if (!download.downloadId) throw new Error("This download can't be imported by hand.");
+  const items = await arr<ManualImportItem[]>(
+    conn,
+    `${download.arr}/manualimport?downloadId=${encodeURIComponent(download.downloadId)}&filterExistingFiles=true`,
+  );
+  const importable = items.filter(
+    (i) =>
+      (download.arr === 'sonarr' ? i.series && i.episodes?.length : i.movie) &&
+      !i.rejections?.some((r) => r.type === 'permanent' && !OVERRIDABLE.test(r.reason)),
+  );
+  if (!importable.length) {
+    const reasons = [...new Set(items.flatMap((i) => i.rejections?.map((r) => r.reason) ?? []))];
+    throw new Error(
+      reasons.length
+        ? `Nothing in it can be imported: ${reasons.slice(0, 2).join('; ')}.`
+        : items.length
+          ? "Couldn't tell which episodes or movie the files are."
+          : 'No video files found in the download.',
+    );
+  }
+  const files = importable.map((i) => ({
+    path: i.path,
+    folderName: i.folderName,
+    quality: i.quality,
+    languages: i.languages,
+    releaseGroup: i.releaseGroup,
+    indexerFlags: i.indexerFlags ?? 0,
+    downloadId: download.downloadId,
+    ...(download.arr === 'sonarr'
+      ? { seriesId: i.series!.id, episodeIds: i.episodes!.map((e) => e.id), releaseType: i.releaseType }
+      : { movieId: i.movie!.id }),
+  }));
+  await arr(conn, `${download.arr}/command`, {
+    method: 'POST',
+    body: JSON.stringify({ name: 'ManualImport', importMode: 'auto', files }),
+  });
+  return { imported: files.length, skipped: items.length - files.length };
 }
 
 export type Upcoming = {
