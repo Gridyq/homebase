@@ -2,7 +2,7 @@
   "expo": {
     "name": "Homebase",
     "slug": "homebase",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "orientation": "default",
     "icon": "./assets/images/icon.png",
     "scheme": "homebase",
@@ -50,7 +50,26 @@
           "supportsPictureInPicture": true
         }
       ],
-      "expo-secure-store"
+      "expo-secure-store",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Homebase uses the camera in mini-apps that scan or take photos.",
+          "microphonePermission": "Homebase uses the microphone when a mini-app records video."
+        }
+      ],
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "Homebase uses your location in mini-apps that need it."
+        }
+      ],
+      [
+        "expo-notifications",
+        {
+          "enableRemoteNotifications": false
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true,
