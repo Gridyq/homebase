@@ -54,14 +54,20 @@ export function normalizeUrl(input: string) {
   return url;
 }
 
-async function request<T>(conn: Connection, path: string, init?: RequestInit): Promise<T> {
+/** Calls the status server. Also used by the Requests mini-app, whose calls go through it. */
+export async function request<T>(
+  conn: Connection,
+  path: string,
+  init?: RequestInit & { timeoutMs?: number },
+): Promise<T> {
+  const { timeoutMs = TIMEOUT_MS, ...rest } = init ?? {};
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   let res: Response;
   try {
     res = await fetch(`${conn.url}${path}`, {
-      ...init,
-      headers: { Authorization: `Bearer ${conn.token}` },
+      ...rest,
+      headers: { Authorization: `Bearer ${conn.token}`, ...(rest.body ? { 'Content-Type': 'application/json' } : {}) },
       signal: controller.signal,
     });
   } catch (e) {

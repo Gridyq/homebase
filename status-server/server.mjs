@@ -2,7 +2,8 @@
 /**
  * Status server for Homebase's Server mini-app: system stats, services and containers, and
  * start/stop/restart for them. Also watches for problems and reports them through ntfy, since
- * the app can't get push notifications. No dependencies beyond Node.js.
+ * the app can't get push notifications, and passes the Requests mini-app's calls on to Seerr,
+ * Sonarr and Radarr. No dependencies beyond Node.js.
  *
  * Every request needs `Authorization: Bearer <token>`. The token lives in `token` next to this
  * file and is created on first start. `node server.mjs pair` sends a link to the phone through
@@ -413,6 +414,79 @@ async function watch() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Media requests: the Requests mini-app talks to Seerr, Sonarr and Radarr through here, so their
+// API keys stay on this machine. Keys are read from each app's own config on every call, so a
+// rotated key just works. Only the calls the app makes are let through.
+
+const ARR_DIR = process.env.ARR_DIR ?? path.join(os.homedir(), '.local/share/arr');
+const xmlApiKey = async (app) =>
+  /<ApiKey>([^<]+)<\/ApiKey>/.exec(await readFile(path.join(ARR_DIR, app, 'config.xml'), 'utf8'))?.[1];
+
+const ARR_APPS = {
+  seerr: {
+    base: 'http://localhost:5055/api/v1',
+    key: async () => JSON.parse(await readFile(path.join(ARR_DIR, 'seerr', 'settings.json'), 'utf8')).main?.apiKey,
+    routes: { GET: /^(search|movie\/\d+|tv\/\d+|request)$/, POST: /^request$/ },
+  },
+  sonarr: {
+    base: 'http://localhost:8989/api/v3',
+    key: () => xmlApiKey('sonarr'),
+    routes: { GET: /^(queue|calendar|release|series\/\d+)$/, POST: /^release$/, DELETE: /^queue\/\d+$/ },
+  },
+  radarr: {
+    base: 'http://localhost:7878/api/v3',
+    key: () => xmlApiKey('radarr'),
+    routes: { GET: /^(queue|calendar|release|movie\/\d+)$/, POST: /^release$/, DELETE: /^queue\/\d+$/ },
+  },
+};
+
+/** A release search asks every indexer, some through FlareSolverr, so it can take a while. */
+const ARR_TIMEOUT_MS = 180_000;
+const MAX_BODY = 64 * 1024;
+
+async function readBody(req) {
+  let size = 0;
+  const chunks = [];
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > MAX_BODY) throw new HttpError(413, 'Request body too large');
+    chunks.push(chunk);
+  }
+  return chunks.length ? Buffer.concat(chunks) : undefined;
+}
+
+async function proxyArr(req, res, appName, apiPath, search) {
+  const app = ARR_APPS[appName];
+  if (!app?.routes[req.method]?.test(apiPath)) throw new HttpError(404, 'Not found');
+  const key = await app.key().catch(() => undefined);
+  if (!key) throw new HttpError(503, `${appName} isn't set up on the server`);
+  if (req.method !== 'GET') log(req, `${req.method} ${appName}/${apiPath}`);
+
+  let upstream;
+  try {
+    upstream = await fetch(`${app.base}/${apiPath}${search}`, {
+      method: req.method,
+      headers: { 'X-Api-Key': key, 'Content-Type': 'application/json' },
+      body: req.method === 'GET' ? undefined : await readBody(req),
+      signal: AbortSignal.timeout(ARR_TIMEOUT_MS),
+    });
+  } catch (e) {
+    throw new HttpError(502, `${appName} didn't answer (${e.name === 'TimeoutError' ? 'timed out' : e.message})`);
+  }
+  const text = await upstream.text();
+  if (!upstream.ok) {
+    // Seerr and the *arrs put the reason in `message`, or in a list of validation failures.
+    let message;
+    try {
+      const body = JSON.parse(text);
+      message = body.message ?? (Array.isArray(body) ? body.map((f) => f.errorMessage).filter(Boolean).join(' ') : undefined);
+    } catch {}
+    throw new HttpError(upstream.status, message || `${appName} answered ${upstream.status}`);
+  }
+  res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }).end(text || 'null');
+}
+
+// ---------------------------------------------------------------------------------------------
 // HTTP
 
 class HttpError extends Error {
@@ -444,6 +518,10 @@ async function handle(req, res) {
     await performAction(id, match[2]);
     return sendJson(res, 200, { ok: true });
   }
+
+  const arr = /^\/api\/arr\/(\w+)\/(.+)$/.exec(url.pathname);
+  if (arr) return proxyArr(req, res, arr[1], arr[2], url.search);
+
   sendJson(res, 404, { error: 'Not found' });
 }
 

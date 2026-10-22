@@ -47,4 +47,12 @@ export const miniApps: MiniApp[] = [
     color: '#12A594',
     href: '/server',
   },
+  {
+    id: 'requests',
+    name: 'Requests',
+    description: 'Find movies and shows, and follow their downloads',
+    glyph: '↓',
+    color: '#E5484D',
+    href: '/requests',
+  },
 ];
