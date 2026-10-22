@@ -23,15 +23,15 @@ import {
   yearOf,
   type Download,
 } from '@/miniapps/requests/api';
-import { DownloadRow, formatSpeed, SpeedLimitRow, TitleCard, titleHref, UpcomingRow } from '@/miniapps/requests/components';
+import { DownloadRow, SpeedLimitRow, TitleCard, titleHref, UpcomingRow } from '@/miniapps/requests/components';
 import type { Connection } from '@/miniapps/server/api';
 import { Card } from '@/miniapps/server/components';
 import { useServerConnection } from '@/miniapps/server/connection';
 import { usePolling } from '@/miniapps/server/use-polling';
 
 const QUEUE_POLL_MS = 5000;
-/** Download limits to pick from, in bytes per second. 0 is no limit. */
-const SPEED_LIMITS = [0, 1e6, 2e6, 5e6, 10e6, 20e6, 50e6];
+/** Download limits to pick from, in megabits per second to match the Server app. 0 is no limit. */
+const SPEED_LIMITS_MBPS = [0, 10, 25, 50, 100, 200];
 
 export default function RequestsHome() {
   const { connection } = useServerConnection();
@@ -138,7 +138,7 @@ function Overview({ conn }: { conn: Connection }) {
   };
 
   const pickSpeedLimit = (current: number) => {
-    const labels = SPEED_LIMITS.map((l) => (l ? formatSpeed(l) : 'No limit'));
+    const labels = SPEED_LIMITS_MBPS.map((l) => (l ? `${l} Mb/s` : 'No limit'));
     ActionSheetIOS.showActionSheetWithOptions(
       {
         title: 'Download speed limit',
@@ -147,9 +147,11 @@ function Overview({ conn }: { conn: Connection }) {
         cancelButtonIndex: labels.length,
       },
       async (index) => {
-        const next = SPEED_LIMITS[index];
+        const mbps = SPEED_LIMITS_MBPS[index];
+        if (mbps === undefined) return;
+        const next = mbps * 125_000; // qBittorrent wants bytes per second
         // qBittorrent keeps limits in whole KiB, so a pick comes back a little under.
-        if (next === undefined || Math.abs(next - current) < 1024) return;
+        if (Math.abs(next - current) < 1024) return;
         try {
           await setSpeedLimit(conn, next);
         } catch (e) {
