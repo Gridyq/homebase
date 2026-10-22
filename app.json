@@ -13,8 +13,7 @@
       "supportsTablet": false,
       "infoPlist": {
         "NSAppTransportSecurity": {
-          "NSAllowsArbitraryLoads": true,
-          "NSAllowsLocalNetworking": true
+          "NSAllowsArbitraryLoads": true
         },
         "NSLocalNetworkUsageDescription": "Homebase connects to media servers on your local network.",
         "ITSAppUsesNonExemptEncryption": false
