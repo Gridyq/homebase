@@ -3,8 +3,9 @@ import * as SecureStore from 'expo-secure-store';
 import { createContext, use, useEffect, useMemo, useState, type ReactNode } from 'react';
 
 import { createClient, signIn as apiSignIn, type JellyfinClient, type Session } from './api';
+import { clearLastPlayed } from './last-played';
 
-const SESSION_KEY = 'jellyfin.session';
+export const SESSION_KEY = 'jellyfin.session';
 const DEVICE_ID_KEY = 'jellyfin.deviceId';
 
 type SessionState = {
@@ -50,6 +51,7 @@ export function JellyfinSessionProvider({ children }: { children: ReactNode }) {
       signOut: async () => {
         await client?.signOut();
         await SecureStore.deleteItemAsync(SESSION_KEY);
+        clearLastPlayed();
         setSession(null);
       },
     }),

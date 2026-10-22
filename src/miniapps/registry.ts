@@ -1,4 +1,7 @@
-import type { Href } from 'expo-router';
+import type { Href, Link } from 'expo-router';
+import type { ComponentProps } from 'react';
+
+import { jellyfinShortcuts } from './jellyfin/last-played';
 
 /**
  * Every mini-app bundled in the shell. To add one:
@@ -14,6 +17,16 @@ export type MiniApp = {
   glyph: string;
   color: string;
   href: Href;
+  /** Extra entries for the tile's long-press menu, worked out each time the launcher shows. */
+  shortcuts?: () => Promise<Shortcut[]>;
+};
+
+export type Shortcut = {
+  title: string;
+  subtitle?: string;
+  /** SF Symbol name. */
+  icon: NonNullable<ComponentProps<typeof Link.MenuAction>['icon']>;
+  href: Href;
 };
 
 export const miniApps: MiniApp[] = [
@@ -24,5 +37,6 @@ export const miniApps: MiniApp[] = [
     glyph: '▶',
     color: '#7B4FD6',
     href: '/jellyfin',
+    shortcuts: jellyfinShortcuts,
   },
 ];

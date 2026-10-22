@@ -1,12 +1,12 @@
 import { useState } from 'react';
 import { KeyboardAvoidingView, ScrollView, StyleSheet, TextInput } from 'react-native';
 
+import { Button } from '@/components/button';
 import { ThemedText } from '@/components/themed-text';
 import { Spacing } from '@/constants/theme';
 import { useGutter } from '@/hooks/use-gutter';
 import { useTheme } from '@/hooks/use-theme';
 import { normalizeServerUrl } from '@/miniapps/jellyfin/api';
-import { Button } from '@/miniapps/jellyfin/components';
 import { useJellyfinSession } from '@/miniapps/jellyfin/session';
 
 export default function Login() {

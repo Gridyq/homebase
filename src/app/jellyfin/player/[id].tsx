@@ -6,10 +6,12 @@ import { useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Pressable, StyleSheet, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { Button } from '@/components/button';
 import { ThemedText } from '@/components/themed-text';
 import { Spacing } from '@/constants/theme';
 import { TICKS_PER_SECOND, type BaseItem, type JellyfinClient } from '@/miniapps/jellyfin/api';
-import { Button, episodeLabel } from '@/miniapps/jellyfin/components';
+import { episodeLabel } from '@/miniapps/jellyfin/components';
+import { clearLastPlayed, saveLastPlayed } from '@/miniapps/jellyfin/last-played';
 import { useJellyfin } from '@/miniapps/jellyfin/session';
 import { currentMaxBitrate, useJellyfinSettings } from '@/miniapps/jellyfin/settings';
 import { subtitleIndexForLanguage, subtitleLanguage } from '@/miniapps/jellyfin/subtitles';
@@ -84,6 +86,7 @@ function Player({
   const started = useRef(false);
   const position = useRef(startSeconds);
   const inPictureInPicture = useRef(false);
+  const finished = useRef(false);
   /** Set when playback ends and we close or show Up next ourselves, so leaving fullscreen doesn't close. */
   const keepOpen = useRef(false);
 
@@ -144,6 +147,7 @@ function Player({
 
   useEventListener(player, 'playToEnd', () => {
     position.current = player.duration;
+    finished.current = true;
     keepOpen.current = true;
     if (!next) {
       router.back();
@@ -162,10 +166,16 @@ function Player({
     });
   };
 
-  // Tell the server where we stopped so "Continue watching" is up to date.
+  // Tell the server where we stopped so "Continue watching" is up to date, and remember it for the
+  // launcher's Resume shortcut (or the next episode, once this one is done).
   useEffect(() => {
     return () => {
-      if (started.current) report('stopped');
+      if (!started.current) return;
+      report('stopped');
+      const lang = subtitleLanguage(item, playback.subtitleIndex);
+      if (!finished.current) saveLastPlayed(item, position.current, lang);
+      else if (next) saveLastPlayed(next, 0, lang);
+      else clearLastPlayed();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

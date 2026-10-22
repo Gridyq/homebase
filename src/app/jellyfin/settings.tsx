@@ -1,10 +1,11 @@
 import { Alert, ScrollView, StyleSheet, View } from 'react-native';
 
+import { Button } from '@/components/button';
 import { ThemedText } from '@/components/themed-text';
 import { Spacing } from '@/constants/theme';
 import { useGutter } from '@/hooks/use-gutter';
 import { useTheme } from '@/hooks/use-theme';
-import { Button, Chip } from '@/miniapps/jellyfin/components';
+import { Chip } from '@/miniapps/jellyfin/components';
 import { useJellyfin, useJellyfinSession } from '@/miniapps/jellyfin/session';
 import { BITRATE_OPTIONS, useJellyfinSettings } from '@/miniapps/jellyfin/settings';
 

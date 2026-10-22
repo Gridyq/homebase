@@ -2,6 +2,7 @@ import { Image } from 'expo-image';
 import { router } from 'expo-router';
 import { ActivityIndicator, FlatList, PixelRatio, Pressable, StyleSheet, useWindowDimensions, View } from 'react-native';
 
+import { Button } from '@/components/button';
 import { ThemedText } from '@/components/themed-text';
 import { Spacing } from '@/constants/theme';
 import { useGutter } from '@/hooks/use-gutter';
@@ -166,35 +167,6 @@ export function Centered({ loading, error, onRetry }: { loading?: boolean; error
   );
 }
 
-export function Button({
-  title,
-  onPress,
-  disabled,
-  variant = 'primary',
-}: {
-  title: string;
-  onPress: () => void;
-  disabled?: boolean;
-  variant?: 'primary' | 'secondary';
-}) {
-  const theme = useTheme();
-  const primary = variant === 'primary';
-  return (
-    <Pressable
-      onPress={onPress}
-      disabled={disabled}
-      style={({ pressed }) => [
-        styles.button,
-        {
-          backgroundColor: primary ? theme.accent : theme.backgroundElement,
-          opacity: disabled ? 0.5 : pressed ? 0.7 : 1,
-        },
-      ]}>
-      <ThemedText style={[styles.buttonText, { color: primary ? '#fff' : theme.text }]}>{title}</ThemedText>
-    </Pressable>
-  );
-}
-
 export function Chip({ label, selected, onPress }: { label: string; selected: boolean; onPress: () => void }) {
   const theme = useTheme();
   return (
@@ -257,14 +229,5 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     paddingHorizontal: Spacing.three,
     borderRadius: 999,
-  },
-  button: {
-    paddingVertical: 14,
-    paddingHorizontal: Spacing.four,
-    borderRadius: 12,
-    alignItems: 'center',
-  },
-  buttonText: {
-    fontWeight: 600,
   },
 });

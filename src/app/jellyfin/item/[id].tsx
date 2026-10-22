@@ -4,13 +4,13 @@ import * as WebBrowser from 'expo-web-browser';
 import { useCallback, useRef, useState } from 'react';
 import { Alert, FlatList, Pressable, ScrollView, StyleSheet, useWindowDimensions, View } from 'react-native';
 
+import { Button } from '@/components/button';
 import { ThemedText } from '@/components/themed-text';
 import { Spacing } from '@/constants/theme';
 import { useGutter } from '@/hooks/use-gutter';
 import { useTheme } from '@/hooks/use-theme';
 import { TICKS_PER_SECOND, type BaseItem, type Person, type UserData } from '@/miniapps/jellyfin/api';
 import {
-  Button,
   Centered,
   Chip,
   formatRuntime,
