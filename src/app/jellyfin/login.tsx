@@ -18,6 +18,8 @@ export default function Login() {
   const [error, setError] = useState<string>();
 
   const submit = async () => {
+    if (!server.trim()) return setError('Enter your server address.');
+    if (!username.trim()) return setError('Enter your username.');
     setBusy(true);
     setError(undefined);
     try {
@@ -71,7 +73,7 @@ export default function Login() {
           onSubmitEditing={submit}
         />
         {error ? <ThemedText style={{ color: theme.danger }}>{error}</ThemedText> : null}
-        <Button title={busy ? 'Signing in…' : 'Sign in'} onPress={submit} disabled={busy || !server || !username} />
+        <Button title={busy ? 'Signing in…' : 'Sign in'} onPress={submit} disabled={busy} />
       </ScrollView>
     </KeyboardAvoidingView>
   );
