@@ -54,3 +54,4 @@ example
 /status-server/history.json
 /status-server/history.json.tmp
 /status-server/game-mode.json
+/status-server/videos.json

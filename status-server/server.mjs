@@ -5,7 +5,8 @@
  * the app can't get push notifications. Stops the download stack while a game runs (game mode)
  * and runs Seerr only while it's used. Passes the Requests mini-app's calls on to Seerr, Sonarr
  * and Radarr, and qBittorrent's speed limit and seeding. Takes files, text and links from the
- * Drop mini-app, and hands back the files in its folder. No dependencies beyond Node.js.
+ * Drop mini-app, and hands back the files in its folder. Saves web videos into Jellyfin with
+ * yt-dlp for the Videos mini-app. No dependencies beyond Node.js (and yt-dlp for videos).
  *
  * It also keeps a day of history (CPU, memory, network, and each service's memory and CPU) in
  * `history.json`, and can list the processes and cgroups using the most memory and CPU.
@@ -21,7 +22,7 @@
 import { execFile, spawn } from 'node:child_process';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { constants, createWriteStream } from 'node:fs';
-import { link, mkdir, open, readdir, readFile, readlink, realpath, rename, stat, statfs, unlink, writeFile } from 'node:fs/promises';
+import { link, mkdir, open, readdir, readFile, readlink, realpath, rename, rm, stat, statfs, unlink, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
@@ -1081,11 +1082,11 @@ function historyFor(rangeSec, serviceId) {
 // ---------------------------------------------------------------------------------------------
 // Watching: send ntfy messages when a problem starts and when it clears.
 
-async function notify(title, message, tags) {
+async function notify(title, message, tags, click = 'homebase://server') {
   try {
     const res = await fetch(NTFY_URL, {
       method: 'POST',
-      headers: { Title: title, Tags: tags, Click: 'homebase://server' },
+      headers: { Title: title, Tags: tags, Click: click },
       body: message,
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -1623,6 +1624,244 @@ async function receiveDropText(text) {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Videos: links from the Videos mini-app are saved by yt-dlp into Jellyfin's YouTube library,
+// one folder per channel, one download at a time. Jellyfin watches the folder, and reads the
+// title, description and thumbnail that yt-dlp embeds in the file. h264 and AAC in mp4 play on
+// the phone without transcoding.
+
+const YTDLP = process.env.YTDLP ?? path.join(os.homedir(), '.local', 'bin', 'yt-dlp');
+const VIDEO_DIR = process.env.VIDEO_DIR ?? '/mnt/media/YouTube';
+/** Outside the library so Jellyfin doesn't pick up half-downloaded pieces, but on the same drive. */
+const VIDEO_PARTIAL_DIR = path.join(path.dirname(VIDEO_DIR), '.youtube-partial');
+const VIDEO_JOBS_PATH = path.join(ROOT, 'videos.json');
+/** Jellyfin runs in a container that sees the media drive somewhere else. */
+const JELLYFIN_URL = 'http://127.0.0.1:8096';
+const JELLYFIN_MEDIA = { host: '/mnt/media', container: '/media/drive' };
+const VIDEO_KEEP = 50;
+const VIDEO_QUALITIES = new Set([1080, 720, 480]);
+/** YouTube changes often enough that yt-dlp needs updating every few weeks to keep working. */
+const YTDLP_UPDATE_EVERY_MS = 24 * 3600_000;
+
+let videoJobs = [];
+let videoRunning; // { job, child }
+let ytdlpUpdatedAt = 0;
+
+async function loadVideoJobs() {
+  videoJobs = await readFile(VIDEO_JOBS_PATH, 'utf8').then(JSON.parse, () => []);
+  // Downloads cut short by a restart start over; yt-dlp picks up the pieces it already has.
+  for (const job of videoJobs) if (job.state === 'downloading') Object.assign(job, { state: 'queued', progress: undefined });
+  nextVideo();
+}
+
+function saveVideoJobs() {
+  const keep = videoJobs.slice(0, VIDEO_KEEP);
+  videoJobs = keep;
+  writeFile(VIDEO_JOBS_PATH, JSON.stringify(keep)).catch((e) => console.error("Couldn't save video jobs:", e.message));
+}
+
+function videoJobsState() {
+  return { jobs: videoJobs, folder: VIDEO_DIR };
+}
+
+function addVideo({ url, quality = 1080 } = {}) {
+  let parsed;
+  try {
+    parsed = new URL(String(url).trim());
+  } catch {}
+  if (!parsed || !/^https?:$/.test(parsed.protocol)) throw new HttpError(400, 'That isn’t a link');
+  if (!VIDEO_QUALITIES.has(quality)) throw new HttpError(400, 'Quality must be 1080, 720 or 480');
+  const job = { id: randomBytes(6).toString('hex'), url: parsed.href, quality, state: 'queued', createdAt: Date.now(), files: [] };
+  videoJobs.unshift(job);
+  saveVideoJobs();
+  nextVideo();
+  return job;
+}
+
+function findVideo(id) {
+  const job = videoJobs.find((j) => j.id === id);
+  if (!job) throw new HttpError(404, 'No such download');
+  return job;
+}
+
+function retryVideo(id) {
+  const job = findVideo(id);
+  if (job.state !== 'failed' && job.state !== 'cancelled') throw new HttpError(409, 'Only failed or cancelled downloads can be retried');
+  Object.assign(job, { state: 'queued', error: undefined, note: undefined, progress: undefined, files: [] });
+  saveVideoJobs();
+  nextVideo();
+  return job;
+}
+
+/** Cancels it if it's running, and takes it off the list. The saved video stays in Jellyfin. */
+function removeVideo(id) {
+  const job = findVideo(id);
+  if (videoRunning?.job === job) {
+    job.state = 'cancelled';
+    videoRunning.child.kill('SIGTERM');
+  }
+  videoJobs = videoJobs.filter((j) => j !== job);
+  saveVideoJobs();
+  return { ok: true };
+}
+
+function cancelVideo(id) {
+  const job = findVideo(id);
+  if (job.state === 'queued') job.state = 'cancelled';
+  else if (videoRunning?.job === job) {
+    job.state = 'cancelled';
+    videoRunning.child.kill('SIGTERM');
+  }
+  saveVideoJobs();
+  return job;
+}
+
+async function updateYtdlp() {
+  if (videoRunning || Date.now() - ytdlpUpdatedAt < YTDLP_UPDATE_EVERY_MS) return;
+  ytdlpUpdatedAt = Date.now();
+  try {
+    const { stdout } = await run(YTDLP, ['-U'], { timeout: 120_000 });
+    const line = stdout.trim().split('\n').at(-1);
+    if (line) console.log(`yt-dlp: ${line}`);
+  } catch (e) {
+    console.error("Couldn't update yt-dlp:", e.stderr?.trim() || e.message);
+  }
+}
+
+/**
+ * Tells Jellyfin about new files rather than waiting for its folder watcher, which can take
+ * minutes. Borrows Seerr's API key for Jellyfin.
+ */
+async function announceToJellyfin(files) {
+  try {
+    const settings = JSON.parse(await readFile(path.join(ARR_DIR, 'seerr', 'settings.json'), 'utf8'));
+    const key = settings.jellyfin?.apiKey;
+    if (!key) throw new Error('no API key in Seerr settings');
+    const Updates = files.map((f) => ({
+      Path: path.join(VIDEO_DIR, f).replace(JELLYFIN_MEDIA.host, JELLYFIN_MEDIA.container),
+      UpdateType: 'Created',
+    }));
+    const res = await fetch(`${JELLYFIN_URL}/Library/Media/Updated`, {
+      method: 'POST',
+      headers: { Authorization: `MediaBrowser Token="${key}"`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ Updates }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  } catch (e) {
+    console.warn(`Couldn't tell Jellyfin about new videos: ${e.message}`);
+  }
+}
+
+function nextVideo() {
+  if (videoRunning) return;
+  const job = videoJobs.findLast((j) => j.state === 'queued');
+  if (job) downloadVideo(job);
+}
+
+/** Lines yt-dlp prints for the app to follow along, as JSON so titles with spaces survive. */
+const VIDEO_PRINTS = [
+  '--progress-template',
+  'download:PROGRESS %(progress.{downloaded_bytes,total_bytes,total_bytes_estimate,speed,eta})j',
+  '--print',
+  'before_dl:VIDEO %(.{id,title,uploader,channel,thumbnail,playlist_index,n_entries,playlist_title})j',
+  '--print',
+  'after_move:SAVED %(filepath)j',
+];
+
+function downloadVideo(job) {
+  const partial = path.join(VIDEO_PARTIAL_DIR, job.id);
+  const args = [
+    '--js-runtimes', 'node',
+    '-S', `res:${job.quality},vcodec:h264,acodec:aac`,
+    '--merge-output-format', 'mp4',
+    '--embed-metadata', '--embed-thumbnail', '--embed-chapters',
+    '--download-archive', path.join(VIDEO_DIR, '.downloaded.txt'),
+    '--no-overwrites', '--newline', '--no-colors', '--progress',
+    '-P', VIDEO_DIR, '-P', `temp:${partial}`,
+    '-o', '%(uploader,channel|Unknown channel)s/%(title).180B [%(id)s].%(ext)s',
+    ...VIDEO_PRINTS,
+    '--', job.url,
+  ];
+  Object.assign(job, { state: 'downloading', startedAt: Date.now(), error: undefined });
+  console.log(`Saving video ${job.url}`);
+  // The service's umask keeps files private, but Jellyfin's container reads them as another user.
+  const child = spawn('sh', ['-c', 'umask 022 && exec "$0" "$@"', YTDLP, ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
+  videoRunning = { job, child };
+  saveVideoJobs();
+
+  const errors = [];
+  const onLine = (line) => {
+    const space = line.indexOf(' ');
+    const kind = line.slice(0, space);
+    let value;
+    if (kind === 'PROGRESS' || kind === 'VIDEO' || kind === 'SAVED') {
+      try {
+        value = JSON.parse(line.slice(space + 1));
+      } catch {
+        return;
+      }
+    }
+    if (kind === 'PROGRESS') {
+      job.progress = {
+        bytes: value.downloaded_bytes ?? 0,
+        total: value.total_bytes ?? value.total_bytes_estimate ?? undefined,
+        speed: value.speed ?? undefined,
+        eta: value.eta ?? undefined,
+      };
+    } else if (kind === 'VIDEO') {
+      job.title = value.n_entries > 1 && value.playlist_title ? value.playlist_title : value.title;
+      job.channel = value.uploader ?? value.channel;
+      job.thumbnail ??= value.thumbnail;
+      job.item = value.n_entries > 1 ? { index: value.playlist_index, count: value.n_entries, title: value.title } : undefined;
+      job.progress = undefined;
+    } else if (kind === 'SAVED') {
+      job.files.push(path.relative(VIDEO_DIR, value));
+    } else if (line.startsWith('ERROR:')) {
+      errors.push(line.slice(6).trim());
+    }
+  };
+  for (const stream of [child.stdout, child.stderr]) {
+    let buffered = '';
+    stream.setEncoding('utf8');
+    stream.on('data', (chunk) => {
+      buffered += chunk;
+      const lines = buffered.split('\n');
+      buffered = lines.pop();
+      for (const line of lines) onLine(line.trim());
+    });
+  }
+
+  const finish = async (code, failure) => {
+    videoRunning = undefined;
+    job.finishedAt = Date.now();
+    job.progress = undefined;
+    if (job.state === 'cancelled') {
+      // Leave nothing behind but whole videos.
+    } else if (code === 0) {
+      job.state = 'done';
+      const what = job.files.length > 1 ? `${job.files.length} videos from ${job.title}` : (job.title ?? job.url);
+      // A video that was already saved is skipped, so nothing new turns up in Jellyfin.
+      if (job.files.length) {
+        announceToJellyfin(job.files);
+        notify('Saved to Jellyfin', what, 'tv', 'homebase://videos');
+      }
+      else job.note = 'Already saved';
+    } else {
+      job.state = 'failed';
+      job.error = failure ?? errors.at(-1) ?? `yt-dlp stopped (${code})`;
+      notify('Video download failed', `${job.title ?? job.url}: ${job.error}`, 'warning', 'homebase://videos');
+    }
+    console.log(`Video ${job.state}: ${job.url}${job.error ? ` (${job.error})` : ''}`);
+    saveVideoJobs();
+    await rm(partial, { recursive: true, force: true }).catch(() => {});
+    await updateYtdlp();
+    nextVideo();
+  };
+  child.on('error', (e) => finish(-1, e.code === 'ENOENT' ? `yt-dlp isn't installed at ${YTDLP}` : e.message));
+  child.on('exit', (code) => finish(code));
+}
+
+// ---------------------------------------------------------------------------------------------
 // HTTP
 
 class HttpError extends Error {
@@ -1735,6 +1974,32 @@ async function handle(req, res) {
     }
   }
 
+  if (url.pathname === '/api/videos') {
+    if (req.method === 'GET') return sendJson(res, 200, videoJobsState());
+    if (req.method === 'POST') {
+      let body;
+      try {
+        body = JSON.parse((await readBody(req))?.toString() ?? '{}');
+      } catch {
+        throw new HttpError(400, 'Expected JSON');
+      }
+      log(req, `save video ${body?.url}`);
+      return sendJson(res, 200, addVideo(body ?? {}));
+    }
+  }
+  const video = /^\/api\/videos\/(\w+)(?:\/(retry|cancel))?$/.exec(url.pathname);
+  if (video) {
+    const [, id, action] = video;
+    if (req.method === 'POST' && action) {
+      log(req, `video ${action} ${id}`);
+      return sendJson(res, 200, action === 'retry' ? retryVideo(id) : cancelVideo(id));
+    }
+    if (req.method === 'DELETE' && !action) {
+      log(req, `video remove ${id}`);
+      return sendJson(res, 200, removeVideo(id));
+    }
+  }
+
   const arr = /^\/api\/arr\/(\w+)\/(.+)$/.exec(url.pathname);
   if (arr) return proxyArr(req, res, arr[1], arr[2], url.search);
 
@@ -1793,6 +2058,8 @@ if (process.argv[2] === 'pair') {
   await checkGame();
   setInterval(checkGame, GAME_CHECK_INTERVAL).unref();
   setInterval(stopIdleSeerr, 60_000).unref();
+  await loadVideoJobs();
+  setInterval(updateYtdlp, 3600_000).unref();
   setTimeout(watch, 10_000).unref();
   setInterval(watch, WATCH_INTERVAL).unref();
 

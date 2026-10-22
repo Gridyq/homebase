@@ -63,4 +63,12 @@ export const miniApps: MiniApp[] = [
     color: '#0090FF',
     href: '/drop',
   },
+  {
+    id: 'videos',
+    name: 'Videos',
+    description: 'Save YouTube and other web videos to Jellyfin',
+    glyph: '⤓',
+    color: '#F76B15',
+    href: '/videos',
+  },
 ];
