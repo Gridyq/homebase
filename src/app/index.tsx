@@ -2,7 +2,6 @@ import { router } from 'expo-router';
 import { Pressable, ScrollView, StyleSheet, View } from 'react-native';
 
 import { ThemedText } from '@/components/themed-text';
-import { UpdateBanner } from '@/components/update-banner';
 import { Spacing } from '@/constants/theme';
 import { useGutter } from '@/hooks/use-gutter';
 import { useTheme } from '@/hooks/use-theme';
@@ -17,7 +16,6 @@ export default function Launcher() {
       contentInsetAdjustmentBehavior="automatic"
       contentContainerStyle={[styles.grid, gutter]}
       style={{ backgroundColor: theme.background }}>
-      <UpdateBanner />
       {miniApps.map((app) => (
         // Not <Link asChild>: it flattens the child's style, which drops a function style like
         // this one (and with it the tile width).

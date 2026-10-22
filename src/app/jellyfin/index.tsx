@@ -1,6 +1,6 @@
-import { Link, Stack, useFocusEffect } from 'expo-router';
+import { router, Stack, useFocusEffect } from 'expo-router';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Pressable, RefreshControl, ScrollView, StyleSheet } from 'react-native';
+import { ActivityIndicator, RefreshControl, ScrollView, StyleSheet } from 'react-native';
 
 import { ThemedText } from '@/components/themed-text';
 import { Spacing } from '@/constants/theme';
@@ -38,18 +38,19 @@ export default function JellyfinHome() {
     }, [reload]),
   );
 
+  // Only show the refresh spinner for a pull. Showing it for the quiet reload above makes iOS push
+  // the whole list down to fit it, then snap back up when loading finishes.
+  const [pulled, setPulled] = useState(false);
+  if (pulled && !loading) setPulled(false);
+
+  // A native toolbar button renders as a round Liquid Glass icon; a custom headerRight view gets
+  // stretched into a pill around its text.
   const header = (
-    <Stack.Screen
-      options={{
-        headerRight: () => (
-          <Link href="/jellyfin/settings" asChild>
-            <Pressable hitSlop={12}>
-              <ThemedText style={{ color: theme.accent }}>Settings</ThemedText>
-            </Pressable>
-          </Link>
-        ),
-      }}
-    />
+    <Stack.Toolbar placement="right">
+      <Stack.Toolbar.Button icon="gearshape" onPress={() => router.push('/jellyfin/settings')}>
+        Settings
+      </Stack.Toolbar.Button>
+    </Stack.Toolbar>
   );
 
   const searchBar = (
@@ -87,7 +88,15 @@ export default function JellyfinHome() {
       contentInsetAdjustmentBehavior="automatic"
       style={{ backgroundColor: theme.background }}
       contentContainerStyle={styles.content}
-      refreshControl={<RefreshControl refreshing={loading} onRefresh={reload} />}>
+      refreshControl={
+        <RefreshControl
+          refreshing={pulled && loading}
+          onRefresh={() => {
+            setPulled(true);
+            reload();
+          }}
+        />
+      }>
       {header}
       {searchBar}
       <ItemRow title="Continue watching" items={resume} shape="wide" />

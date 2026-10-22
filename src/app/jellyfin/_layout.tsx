@@ -1,20 +1,19 @@
 import { router, Stack } from 'expo-router';
-import { Pressable } from 'react-native';
 
-import { ThemedText } from '@/components/themed-text';
-import { useTheme } from '@/hooks/use-theme';
 import { Centered } from '@/miniapps/jellyfin/components';
 import { JellyfinSessionProvider, useJellyfinSession } from '@/miniapps/jellyfin/session';
 import { JellyfinSettingsProvider } from '@/miniapps/jellyfin/settings';
 
-function BackToLauncher() {
-  const theme = useTheme();
-  return (
-    <Pressable onPress={() => router.dismissTo('/')} hitSlop={12}>
-      <ThemedText style={{ color: theme.accent }}>Apps</ThemedText>
-    </Pressable>
-  );
-}
+// A native toolbar button renders as a round Liquid Glass icon; a custom headerLeft view gets
+// stretched into a pill around its text. An element, not a component: Stack.Screen only picks up a
+// Stack.Toolbar that is its direct child.
+const backToLauncher = (
+  <Stack.Toolbar placement="left">
+    <Stack.Toolbar.Button icon="chevron.left" onPress={() => router.dismissTo('/')}>
+      Apps
+    </Stack.Toolbar.Button>
+  </Stack.Toolbar>
+);
 
 function JellyfinStack() {
   const { loading, client } = useJellyfinSession();
@@ -23,10 +22,9 @@ function JellyfinStack() {
   return (
     <Stack screenOptions={{ headerBackButtonDisplayMode: 'minimal' }}>
       <Stack.Protected guard={!!client}>
-        <Stack.Screen
-          name="index"
-          options={{ title: 'Jellyfin', headerLargeTitle: true, headerLeft: () => <BackToLauncher /> }}
-        />
+        <Stack.Screen name="index" options={{ title: 'Jellyfin', headerLargeTitle: true }}>
+          {backToLauncher}
+        </Stack.Screen>
         <Stack.Screen name="library/[id]" options={{ title: '' }} />
         <Stack.Screen name="item/[id]" options={{ title: '' }} />
         <Stack.Screen name="settings" options={{ title: 'Settings' }} />
@@ -36,10 +34,9 @@ function JellyfinStack() {
         />
       </Stack.Protected>
       <Stack.Protected guard={!client}>
-        <Stack.Screen
-          name="login"
-          options={{ title: 'Sign in', headerLeft: () => <BackToLauncher /> }}
-        />
+        <Stack.Screen name="login" options={{ title: 'Sign in' }}>
+          {backToLauncher}
+        </Stack.Screen>
       </Stack.Protected>
     </Stack>
   );

@@ -34,10 +34,10 @@ const old = readdirSync(runtimeDir)
 for (const dir of old) rmSync(path.join(runtimeDir, dir), { recursive: true, force: true });
 
 console.log(`\nPublished update ${updateId} for runtime ${runtimeVersion}.`);
-console.log('Open Homebase on your phone; it downloads the update and offers to restart into it.');
+console.log('Open Homebase on your phone to download it; it switches over the next time you leave the app.');
 
 // Ping the phone through the self-hosted ntfy server. Tapping the notification opens Homebase,
-// which checks for the update as it comes to the foreground.
+// which downloads the update as it comes to the foreground and applies it once it's left again.
 const git = (args) => execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim();
 const commit = git(['log', '-1', '--format=%h %s']);
 const dirty = git(['status', '--porcelain']) ? ' (+ uncommitted changes)' : '';
@@ -45,7 +45,7 @@ try {
   const res = await fetch(process.env.NTFY_URL ?? 'http://localhost:2586/Homebase', {
     method: 'POST',
     headers: { Title: 'Homebase update ready', Tags: 'arrows_counterclockwise', Click: 'homebase://' },
-    body: `${commit}${dirty}\nOpen Homebase to download it.`,
+    body: `${commit}${dirty}\nOpen Homebase to download it; it switches over the next time you leave the app.`,
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   console.log('Sent ntfy notification.');
