@@ -51,3 +51,5 @@ example
 # Status server: access token stays on this machine
 /status-server/token
 /status-server/pairing
+/status-server/history.json
+/status-server/history.json.tmp

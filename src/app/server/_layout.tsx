@@ -26,6 +26,10 @@ function ServerStack() {
         {backToLauncher}
       </Stack.Screen>
       <Stack.Screen name="connect" options={{ title: 'Connection' }} />
+      <Stack.Screen name="memory" options={{ title: 'Memory' }} />
+      <Stack.Screen name="processes" options={{ title: 'Processes' }} />
+      <Stack.Screen name="trends" options={{ title: 'Trends' }} />
+      <Stack.Screen name="service/[id]" options={{ title: '' }} />
     </Stack>
   );
 }

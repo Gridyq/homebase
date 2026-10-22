@@ -70,6 +70,11 @@ on the home server, and can start, stop and restart them. The data comes from `s
 which also sends an ntfy message when a disk passes 90%, a sensor passes 90°C, or a service fails
 (and again when it recovers).
 
+Analytics: Memory breaks RAM into programs, kernel and cache and lists every service and app by
+memory, CPU or disk traffic (from their cgroups, so cache is counted apart from what programs
+hold); Processes lists the top programs; Trends and each service's page chart the last day. The
+history is a reading every 15 seconds, kept in `status-server/history.json` (git-ignored).
+
 - It runs as a systemd user service: `systemctl --user status homebase-status`. It listens on
   port 8788; open it on the tailnet zone once with
   `sudo firewall-cmd --zone=tailnet --add-port=8788/tcp --permanent && sudo firewall-cmd --reload`.

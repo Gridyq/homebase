@@ -1,6 +1,6 @@
 import { router, Stack } from 'expo-router';
 import { useState } from 'react';
-import { ActionSheetIOS, Alert, RefreshControl, ScrollView, StyleSheet, View } from 'react-native';
+import { RefreshControl, ScrollView, StyleSheet, View } from 'react-native';
 
 import { Button } from '@/components/button';
 import { ThemedText } from '@/components/themed-text';
@@ -8,7 +8,7 @@ import { Spacing } from '@/constants/theme';
 import { useGutter } from '@/hooks/use-gutter';
 import { useTheme } from '@/hooks/use-theme';
 import { Centered } from '@/miniapps/jellyfin/components';
-import { fetchStatus, runAction, type Service, type ServiceAction } from '@/miniapps/server/api';
+import { fetchStatus } from '@/miniapps/server/api';
 import {
   Card,
   formatBytes,
@@ -17,6 +17,8 @@ import {
   formatRate,
   levelColor,
   Meter,
+  NavRow,
+  Section,
   ServiceRow,
   StatTile,
   StatusColors,
@@ -26,13 +28,6 @@ import { usePolling } from '@/miniapps/server/use-polling';
 
 const POLL_MS = 3000;
 const HOT_CELSIUS = 80;
-
-const ACTION_LABELS: Record<ServiceAction, string> = {
-  start: 'Start',
-  stop: 'Stop',
-  restart: 'Restart',
-  run: 'Run now',
-};
 
 export default function ServerDashboard() {
   const { connection } = useServerConnection();
@@ -75,39 +70,11 @@ function Dashboard() {
   const theme = useTheme();
   const gutter = useGutter();
   const { data, error, refresh } = usePolling(() => fetchStatus(conn), POLL_MS, conn.url);
-  const [busy, setBusy] = useState<string>();
   const [pulled, setPulled] = useState(false);
 
   if (!data) {
     return <Centered loading={!error} error={error} onRetry={refresh} />;
   }
-
-  const act = async (service: Service, action: ServiceAction) => {
-    setBusy(service.id);
-    try {
-      await runAction(conn, service.id, action);
-    } catch (e) {
-      Alert.alert(`Couldn't ${ACTION_LABELS[action].toLowerCase()} ${service.name}`, e instanceof Error ? e.message : String(e));
-    }
-    await refresh();
-    setBusy(undefined);
-  };
-
-  const showActions = (service: Service) => {
-    const options = service.actions.map((a) => ACTION_LABELS[a]);
-    ActionSheetIOS.showActionSheetWithOptions(
-      {
-        title: service.name,
-        options: [...options, 'Cancel'],
-        cancelButtonIndex: options.length,
-        destructiveButtonIndex: service.actions.flatMap((a, i) => (a === 'stop' ? [i] : [])),
-      },
-      (index) => {
-        const action = service.actions[index];
-        if (action) act(service, action);
-      },
-    );
-  };
 
   const { cpu, gpu, memory, network } = data;
   const memUsed = 1 - memory.availableBytes / memory.totalBytes;
@@ -147,12 +114,14 @@ function Dashboard() {
           value={formatPercent(cpu.usage)}
           fraction={cpu.usage}
           caption={`Load ${cpu.load.map((l) => l.toFixed(2)).join(' ')}`}
+          onPress={() => router.push('/server/processes')}
         />
         <StatTile
           label="Memory"
           value={formatPercent(memUsed)}
           fraction={memUsed}
           caption={`${formatBytes(memory.totalBytes - memory.availableBytes)} of ${formatBytes(memory.totalBytes)}`}
+          onPress={() => router.push('/server/memory')}
         />
         {gpu.usage !== undefined ? (
           <StatTile label="GPU" value={formatPercent(gpu.usage)} fraction={gpu.usage} caption="Transcoding load" />
@@ -161,6 +130,7 @@ function Dashboard() {
           label="Network"
           value={`↓ ${formatRate(network.rxPerSec)}`}
           caption={`↑ ${formatRate(network.txPerSec)}`}
+          onPress={() => router.push('/server/trends')}
         />
       </View>
 
@@ -181,8 +151,15 @@ function Dashboard() {
         </View>
       ) : null}
 
-      <View style={styles.section}>
-        <ThemedText style={styles.sectionTitle}>Storage</ThemedText>
+      <Section title="Analytics">
+        <Card>
+          <NavRow first title="Memory" caption="What's using it, by service" onPress={() => router.push('/server/memory')} />
+          <NavRow title="Processes" caption="Top programs by memory and CPU" onPress={() => router.push('/server/processes')} />
+          <NavRow title="Trends" caption="CPU, memory, network and heat over the last day" onPress={() => router.push('/server/trends')} />
+        </Card>
+      </Section>
+
+      <Section title="Storage">
         <Card>
           {data.disks.map((d, i) => {
             const used = d.usedBytes / d.totalBytes;
@@ -201,10 +178,9 @@ function Dashboard() {
             );
           })}
         </Card>
-      </View>
+      </Section>
 
-      <View style={styles.section}>
-        <ThemedText style={styles.sectionTitle}>Services</ThemedText>
+      <Section title="Services">
         <Card>
           {data.services.map((s, i) => (
             <ServiceRow
@@ -212,12 +188,12 @@ function Dashboard() {
               service={s}
               now={now}
               first={i === 0}
-              busy={busy === s.id}
-              onPress={s.actions.length && !busy ? () => showActions(s) : undefined}
+              busy={false}
+              onPress={() => router.push({ pathname: '/server/service/[id]', params: { id: s.id } })}
             />
           ))}
         </Card>
-      </View>
+      </Section>
     </ScrollView>
   );
 }
@@ -263,15 +239,6 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     paddingVertical: Spacing.two,
     alignItems: 'center',
-  },
-  section: {
-    gap: Spacing.two,
-    marginTop: Spacing.two,
-  },
-  sectionTitle: {
-    fontSize: 20,
-    lineHeight: 26,
-    fontWeight: 700,
   },
   disk: {
     gap: Spacing.two,

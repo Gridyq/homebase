@@ -5,6 +5,9 @@
  * the app can't get push notifications, and passes the Requests mini-app's calls on to Seerr,
  * Sonarr and Radarr, and qBittorrent's speed limit. No dependencies beyond Node.js.
  *
+ * It also keeps a day of history (CPU, memory, network, and each service's memory and CPU) in
+ * `history.json`, and can list the processes and cgroups using the most memory and CPU.
+ *
  * Every request needs `Authorization: Bearer <token>`. The token lives in `token` next to this
  * file and is created on first start. `node server.mjs pair` sends a link to the phone through
  * ntfy that fills in the app's connection settings. The link carries a one-time code rather than
@@ -15,7 +18,7 @@
  */
 import { execFile } from 'node:child_process';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { readdir, readFile, statfs, unlink, writeFile } from 'node:fs/promises';
+import { readdir, readFile, rename, statfs, unlink, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
@@ -152,14 +155,19 @@ async function readNumber(file) {
   }
 }
 
-async function memory() {
-  const info = Object.fromEntries(
+/** /proc/meminfo in bytes. */
+async function meminfo() {
+  return Object.fromEntries(
     (await readFile('/proc/meminfo', 'utf8'))
       .split('\n')
       .map((l) => /^(\w+):\s+(\d+)/.exec(l))
       .filter(Boolean)
       .map(([, k, v]) => [k, Number(v) * 1024]),
   );
+}
+
+async function memory() {
+  const info = await meminfo();
   return {
     totalBytes: info.MemTotal,
     availableBytes: info.MemAvailable,
@@ -226,6 +234,295 @@ async function disks() {
   return out.sort((a, b) => a.mount.localeCompare(b.mount));
 }
 
+/**
+ * Where memory goes, from /proc/meminfo. `apps` is memory programs asked for (including shared
+ * memory, which graphics and browsers use), `cache` is file data the kernel keeps around and
+ * hands back when something needs it, and `kernel` is the rest of what isn't free.
+ */
+function memoryBreakdown(info) {
+  const apps = info.AnonPages + info.Shmem;
+  const cache = info.Buffers + info.Cached - info.Shmem + info.SReclaimable;
+  const free = info.MemFree;
+  return {
+    totalBytes: info.MemTotal,
+    availableBytes: info.MemAvailable,
+    appsBytes: apps,
+    cacheBytes: cache,
+    kernelBytes: Math.max(0, info.MemTotal - free - apps - cache),
+    freeBytes: free,
+    swapTotalBytes: info.SwapTotal,
+    swapUsedBytes: info.SwapTotal - info.SwapFree,
+  };
+}
+
+/** Share of the last minute that something was stalled waiting on CPU, memory or disk. */
+async function pressure() {
+  const out = {};
+  for (const kind of ['cpu', 'memory', 'io']) {
+    const text = await readFile(`/proc/pressure/${kind}`, 'utf8').catch(() => '');
+    const avg60 = Number(/^some .*avg60=([\d.]+)/m.exec(text)?.[1]);
+    if (!Number.isNaN(avg60)) out[kind] = avg60 / 100;
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Usage per service and process. Every systemd unit and container has its own cgroup, which
+// counts the memory, CPU time and disk traffic of everything inside it.
+
+const CGROUP_ROOT = '/sys/fs/cgroup';
+const CLOCK_TICKS = 100;
+const PAGE_SIZE = 4096;
+
+/**
+ * Services and scopes, as paths relative to the cgroup root. A unit's own sub-groups (a
+ * terminal's tabs, a container's payload) count toward it; only a user manager, which holds
+ * slices of its own, is looked into.
+ */
+async function leafGroups(dir = '') {
+  const entries = await readdir(path.join(CGROUP_ROOT, dir), { withFileTypes: true }).catch(() => []);
+  const children = entries.filter((e) => e.isDirectory() && /\.(slice|service|scope)$/.test(e.name));
+  const isUnit = /\.(service|scope)$/.test(dir);
+  if (isUnit && !children.some((c) => c.name.endsWith('.slice'))) return [dir];
+  if (dir && !children.length) return [];
+  return (await Promise.all(children.map((c) => leafGroups(path.join(dir, c.name))))).flat();
+}
+
+function statFields(text) {
+  return Object.fromEntries(
+    text
+      .split('\n')
+      .filter(Boolean)
+      .map((l) => l.split(' '))
+      .map(([k, v]) => [k, Number(v)]),
+  );
+}
+
+async function readGroup(dir) {
+  const base = path.join(CGROUP_ROOT, dir);
+  const [current, memStat, cpuStat, ioStat] = await Promise.all([
+    readNumber(`${base}/memory.current`),
+    readFile(`${base}/memory.stat`, 'utf8').catch(() => ''),
+    readFile(`${base}/cpu.stat`, 'utf8').catch(() => ''),
+    readFile(`${base}/io.stat`, 'utf8').catch(() => ''),
+  ]);
+  if (current === undefined) return undefined;
+  const mem = statFields(memStat);
+  const cpu = statFields(cpuStat);
+  let read = 0;
+  let written = 0;
+  for (const m of ioStat.matchAll(/rbytes=(\d+) wbytes=(\d+)/g)) {
+    read += Number(m[1]);
+    written += Number(m[2]);
+  }
+  // File pages are cache the kernel can take back, except shared memory, which counts as file.
+  const cache = Math.max(0, (mem.file ?? 0) - (mem.shmem ?? 0));
+  return {
+    dir,
+    usedBytes: current - cache,
+    cacheBytes: cache,
+    cpuUsec: cpu.usage_usec ?? 0,
+    readBytes: read,
+    writtenBytes: written,
+  };
+}
+
+/** "app-org.kde.konsole-3158.scope" → "konsole", "session-c10.scope" → "Login session c10". */
+function groupLabel(unit) {
+  const login = /^session-(\w+)\.scope$/.exec(unit);
+  if (login) return `Login session ${login[1]}`;
+  if (/^run-/.test(unit)) return 'Command';
+  const name = unit
+    .replace(/\.(service|scope)$/, '')
+    .replace(/^app-/, '')
+    .replace(/@.*$/, '')
+    .replace(/-\d+$/, '')
+    .replace(/\\x2d/g, '-');
+  // Reverse-DNS names (org.kde.konsole) read best as their last part.
+  return name.includes('.') ? name.slice(name.lastIndexOf('.') + 1) : name;
+}
+
+function groupCategory(dir) {
+  if (dir.startsWith('system.slice/') || dir === 'init.scope') return 'system';
+  if (/^user\.slice\/[^/]+\/session-/.test(dir)) return 'login';
+  return 'desktop';
+}
+
+let lastGroups;
+let groupRates = new Map();
+
+/**
+ * Every leaf cgroup with its memory now and its CPU and disk rates since the last reading.
+ * Readings less than a second apart reuse the previous rates rather than divide by almost zero.
+ */
+async function groupUsage() {
+  const now = Date.now();
+  const groups = (await Promise.all((await leafGroups()).map(readGroup))).filter(Boolean);
+  if (!lastGroups || now - lastGroups.at >= 1000) {
+    if (lastGroups) {
+      const secs = (now - lastGroups.at) / 1000;
+      const cores = os.availableParallelism();
+      const prev = new Map(lastGroups.groups.map((g) => [g.dir, g]));
+      groupRates = new Map(
+        groups.flatMap((g) => {
+          const p = prev.get(g.dir);
+          if (!p) return [];
+          return [
+            [
+              g.dir,
+              {
+                cpu: Math.max(0, (g.cpuUsec - p.cpuUsec) / 1e6 / secs / cores),
+                readPerSec: Math.max(0, (g.readBytes - p.readBytes) / secs),
+                writePerSec: Math.max(0, (g.writtenBytes - p.writtenBytes) / secs),
+              },
+            ],
+          ];
+        }),
+      );
+    }
+    lastGroups = { at: now, groups };
+  }
+  return groups.map((g) => ({ ...g, ...groupRates.get(g.dir) }));
+}
+
+/** Maps cgroups to the dashboard's services: by systemd unit, or a plain container's scope. */
+function serviceGroups(groups, pods) {
+  const byUnit = new Map();
+  for (const g of groups) {
+    const unit = path.basename(g.dir);
+    // A user unit wins over a system unit of the same name.
+    if (!byUnit.has(unit) || g.dir.includes('/user@')) byUnit.set(unit, g);
+  }
+  const out = new Map();
+  for (const p of pods) {
+    const name = p.Names?.[0] ?? p.Id.slice(0, 12);
+    const unit = p.Labels?.PODMAN_SYSTEMD_UNIT;
+    const g = (unit && byUnit.get(unit)) ?? byUnit.get(`libpod-${p.Id}.scope`);
+    if (g) out.set(`container:${name}`, g);
+  }
+  for (const u of UNITS) {
+    const g = byUnit.get(u.runs ?? u.unit);
+    if (g) out.set(`unit:${u.id}`, g);
+  }
+  return out;
+}
+
+/** Plain numbers for the app: memory in use, cache, and share of the whole machine's CPU. */
+function usageOf(g) {
+  return {
+    usedBytes: g.usedBytes,
+    cacheBytes: g.cacheBytes,
+    cpu: g.cpu,
+    readPerSec: g.readPerSec,
+    writePerSec: g.writePerSec,
+  };
+}
+
+/** Everything using memory, named after its service where there is one. */
+async function usage() {
+  const [groups, pods, info, press] = await Promise.all([
+    groupUsage(),
+    containers().catch(() => []),
+    meminfo(),
+    pressure(),
+  ]);
+  const services = serviceGroups(groups, pods);
+  const names = new Map();
+  for (const p of pods) names.set(`container:${p.Names?.[0] ?? p.Id.slice(0, 12)}`, p.Names?.[0]);
+  for (const u of UNITS) names.set(`unit:${u.id}`, u.name);
+  const serviceByDir = new Map([...services].map(([id, g]) => [g.dir, id]));
+
+  return {
+    memory: memoryBreakdown(info),
+    pressure: press,
+    groups: groups
+      .map((g) => {
+        const serviceId = serviceByDir.get(g.dir);
+        return {
+          id: g.dir,
+          name: serviceId ? names.get(serviceId) : groupLabel(path.basename(g.dir)),
+          category: serviceId ? (serviceId.startsWith('container:') ? 'container' : 'homebase') : groupCategory(g.dir),
+          serviceId,
+          ...usageOf(g),
+        };
+      })
+      .sort((a, b) => b.usedBytes - a.usedBytes),
+    at: Date.now(),
+  };
+}
+
+/** The named cgroup a process's cgroup sits in, such as a container's unit for its payload. */
+function serviceOfGroup(group, groupNames) {
+  for (let dir = group; dir && dir !== '.'; dir = path.dirname(dir)) {
+    const name = groupNames.get(dir);
+    if (name) return name;
+  }
+  return undefined;
+}
+
+let lastProcs;
+
+/** Processes using the most memory or CPU, with CPU measured since the previous call. */
+async function processes() {
+  const now = Date.now();
+  const pids = (await readdir('/proc')).filter((p) => /^\d+$/.test(p));
+  const list = (
+    await Promise.all(
+      pids.map(async (pid) => {
+        try {
+          const [stat, cgroup, cmdline] = await Promise.all([
+            readFile(`/proc/${pid}/stat`, 'utf8'),
+            readFile(`/proc/${pid}/cgroup`, 'utf8'),
+            readFile(`/proc/${pid}/cmdline`, 'utf8'),
+          ]);
+          // The name sits in parentheses and can itself contain spaces or parentheses.
+          const close = stat.lastIndexOf(')');
+          const f = stat.slice(close + 2).split(' ');
+          const rss = Number(f[21]) * PAGE_SIZE;
+          if (!rss) return undefined; // Kernel threads.
+          return {
+            pid: Number(pid),
+            name: stat.slice(stat.indexOf('(') + 1, close),
+            command: cmdline.replace(/\0+$/, '').replace(/\0/g, ' ').slice(0, 300),
+            group: /^0::\/(.*)$/m.exec(cgroup)?.[1],
+            key: `${pid}:${f[19]}`,
+            ticks: Number(f[11]) + Number(f[12]),
+            rssBytes: rss,
+          };
+        } catch {
+          return undefined; // Exited while we looked.
+        }
+      }),
+    )
+  ).filter(Boolean);
+
+  const prev = lastProcs && now - lastProcs.at < 5 * 60_000 ? lastProcs : undefined;
+  lastProcs = { at: now, ticks: new Map(list.map((p) => [p.key, p.ticks])) };
+  const secs = prev ? (now - prev.at) / 1000 : 0;
+  const cores = os.availableParallelism();
+
+  const { groups } = await usage();
+  const groupNames = new Map(groups.map((g) => [g.id, g.name]));
+  const withCpu = list.map((p) => {
+    const before = prev?.ticks.get(p.key);
+    return {
+      pid: p.pid,
+      name: p.name,
+      command: p.command,
+      service: p.group && serviceOfGroup(p.group, groupNames),
+      rssBytes: p.rssBytes,
+      cpu: before !== undefined && secs > 0 ? Math.max(0, (p.ticks - before) / CLOCK_TICKS / secs / cores) : undefined,
+    };
+  });
+  const byMemory = [...withCpu].sort((a, b) => b.rssBytes - a.rssBytes).slice(0, 40);
+  const byCpu = [...withCpu].sort((a, b) => (b.cpu ?? 0) - (a.cpu ?? 0)).slice(0, 40);
+  return {
+    processes: [...new Map([...byMemory, ...byCpu].map((p) => [p.pid, p])).values()],
+    count: list.length,
+    at: now,
+  };
+}
+
 // ---------------------------------------------------------------------------------------------
 // Services
 
@@ -265,10 +562,17 @@ async function containers() {
 
 /** Everything the dashboard lists, with what each one can do. */
 async function services() {
-  const pods = await containers().catch((e) => {
-    console.error('podman ps failed:', e.message);
-    return [];
-  });
+  const [pods, groups] = await Promise.all([
+    containers().catch((e) => {
+      console.error('podman ps failed:', e.message);
+      return [];
+    }),
+    groupUsage().catch((e) => {
+      console.error('Reading cgroups failed:', e.message);
+      return [];
+    }),
+  ]);
+  const usageById = serviceGroups(groups, pods);
   const quadletUnits = pods.map((p) => p.Labels?.PODMAN_SYSTEMD_UNIT).filter(Boolean);
   const timerTargets = UNITS.filter((u) => u.runs).map((u) => u.runs);
   const [userProps, systemProps] = await Promise.all([
@@ -321,6 +625,11 @@ async function services() {
       since: unixTimestamp(props.ActiveEnterTimestamp),
       actions: u.system ? [] : u.self ? ['restart'] : state === 'running' ? ['restart', 'stop'] : ['start'],
     });
+  }
+  for (const s of list) {
+    const g = usageById.get(s.id);
+    // A stopped unit's cgroup can linger with leftover cache; don't show that as usage.
+    if (g && s.state !== 'stopped') s.usage = usageOf(g);
   }
   return list;
 }
@@ -380,6 +689,110 @@ async function status() {
     services: serviceList,
     at: Date.now(),
   };
+}
+
+// ---------------------------------------------------------------------------------------------
+// History: a reading every 15 seconds for the last day, kept in memory and saved to
+// `history.json` every few minutes so a restart doesn't lose it.
+
+const HISTORY_PATH = path.join(ROOT, 'history.json');
+const HISTORY_INTERVAL = 15_000;
+const HISTORY_KEEP_MS = 24 * 3600_000;
+const HISTORY_SAVE_INTERVAL = 5 * 60_000;
+const HISTORY_POINTS = 120;
+
+/** { t, cpu, gpu, mem, cache, swap, rx, tx, temp, s: { serviceId: [usedBytes, cpu] } } */
+let history = [];
+
+async function loadHistory() {
+  try {
+    const saved = JSON.parse(await readFile(HISTORY_PATH, 'utf8'));
+    if (Array.isArray(saved)) history = saved.filter((h) => h.t > Date.now() - HISTORY_KEEP_MS);
+  } catch {}
+}
+
+async function saveHistory() {
+  try {
+    await writeFile(`${HISTORY_PATH}.tmp`, JSON.stringify(history));
+    await rename(`${HISTORY_PATH}.tmp`, HISTORY_PATH);
+  } catch (e) {
+    console.error("Couldn't save history:", e.message);
+  }
+}
+
+async function recordHistory() {
+  try {
+    const [info, temps, gpu, list] = await Promise.all([meminfo(), temperatures(), gpuBusy(), services()]);
+    const mem = memoryBreakdown(info);
+    const round = (n) => (n === undefined ? undefined : Math.round(n * 1000) / 1000);
+    history.push({
+      t: Date.now(),
+      cpu: round(rates.cpu),
+      gpu: round(gpu),
+      mem: mem.totalBytes - mem.availableBytes,
+      cache: mem.cacheBytes,
+      swap: mem.swapUsedBytes,
+      rx: rates.rxPerSec === undefined ? undefined : Math.round(rates.rxPerSec),
+      tx: rates.txPerSec === undefined ? undefined : Math.round(rates.txPerSec),
+      temp: temps.find((t) => t.label === 'CPU')?.celsius,
+      s: Object.fromEntries(list.filter((x) => x.usage).map((x) => [x.id, [x.usage.usedBytes, round(x.usage.cpu)]])),
+    });
+    const cutoff = Date.now() - HISTORY_KEEP_MS;
+    while (history.length && history[0].t < cutoff) history.shift();
+  } catch (e) {
+    console.error('Recording history failed:', e);
+  }
+}
+
+const SERIES = {
+  cpu: (h) => h.cpu,
+  gpu: (h) => h.gpu,
+  memory: (h) => h.mem,
+  cache: (h) => h.cache,
+  swap: (h) => h.swap,
+  rx: (h) => h.rx,
+  tx: (h) => h.tx,
+  temp: (h) => h.temp,
+};
+
+/**
+ * The last `rangeSec` seconds, averaged into evenly spaced buckets so the app gets the same
+ * number of points for an hour or a day. A bucket with no readings (the server was off) is null.
+ * Each series also gets its average and peak over the raw readings, which averaging would hide.
+ */
+function historyFor(rangeSec, serviceId) {
+  const end = Date.now();
+  const start = end - rangeSec * 1000;
+  const step = (rangeSec * 1000) / HISTORY_POINTS;
+  const series = serviceId
+    ? { memory: (h) => h.s?.[serviceId]?.[0], cpu: (h) => h.s?.[serviceId]?.[1] }
+    : SERIES;
+
+  const out = {};
+  for (const [name, pick] of Object.entries(series)) {
+    const sums = new Array(HISTORY_POINTS).fill(0);
+    const counts = new Array(HISTORY_POINTS).fill(0);
+    let total = 0;
+    let n = 0;
+    let peak;
+    for (const h of history) {
+      if (h.t < start) continue;
+      const v = pick(h);
+      if (typeof v !== 'number') continue;
+      const i = Math.min(HISTORY_POINTS - 1, Math.floor((h.t - start) / step));
+      sums[i] += v;
+      counts[i]++;
+      total += v;
+      n++;
+      if (peak === undefined || v > peak) peak = v;
+    }
+    out[name] = {
+      values: sums.map((sum, i) => (counts[i] ? sum / counts[i] : null)),
+      average: n ? total / n : undefined,
+      peak,
+    };
+  }
+  return { start, end, step, series: out, oldest: history[0]?.t, memoryTotalBytes: os.totalmem() };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -592,6 +1005,13 @@ async function handle(req, res) {
   if (!authorized(req, await getToken())) return sendJson(res, 401, { error: 'Wrong or missing token' });
 
   if (req.method === 'GET' && url.pathname === '/api/status') return sendJson(res, 200, await status());
+  if (req.method === 'GET' && url.pathname === '/api/usage') return sendJson(res, 200, await usage());
+  if (req.method === 'GET' && url.pathname === '/api/processes') return sendJson(res, 200, await processes());
+  if (req.method === 'GET' && url.pathname === '/api/history') {
+    const range = Number(url.searchParams.get('range') ?? 3600);
+    if (!(range >= 60 && range <= HISTORY_KEEP_MS / 1000)) throw new HttpError(400, 'Range must be 60 seconds to a day');
+    return sendJson(res, 200, historyFor(range, url.searchParams.get('service') ?? undefined));
+  }
 
   const match = /^\/api\/services\/([^/]+)\/(start|stop|restart|run)$/.exec(url.pathname);
   if (req.method === 'POST' && match) {
@@ -660,6 +1080,15 @@ if (process.argv[2] === 'pair') {
   await getToken();
   await sample();
   setInterval(sample, 2000).unref();
+  await loadHistory();
+  setInterval(recordHistory, HISTORY_INTERVAL).unref();
+  setInterval(saveHistory, HISTORY_SAVE_INTERVAL).unref();
+  for (const signal of ['SIGTERM', 'SIGINT']) {
+    process.once(signal, async () => {
+      await saveHistory();
+      process.exit(0);
+    });
+  }
   setTimeout(watch, 10_000).unref();
   setInterval(watch, WATCH_INTERVAL).unref();
 

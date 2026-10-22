@@ -10,6 +10,18 @@ export const DEFAULT_URL = 'http://fedora.tail27f991.ts.net:8788';
 export type ServiceState = 'running' | 'stopped' | 'failed' | 'changing';
 export type ServiceAction = 'start' | 'stop' | 'restart' | 'run';
 
+/** What a service or cgroup is using right now. */
+export type Usage = {
+  /** Memory its programs hold, which can't be freed without stopping them. */
+  usedBytes: number;
+  /** File data cached on its behalf; the kernel takes it back when something needs room. */
+  cacheBytes: number;
+  /** Share of the whole machine's CPU, 0–1; missing until there are two readings. */
+  cpu?: number;
+  readPerSec?: number;
+  writePerSec?: number;
+};
+
 export type Service = {
   id: string;
   name: string;
@@ -23,6 +35,8 @@ export type Service = {
   lastRun?: number;
   nextRun?: number;
   actions: ServiceAction[];
+  /** Missing for stopped services and timers that aren't running. */
+  usage?: Usage;
 };
 
 export type Disk = {
@@ -43,6 +57,71 @@ export type Status = {
   disks: Disk[];
   services: Service[];
   at: number;
+};
+
+export type MemoryBreakdown = {
+  totalBytes: number;
+  availableBytes: number;
+  /** Memory programs asked for, including shared memory. */
+  appsBytes: number;
+  /** File cache, given back when needed. */
+  cacheBytes: number;
+  kernelBytes: number;
+  freeBytes: number;
+  swapTotalBytes: number;
+  swapUsedBytes: number;
+};
+
+export type GroupCategory = 'container' | 'homebase' | 'system' | 'desktop' | 'login';
+
+/** A systemd unit or container's cgroup. */
+export type Group = Usage & {
+  id: string;
+  name: string;
+  category: GroupCategory;
+  /** The dashboard service it belongs to, if any. */
+  serviceId?: string;
+};
+
+export type UsageReport = {
+  memory: MemoryBreakdown;
+  /** Share of the last minute something waited on CPU, memory or disk, 0–1. */
+  pressure: { cpu?: number; memory?: number; io?: number };
+  groups: Group[];
+  at: number;
+};
+
+export type ProcessInfo = {
+  pid: number;
+  name: string;
+  command: string;
+  /** Name of the service or cgroup it runs in. */
+  service?: string;
+  rssBytes: number;
+  /** Share of the whole machine's CPU since the previous call; missing on the first. */
+  cpu?: number;
+};
+
+export type ProcessReport = { processes: ProcessInfo[]; count: number; at: number };
+
+export type Series = {
+  /** Evenly spaced averages from `start` to `end`; null where the server has no readings. */
+  values: (number | null)[];
+  average?: number;
+  peak?: number;
+};
+
+export type SystemSeries = 'cpu' | 'gpu' | 'memory' | 'cache' | 'swap' | 'rx' | 'tx' | 'temp';
+export type ServiceSeries = 'memory' | 'cpu';
+
+export type History<K extends string> = {
+  start: number;
+  end: number;
+  step: number;
+  series: Record<K, Series>;
+  /** Time of the oldest reading the server has. */
+  oldest?: number;
+  memoryTotalBytes: number;
 };
 
 const TIMEOUT_MS = 8000;
@@ -99,4 +178,23 @@ export function fetchStatus(conn: Connection) {
 
 export function runAction(conn: Connection, id: string, action: ServiceAction) {
   return request<{ ok: true }>(conn, `/api/services/${encodeURIComponent(id)}/${action}`, { method: 'POST' });
+}
+
+export function fetchUsage(conn: Connection) {
+  return request<UsageReport>(conn, '/api/usage');
+}
+
+export function fetchProcesses(conn: Connection) {
+  return request<ProcessReport>(conn, '/api/processes');
+}
+
+export function fetchHistory(conn: Connection, rangeSec: number) {
+  return request<History<SystemSeries>>(conn, `/api/history?range=${rangeSec}`);
+}
+
+export function fetchServiceHistory(conn: Connection, rangeSec: number, serviceId: string) {
+  return request<History<ServiceSeries>>(
+    conn,
+    `/api/history?range=${rangeSec}&service=${encodeURIComponent(serviceId)}`,
+  );
 }
