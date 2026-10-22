@@ -72,7 +72,9 @@ which also sends an ntfy message when a disk passes 90%, a sensor passes 90°C, 
 
 Analytics: Memory breaks RAM into programs, kernel and cache and lists every service and app by
 memory, CPU or disk traffic (from their cgroups, so cache is counted apart from what programs
-hold); Processes lists the top programs; Trends and each service's page chart the last day. The
+hold); Processes lists the top programs; Graphics card (tap the GPU tile) shows engine load
+including video encode/decode, video memory, temperatures, power, fan, clocks and which programs
+have the card open (from DRM fdinfo); Trends and each service's page chart the last day. The
 history is a reading every 15 seconds, kept in `status-server/history.json` (git-ignored).
 
 - It runs as a systemd user service: `systemctl --user status homebase-status`. It listens on

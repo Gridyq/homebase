@@ -18,7 +18,7 @@
  */
 import { execFile } from 'node:child_process';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { readdir, readFile, rename, statfs, unlink, writeFile } from 'node:fs/promises';
+import { readdir, readFile, readlink, realpath, rename, statfs, unlink, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
@@ -524,6 +524,200 @@ async function processes() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Graphics card
+/** The first card that reports how busy it is, which skips display-only devices. */
+async function gpuCard() {
+  const cards = (await readdir('/sys/class/drm').catch(() => [])).filter((c) => /^card\d+$/.test(c));
+  for (const c of cards) {
+    const dir = `/sys/class/drm/${c}/device`;
+    if ((await readNumber(`${dir}/gpu_busy_percent`)) !== undefined) return dir;
+  }
+  return undefined;
+}
+
+const gpuNames = new Map();
+
+/** The marketing name from lspci, such as "Radeon RX 5600 OEM/5600 XT / 5700/5700 XT". */
+async function gpuName(dir) {
+  if (gpuNames.has(dir)) return gpuNames.get(dir);
+  const slot = path.basename(await realpath(dir));
+  let name = 'Graphics card';
+  try {
+    const { stdout } = await run('lspci', ['-mm', '-s', slot], { timeout: 5000 });
+    const device = [...stdout.matchAll(/"([^"]*)"/g)][2]?.[1];
+    if (device) name = /\[(.+)\]/.exec(device)?.[1] ?? device;
+  } catch {}
+  gpuNames.set(dir, name);
+  return name;
+}
+
+const readText = (file) => readFile(file, 'utf8').then((t) => t.trim(), () => undefined);
+
+/** Highest level in a pp_dpm_* table ("2: 2100Mhz"), in MHz. */
+async function maxClock(file) {
+  const text = await readText(file);
+  const levels = [...(text ?? '').matchAll(/(\d+)Mhz/gi)].map((m) => Number(m[1]));
+  return levels.length ? Math.max(...levels) : undefined;
+}
+
+const GPU_TEMPS = { edge: 'Edge', junction: 'Hotspot', mem: 'Memory' };
+const CLOCKS = { sclk: { label: 'Core', table: 'pp_dpm_sclk' }, mclk: { label: 'Memory', table: 'pp_dpm_mclk' } };
+
+/** Sensors from the card's hwmon: temperatures, power, fan, clocks and voltage. */
+async function gpuSensors(dir) {
+  const hwmon = (await readdir(`${dir}/hwmon`).catch(() => []))[0];
+  const out = { temperatures: [], clocks: [] };
+  if (!hwmon) return out;
+  const h = `${dir}/hwmon/${hwmon}`;
+  const files = await readdir(h);
+  for (const f of files.filter((f) => /^temp\d+_label$/.test(f))) {
+    const label = await readText(`${h}/${f}`);
+    const base = f.replace('_label', '');
+    const milli = await readNumber(`${h}/${base}_input`);
+    if (milli === undefined) continue;
+    const crit = await readNumber(`${h}/${base}_crit`);
+    out.temperatures.push({ label: GPU_TEMPS[label] ?? label, celsius: milli / 1000, criticalCelsius: crit && crit / 1000 });
+  }
+  for (const f of files.filter((f) => /^freq\d+_label$/.test(f))) {
+    const clock = CLOCKS[await readText(`${h}/${f}`)];
+    const hz = await readNumber(`${h}/${f.replace('_label', '_input')}`);
+    if (!clock || hz === undefined) continue;
+    out.clocks.push({ label: clock.label, mhz: Math.round(hz / 1e6), maxMhz: await maxClock(`${dir}/${clock.table}`) });
+  }
+  const micro = (await readNumber(`${h}/power1_average`)) ?? (await readNumber(`${h}/power1_input`));
+  if (micro !== undefined) {
+    out.power = { watts: micro / 1e6, capWatts: ((await readNumber(`${h}/power1_cap`)) ?? 0) / 1e6 || undefined };
+  }
+  const rpm = await readNumber(`${h}/fan1_input`);
+  if (rpm !== undefined) out.fan = { rpm, maxRpm: await readNumber(`${h}/fan1_max`) };
+  const mv = await readNumber(`${h}/in0_input`);
+  if (mv !== undefined) out.voltageMv = mv;
+  return out;
+}
+
+const ENGINE_LABELS = { gfx: '3D', compute: 'Compute', dec: 'Video decode', enc: 'Video encode', jpeg: 'JPEG', dma: 'Copy' };
+
+let lastGpuClients;
+
+/**
+ * Programs with the card open, from the DRM fdinfo the kernel keeps per open file: the memory
+ * each holds and the time each engine spent on its work, turned into a share since the previous
+ * call. Only our own processes are readable, which covers the containers since they're rootless.
+ */
+async function gpuClients(slot) {
+  const now = Date.now();
+  const pids = (await readdir('/proc')).filter((p) => /^\d+$/.test(p));
+  const clients = new Map();
+  await Promise.all(
+    pids.map(async (pid) => {
+      try {
+        const fds = await readdir(`/proc/${pid}/fd`);
+        const links = await Promise.all(fds.map((fd) => readlink(`/proc/${pid}/fd/${fd}`).catch(() => '')));
+        for (const [i, link] of links.entries()) {
+          if (!link.startsWith('/dev/dri/')) continue;
+          const info = await readFile(`/proc/${pid}/fdinfo/${fds[i]}`, 'utf8');
+          const fields = Object.fromEntries([...info.matchAll(/^([\w-]+):\s+(.*)$/gm)].map((m) => [m[1], m[2].trim()]));
+          const id = fields['drm-client-id'];
+          if (!id || fields['drm-pdev'] !== slot || clients.has(id)) continue;
+          const kib = (k) => Number.parseInt(fields[k] ?? '0', 10) * 1024;
+          const engines = {};
+          for (const [k, v] of Object.entries(fields)) {
+            const e = /^drm-engine-(?!capacity)(.+)$/.exec(k);
+            if (e) engines[e[1]] = Number.parseInt(v, 10) / (Number(fields[`drm-engine-capacity-${e[1]}`]) || 1);
+          }
+          clients.set(id, {
+            pid: Number(pid),
+            vramBytes: kib('drm-memory-vram') || kib('drm-total-vram'),
+            gttBytes: kib('drm-memory-gtt') || kib('drm-total-gtt'),
+            engines,
+          });
+        }
+      } catch {} // Exited, or someone else's.
+    }),
+  );
+
+  const prev = lastGpuClients && now - lastGpuClients.at < 5 * 60_000 ? lastGpuClients : undefined;
+  lastGpuClients = { at: now, clients };
+  const elapsedNs = prev ? (now - prev.at) * 1e6 : 0;
+
+  // One program can open the card several times; add those up.
+  const byPid = new Map();
+  for (const [id, c] of clients) {
+    const p = byPid.get(c.pid) ?? { pid: c.pid, vramBytes: 0, gttBytes: 0, engines: {} };
+    p.vramBytes += c.vramBytes;
+    p.gttBytes += c.gttBytes;
+    const before = prev?.clients.get(id);
+    for (const [e, ns] of Object.entries(c.engines)) {
+      const was = before?.engines[e];
+      if (was === undefined || !elapsedNs) continue;
+      p.engines[e] = (p.engines[e] ?? 0) + Math.max(0, ns - was) / elapsedNs;
+    }
+    byPid.set(c.pid, p);
+  }
+
+  const { groups } = await usage();
+  const groupNames = new Map(groups.map((g) => [g.id, g.name]));
+  const list = await Promise.all(
+    [...byPid.values()].map(async (p) => {
+      const [comm, cgroup] = await Promise.all([
+        readText(`/proc/${p.pid}/comm`),
+        readFile(`/proc/${p.pid}/cgroup`, 'utf8').catch(() => ''),
+      ]);
+      const group = /^0::\/(.*)$/m.exec(cgroup)?.[1];
+      for (const e of Object.keys(p.engines)) p.engines[e] = Math.min(1, p.engines[e]);
+      return { ...p, name: comm ?? String(p.pid), service: group && serviceOfGroup(group, groupNames) };
+    }),
+  );
+  return { list: list.sort((a, b) => b.vramBytes - a.vramBytes), measured: Boolean(prev) };
+}
+
+async function gpu() {
+  const dir = await gpuCard();
+  if (!dir) throw new HttpError(404, 'No graphics card that reports its load');
+  const slot = path.basename(await realpath(dir));
+  const n = (f) => readNumber(`${dir}/${f}`);
+  const [name, busy, memBusy, vramTotal, vramUsed, gttTotal, gttUsed, sensors, clients, level, link] = await Promise.all([
+    gpuName(dir),
+    n('gpu_busy_percent'),
+    n('mem_busy_percent'),
+    n('mem_info_vram_total'),
+    n('mem_info_vram_used'),
+    n('mem_info_gtt_total'),
+    n('mem_info_gtt_used'),
+    gpuSensors(dir),
+    gpuClients(slot),
+    readText(`${dir}/power_dpm_force_performance_level`),
+    Promise.all(['current_link_speed', 'current_link_width', 'max_link_speed', 'max_link_width'].map((f) => readText(`${dir}/${f}`))),
+  ]);
+
+  // The card as a whole, from adding up every program's share of each engine. The kernel only
+  // lists an engine for a program once it has used it, so start with the ones worth watching.
+  const engines = { gfx: 0, compute: 0, dec: 0, enc: 0 };
+  for (const c of clients.list) for (const [e, v] of Object.entries(c.engines)) engines[e] = Math.min(1, (engines[e] ?? 0) + v);
+
+  const pcie = (speed) => speed && /([\d.]+) GT\/s/.exec(speed)?.[1];
+  return {
+    name,
+    driver: path.basename(await realpath(`${dir}/driver`).catch(() => '')) || undefined,
+    usage: busy === undefined ? undefined : busy / 100,
+    memoryControllerUsage: memBusy === undefined ? undefined : memBusy / 100,
+    vram: vramTotal ? { totalBytes: vramTotal, usedBytes: vramUsed ?? 0 } : undefined,
+    gtt: gttTotal ? { totalBytes: gttTotal, usedBytes: gttUsed ?? 0 } : undefined,
+    ...sensors,
+    performanceLevel: level,
+    link: link[0] ? { gts: Number(pcie(link[0])), width: Number(link[1]), maxGts: Number(pcie(link[2])), maxWidth: Number(link[3]) } : undefined,
+    engines: clients.measured
+      ? Object.entries(engines).map(([id, v]) => ({ id, label: ENGINE_LABELS[id] ?? id, usage: v }))
+      : undefined,
+    clients: clients.list.map((c) => ({
+      ...c,
+      engines: clients.measured ? Object.entries(c.engines).map(([id, v]) => ({ id, label: ENGINE_LABELS[id] ?? id, usage: v })) : undefined,
+    })),
+    at: Date.now(),
+  };
+}
+
+// ---------------------------------------------------------------------------------------------
 // Services
 
 const UNIT_PROPS = ['ActiveState', 'SubState', 'Result', 'ActiveEnterTimestamp', 'LastTriggerUSec', 'NextElapseUSecRealtime'];
@@ -701,7 +895,7 @@ const HISTORY_KEEP_MS = 24 * 3600_000;
 const HISTORY_SAVE_INTERVAL = 5 * 60_000;
 const HISTORY_POINTS = 120;
 
-/** { t, cpu, gpu, mem, cache, swap, rx, tx, temp, s: { serviceId: [usedBytes, cpu] } } */
+/** { t, cpu, gpu, mem, cache, swap, rx, tx, temp, gtemp, gpow, vram, s: { serviceId: [usedBytes, cpu] } } */
 let history = [];
 
 async function loadHistory() {
@@ -722,7 +916,15 @@ async function saveHistory() {
 
 async function recordHistory() {
   try {
-    const [info, temps, gpu, list] = await Promise.all([meminfo(), temperatures(), gpuBusy(), services()]);
+    const card = await gpuCard();
+    const [info, temps, gpu, list, gpuSense, vram] = await Promise.all([
+      meminfo(),
+      temperatures(),
+      gpuBusy(),
+      services(),
+      card ? gpuSensors(card) : undefined,
+      card ? readNumber(`${card}/mem_info_vram_used`) : undefined,
+    ]);
     const mem = memoryBreakdown(info);
     const round = (n) => (n === undefined ? undefined : Math.round(n * 1000) / 1000);
     history.push({
@@ -735,6 +937,9 @@ async function recordHistory() {
       rx: rates.rxPerSec === undefined ? undefined : Math.round(rates.rxPerSec),
       tx: rates.txPerSec === undefined ? undefined : Math.round(rates.txPerSec),
       temp: temps.find((t) => t.label === 'CPU')?.celsius,
+      gtemp: gpuSense?.temperatures.find((t) => t.label === 'Hotspot')?.celsius ?? gpuSense?.temperatures[0]?.celsius,
+      gpow: gpuSense?.power && Math.round(gpuSense.power.watts * 10) / 10,
+      vram,
       s: Object.fromEntries(list.filter((x) => x.usage).map((x) => [x.id, [x.usage.usedBytes, round(x.usage.cpu)]])),
     });
     const cutoff = Date.now() - HISTORY_KEEP_MS;
@@ -753,6 +958,9 @@ const SERIES = {
   rx: (h) => h.rx,
   tx: (h) => h.tx,
   temp: (h) => h.temp,
+  gpuTemp: (h) => h.gtemp,
+  gpuPower: (h) => h.gpow,
+  vram: (h) => h.vram,
 };
 
 /**
@@ -1044,6 +1252,7 @@ async function handle(req, res) {
   if (req.method === 'GET' && url.pathname === '/api/status') return sendJson(res, 200, await status());
   if (req.method === 'GET' && url.pathname === '/api/usage') return sendJson(res, 200, await usage());
   if (req.method === 'GET' && url.pathname === '/api/processes') return sendJson(res, 200, await processes());
+  if (req.method === 'GET' && url.pathname === '/api/gpu') return sendJson(res, 200, await gpu());
   if (req.method === 'GET' && url.pathname === '/api/history') {
     const range = Number(url.searchParams.get('range') ?? 3600);
     if (!(range >= 60 && range <= HISTORY_KEEP_MS / 1000)) throw new HttpError(400, 'Range must be 60 seconds to a day');

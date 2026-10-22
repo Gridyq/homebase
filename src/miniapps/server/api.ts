@@ -104,6 +104,48 @@ export type ProcessInfo = {
 
 export type ProcessReport = { processes: ProcessInfo[]; count: number; at: number };
 
+export type GpuEngine = {
+  /** The kernel's name: gfx, compute, dec, enc, jpeg, dma… */
+  id: string;
+  label: string;
+  /** Share of the engine's time since the previous call, 0–1. */
+  usage: number;
+};
+
+/** A program with the graphics card open. */
+export type GpuClient = {
+  pid: number;
+  name: string;
+  service?: string;
+  vramBytes: number;
+  /** System memory the card has mapped for it. */
+  gttBytes: number;
+  /** Missing on the server's first call, before there's anything to compare with. */
+  engines?: GpuEngine[];
+};
+
+export type GpuReport = {
+  name: string;
+  driver?: string;
+  /** 0–1, as the driver reports it. */
+  usage?: number;
+  memoryControllerUsage?: number;
+  vram?: { totalBytes: number; usedBytes: number };
+  /** System memory the card can borrow. */
+  gtt?: { totalBytes: number; usedBytes: number };
+  temperatures: { label: string; celsius: number; criticalCelsius?: number }[];
+  clocks: { label: string; mhz: number; maxMhz?: number }[];
+  power?: { watts: number; capWatts?: number };
+  fan?: { rpm: number; maxRpm?: number };
+  voltageMv?: number;
+  /** PCIe link speed per lane in GT/s, and lanes. */
+  link?: { gts: number; width: number; maxGts: number; maxWidth: number };
+  /** Added up from every program; missing on the server's first call. */
+  engines?: GpuEngine[];
+  clients: GpuClient[];
+  at: number;
+};
+
 export type Series = {
   /** Evenly spaced averages from `start` to `end`; null where the server has no readings. */
   values: (number | null)[];
@@ -111,7 +153,18 @@ export type Series = {
   peak?: number;
 };
 
-export type SystemSeries = 'cpu' | 'gpu' | 'memory' | 'cache' | 'swap' | 'rx' | 'tx' | 'temp';
+export type SystemSeries =
+  | 'cpu'
+  | 'gpu'
+  | 'memory'
+  | 'cache'
+  | 'swap'
+  | 'rx'
+  | 'tx'
+  | 'temp'
+  | 'gpuTemp'
+  | 'gpuPower'
+  | 'vram';
 export type ServiceSeries = 'memory' | 'cpu';
 
 export type History<K extends string> = {
@@ -186,6 +239,10 @@ export function fetchUsage(conn: Connection) {
 
 export function fetchProcesses(conn: Connection) {
   return request<ProcessReport>(conn, '/api/processes');
+}
+
+export function fetchGpu(conn: Connection) {
+  return request<GpuReport>(conn, '/api/gpu');
 }
 
 export function fetchHistory(conn: Connection, rangeSec: number) {

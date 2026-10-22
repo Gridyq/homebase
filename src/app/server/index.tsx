@@ -124,7 +124,13 @@ function Dashboard() {
           onPress={() => router.push('/server/memory')}
         />
         {gpu.usage !== undefined ? (
-          <StatTile label="GPU" value={formatPercent(gpu.usage)} fraction={gpu.usage} caption="Transcoding load" />
+          <StatTile
+            label="GPU"
+            value={formatPercent(gpu.usage)}
+            fraction={gpu.usage}
+            caption="Transcoding load"
+            onPress={() => router.push('/server/gpu')}
+          />
         ) : null}
         <StatTile
           label="Network"
@@ -155,6 +161,9 @@ function Dashboard() {
         <Card>
           <NavRow first title="Memory" caption="What's using it, by service" onPress={() => router.push('/server/memory')} />
           <NavRow title="Processes" caption="Top programs by memory and CPU" onPress={() => router.push('/server/processes')} />
+          {gpu.usage !== undefined ? (
+            <NavRow title="Graphics card" caption="Engines, memory, heat, power and programs" onPress={() => router.push('/server/gpu')} />
+          ) : null}
           <NavRow title="Trends" caption="CPU, memory, network and heat over the last day" onPress={() => router.push('/server/trends')} />
         </Card>
       </Section>
