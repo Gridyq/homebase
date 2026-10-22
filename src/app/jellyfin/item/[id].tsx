@@ -6,9 +6,20 @@ import { Alert, FlatList, Pressable, ScrollView, StyleSheet, useWindowDimensions
 
 import { ThemedText } from '@/components/themed-text';
 import { Spacing } from '@/constants/theme';
+import { useGutter } from '@/hooks/use-gutter';
 import { useTheme } from '@/hooks/use-theme';
 import { TICKS_PER_SECOND, type BaseItem, type Person, type UserData } from '@/miniapps/jellyfin/api';
-import { Button, Centered, Chip, formatRuntime, ItemRow, PosterCard } from '@/miniapps/jellyfin/components';
+import {
+  Button,
+  Centered,
+  Chip,
+  formatRuntime,
+  ItemRow,
+  PosterCard,
+  SectionTitle,
+  usePosterGrid,
+  useRowCardWidth,
+} from '@/miniapps/jellyfin/components';
 import { useJellyfin } from '@/miniapps/jellyfin/session';
 import { defaultSubtitleIndex, subtitleLabel, subtitleStreams, SUBTITLES_OFF } from '@/miniapps/jellyfin/subtitles';
 import { useAsync } from '@/miniapps/jellyfin/use-async';
@@ -17,7 +28,8 @@ export default function ItemDetail() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const client = useJellyfin();
   const theme = useTheme();
-  const { width } = useWindowDimensions();
+  const { width, height } = useWindowDimensions();
+  const gutter = useGutter();
   const [selectedSubtitle, setSubtitle] = useState<number>();
 
   const { data: loaded, error, loading, reload } = useAsync(() => client.item(id), id);
@@ -81,11 +93,12 @@ export default function ItemDetail() {
     <ScrollView style={{ backgroundColor: theme.background }} contentInsetAdjustmentBehavior="never">
       <Stack.Screen options={{ title: '', headerTransparent: true }} />
       {backdrop ? (
-        <Image source={backdrop} style={{ width, height: (width * 9) / 16 }} contentFit="cover" />
+        // In landscape a full-width 16:9 image would fill the whole screen; keep the title in view.
+        <Image source={backdrop} style={{ width, height: Math.min((width * 9) / 16, height * 0.6) }} contentFit="cover" />
       ) : (
         <View style={{ height: 100 }} />
       )}
-      <View style={styles.body}>
+      <View style={[styles.body, gutter]}>
         <ThemedText type="subtitle" style={styles.title}>
           {item.Type === 'Episode' && item.IndexNumber != null ? `${item.IndexNumber}. ${item.Name}` : item.Name}
         </ThemedText>
@@ -149,7 +162,7 @@ export default function ItemDetail() {
             {item.Taglines[0]}
           </ThemedText>
         ) : null}
-        {item.Overview ? <ThemedText type="small">{item.Overview}</ThemedText> : null}
+        {item.Overview ? <ThemedText>{item.Overview}</ThemedText> : null}
         <Crew people={item.People} />
       </View>
 
@@ -168,7 +181,8 @@ export default function ItemDetail() {
 
 function SeriesEpisodes({ series }: { series: BaseItem }) {
   const client = useJellyfin();
-  const { width } = useWindowDimensions();
+  const { width, height } = useWindowDimensions();
+  const gutter = useGutter();
   const [selectedSeasonId, setSeasonId] = useState<string>();
 
   const { data: seasons } = useAsync(() => client.seasons(series.Id), series.Id);
@@ -193,18 +207,18 @@ function SeriesEpisodes({ series }: { series: BaseItem }) {
 
   return (
     <View style={styles.section}>
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chips}>
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={[styles.chips, gutter]}>
         {seasons?.map((s) => (
           <Chip key={s.Id} label={s.Name} selected={s.Id === seasonId} onPress={() => setSeasonId(s.Id)} />
         ))}
       </ScrollView>
-      <View style={styles.episodes}>
+      <View style={[styles.episodes, gutter]}>
         {episodes?.map((ep) => (
           <Link key={ep.Id} href={{ pathname: '/jellyfin/item/[id]', params: { id: ep.Id } }} asChild>
             <Pressable style={styles.episode} onLongPress={() => episodeActions(ep)}>
-              <EpisodeThumb item={ep} width={Math.min(160, width * 0.38)} />
+              <EpisodeThumb item={ep} width={Math.min(width, height) * 0.42} />
               <View style={{ flex: 1, gap: 2 }}>
-                <ThemedText type="smallBold" numberOfLines={2}>
+                <ThemedText numberOfLines={2} style={styles.episodeTitle}>
                   {ep.IndexNumber != null ? `${ep.IndexNumber}. ` : ''}
                   {ep.Name}
                 </ThemedText>
@@ -237,13 +251,12 @@ function EpisodeThumb({ item, width }: { item: BaseItem; width: number }) {
 
 function FolderChildren({ parent }: { parent: BaseItem }) {
   const client = useJellyfin();
-  const { width } = useWindowDimensions();
+  const { cardWidth, gutter } = usePosterGrid();
   const { data } = useAsync(() => client.children(parent.Id), parent.Id);
   if (!data?.length) return null;
-  const cardWidth = (width - Spacing.three * 2 - Spacing.two * 2) / 3;
   if (data.length <= 12) return <ItemRow title="Items" items={data} />;
   return (
-    <View style={[styles.section, styles.grid]}>
+    <View style={[styles.section, styles.grid, gutter]}>
       {data.map((child) => (
         <PosterCard key={child.Id} item={child} width={cardWidth} />
       ))}
@@ -296,19 +309,18 @@ function Crew({ people }: { people: Person[] | undefined }) {
 function Cast({ people }: { people: Person[] | undefined }) {
   const client = useJellyfin();
   const theme = useTheme();
+  const gutter = useGutter();
   const cast = people?.filter((p) => p.Type === 'Actor' || p.Type === 'GuestStar');
   if (!cast?.length) return null;
   return (
     <View style={styles.section}>
-      <ThemedText type="smallBold" style={styles.sectionTitle}>
-        Cast
-      </ThemedText>
+      <SectionTitle title="Cast" />
       <FlatList
         horizontal
         data={cast}
         keyExtractor={(p, i) => `${p.Id}:${i}`}
         showsHorizontalScrollIndicator={false}
-        contentContainerStyle={styles.rowContent}
+        contentContainerStyle={[styles.rowContent, gutter]}
         renderItem={({ item: person }) => {
           const uri = client.personImageUrl(person);
           return (
@@ -336,22 +348,22 @@ function Cast({ people }: { people: Person[] | undefined }) {
 
 function Chapters({ item, onPlay }: { item: BaseItem; onPlay: (startTicks: number) => void }) {
   const client = useJellyfin();
+  const gutter = useGutter();
+  const chapterWidth = useRowCardWidth('wide') * 0.75;
   const chapters = item.Chapters ?? [];
   if (chapters.length < 2) return null;
   return (
     <View style={styles.section}>
-      <ThemedText type="smallBold" style={styles.sectionTitle}>
-        Chapters
-      </ThemedText>
+      <SectionTitle title="Chapters" />
       <FlatList
         horizontal
         data={chapters}
         keyExtractor={(c, i) => `${i}:${c.StartPositionTicks}`}
         showsHorizontalScrollIndicator={false}
-        contentContainerStyle={styles.rowContent}
+        contentContainerStyle={[styles.rowContent, gutter]}
         renderItem={({ item: chapter, index }) => (
-          <Pressable onPress={() => onPlay(chapter.StartPositionTicks)} style={({ pressed }) => ({ width: 160, opacity: pressed ? 0.6 : 1 })}>
-            <ChapterThumb uri={client.chapterImageUrl(item, index)} />
+          <Pressable onPress={() => onPlay(chapter.StartPositionTicks)} style={({ pressed }) => ({ width: chapterWidth, opacity: pressed ? 0.6 : 1 })}>
+            <ChapterThumb uri={client.chapterImageUrl(item, index)} width={chapterWidth} />
             <ThemedText type="smallBold" numberOfLines={1}>
               {chapter.Name || `Chapter ${index + 1}`}
             </ThemedText>
@@ -365,10 +377,11 @@ function Chapters({ item, onPlay }: { item: BaseItem; onPlay: (startTicks: numbe
   );
 }
 
-function ChapterThumb({ uri }: { uri: string | undefined }) {
+function ChapterThumb({ uri, width }: { uri: string | undefined; width: number }) {
   const theme = useTheme();
   return (
-    <View style={[styles.thumb, styles.chapterThumb, { backgroundColor: theme.backgroundElement }]}>
+    <View
+      style={[styles.thumb, styles.chapterThumb, { width, height: (width * 9) / 16, backgroundColor: theme.backgroundElement }]}>
       {uri ? <Image source={uri} style={StyleSheet.absoluteFill} contentFit="cover" /> : null}
     </View>
   );
@@ -403,12 +416,7 @@ const styles = StyleSheet.create({
   sections: {
     gap: Spacing.four,
   },
-  sectionTitle: {
-    fontSize: 18,
-    paddingHorizontal: Spacing.three,
-  },
   rowContent: {
-    paddingHorizontal: Spacing.three,
     gap: Spacing.two + Spacing.one,
   },
   toggles: {
@@ -420,13 +428,13 @@ const styles = StyleSheet.create({
     fontStyle: 'italic',
   },
   person: {
-    width: 96,
+    width: 112,
     gap: 2,
   },
   personPhoto: {
-    width: 96,
-    height: 96,
-    borderRadius: 48,
+    width: 112,
+    height: 112,
+    borderRadius: 56,
     overflow: 'hidden',
     marginBottom: Spacing.one,
   },
@@ -434,17 +442,15 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
   chapterThumb: {
-    width: 160,
-    height: 90,
     marginBottom: Spacing.one,
   },
   body: {
-    padding: Spacing.three,
+    paddingVertical: Spacing.three,
     gap: Spacing.two,
   },
   title: {
-    fontSize: 26,
-    lineHeight: 32,
+    fontSize: 28,
+    lineHeight: 34,
   },
   actions: {
     gap: Spacing.two,
@@ -461,17 +467,18 @@ const styles = StyleSheet.create({
     gap: Spacing.three,
   },
   chips: {
-    paddingHorizontal: Spacing.three,
     gap: Spacing.two,
   },
   episodes: {
-    paddingHorizontal: Spacing.three,
     gap: Spacing.three,
   },
   episode: {
     flexDirection: 'row',
     gap: Spacing.three,
     alignItems: 'center',
+  },
+  episodeTitle: {
+    fontWeight: 600,
   },
   thumb: {
     borderRadius: 6,
@@ -486,7 +493,6 @@ const styles = StyleSheet.create({
   grid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    paddingHorizontal: Spacing.three,
     gap: Spacing.two,
   },
 });

@@ -2,6 +2,7 @@ import { Alert, ScrollView, StyleSheet, View } from 'react-native';
 
 import { ThemedText } from '@/components/themed-text';
 import { Spacing } from '@/constants/theme';
+import { useGutter } from '@/hooks/use-gutter';
 import { useTheme } from '@/hooks/use-theme';
 import { Button, Chip } from '@/miniapps/jellyfin/components';
 import { useJellyfin, useJellyfinSession } from '@/miniapps/jellyfin/session';
@@ -12,6 +13,7 @@ export default function JellyfinSettings() {
   const { signOut } = useJellyfinSession();
   const { settings, update } = useJellyfinSettings();
   const theme = useTheme();
+  const gutter = useGutter();
 
   const confirmSignOut = () =>
     Alert.alert(`Sign out of ${client.session.serverName}?`, undefined, [
@@ -23,7 +25,7 @@ export default function JellyfinSettings() {
     <ScrollView
       style={{ backgroundColor: theme.background }}
       contentInsetAdjustmentBehavior="automatic"
-      contentContainerStyle={styles.content}>
+      contentContainerStyle={[styles.content, gutter]}>
       <BitratePicker
         title="Quality on Wi-Fi"
         value={settings.wifiBitrate}
@@ -76,7 +78,7 @@ function BitratePicker({
 
 const styles = StyleSheet.create({
   content: {
-    padding: Spacing.three,
+    paddingVertical: Spacing.three,
     gap: Spacing.four,
   },
   picker: {

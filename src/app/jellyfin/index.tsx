@@ -4,6 +4,7 @@ import { ActivityIndicator, Pressable, RefreshControl, ScrollView, StyleSheet } 
 
 import { ThemedText } from '@/components/themed-text';
 import { Spacing } from '@/constants/theme';
+import { useGutter } from '@/hooks/use-gutter';
 import { useTheme } from '@/hooks/use-theme';
 import type { BaseItem } from '@/miniapps/jellyfin/api';
 import { Centered, ItemRow } from '@/miniapps/jellyfin/components';
@@ -108,6 +109,7 @@ const SEARCH_GROUPS: { title: string; types: string[]; shape: 'poster' | 'wide' 
 function SearchResults({ term }: { term: string }) {
   const client = useJellyfin();
   const theme = useTheme();
+  const gutter = useGutter();
   const { data, error, loading, reload } = useAsync(
     () => (term ? client.search(term) : Promise.resolve<BaseItem[]>([])),
     `search:${term}`,
@@ -123,7 +125,7 @@ function SearchResults({ term }: { term: string }) {
       {loading ? <ActivityIndicator /> : null}
       {error ? <Centered error={error} onRetry={reload} /> : null}
       {empty ? (
-        <ThemedText themeColor="textSecondary" style={styles.empty}>
+        <ThemedText themeColor="textSecondary" style={[styles.empty, gutter]}>
           No results for “{term}”
         </ThemedText>
       ) : null}
@@ -142,7 +144,6 @@ function SearchResults({ term }: { term: string }) {
 const styles = StyleSheet.create({
   empty: {
     textAlign: 'center',
-    paddingHorizontal: Spacing.four,
   },
   content: {
     paddingVertical: Spacing.three,

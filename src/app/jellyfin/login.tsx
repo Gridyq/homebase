@@ -3,6 +3,7 @@ import { KeyboardAvoidingView, ScrollView, StyleSheet, TextInput } from 'react-n
 
 import { ThemedText } from '@/components/themed-text';
 import { Spacing } from '@/constants/theme';
+import { useGutter } from '@/hooks/use-gutter';
 import { useTheme } from '@/hooks/use-theme';
 import { normalizeServerUrl } from '@/miniapps/jellyfin/api';
 import { Button } from '@/miniapps/jellyfin/components';
@@ -10,6 +11,7 @@ import { useJellyfinSession } from '@/miniapps/jellyfin/session';
 
 export default function Login() {
   const theme = useTheme();
+  const gutter = useGutter();
   const { signIn } = useJellyfinSession();
   const [server, setServer] = useState('');
   const [username, setUsername] = useState('');
@@ -37,7 +39,7 @@ export default function Login() {
     <KeyboardAvoidingView behavior="padding" style={{ flex: 1, backgroundColor: theme.background }}>
       <ScrollView
         contentInsetAdjustmentBehavior="automatic"
-        contentContainerStyle={styles.form}
+        contentContainerStyle={[styles.form, gutter]}
         keyboardShouldPersistTaps="handled">
         <ThemedText type="small" themeColor="textSecondary">
           Server address
@@ -84,14 +86,14 @@ export default function Login() {
 
 const styles = StyleSheet.create({
   form: {
-    padding: Spacing.four,
+    paddingVertical: Spacing.four,
     gap: Spacing.two,
   },
   input: {
     borderRadius: 10,
     paddingHorizontal: Spacing.three,
-    paddingVertical: 12,
-    fontSize: 16,
+    paddingVertical: 14,
+    fontSize: 17,
     marginBottom: Spacing.two,
   },
 });

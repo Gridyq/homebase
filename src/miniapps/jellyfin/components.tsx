@@ -1,9 +1,10 @@
 import { Image } from 'expo-image';
 import { Link } from 'expo-router';
-import { ActivityIndicator, FlatList, Pressable, StyleSheet, View } from 'react-native';
+import { ActivityIndicator, FlatList, Pressable, StyleSheet, useWindowDimensions, View } from 'react-native';
 
 import { ThemedText } from '@/components/themed-text';
 import { Spacing } from '@/constants/theme';
+import { useGutter } from '@/hooks/use-gutter';
 import { useTheme } from '@/hooks/use-theme';
 
 import { TICKS_PER_SECOND, type BaseItem } from './api';
@@ -97,23 +98,47 @@ export function ItemRow({
   items: BaseItem[] | undefined;
   shape?: 'poster' | 'wide';
 }) {
+  const gutter = useGutter();
+  const cardWidth = useRowCardWidth(shape);
   if (!items?.length) return null;
-  const width = shape === 'wide' ? 240 : 120;
   return (
     <View style={styles.row}>
-      <ThemedText type="smallBold" style={styles.rowTitle}>
-        {title}
-      </ThemedText>
+      <SectionTitle title={title} />
       <FlatList
         horizontal
         data={items}
         keyExtractor={(i) => i.Id}
         showsHorizontalScrollIndicator={false}
-        contentContainerStyle={styles.rowContent}
-        renderItem={({ item }) => <PosterCard item={item} width={width} shape={shape} />}
+        contentContainerStyle={[styles.rowContent, gutter]}
+        renderItem={({ item }) => <PosterCard item={item} width={cardWidth} shape={shape} />}
       />
     </View>
   );
+}
+
+/**
+ * Card width for horizontal rows: about 3 posters or 1.4 wide cards across a phone in portrait,
+ * so they grow on bigger phones, capped so landscape doesn't blow them up.
+ */
+export function useRowCardWidth(shape: 'poster' | 'wide') {
+  const { width, height } = useWindowDimensions();
+  const portraitWidth = Math.min(width, height);
+  return shape === 'wide' ? Math.min(portraitWidth * 0.7, 340) : Math.min(portraitWidth * 0.3, 160);
+}
+
+/** Poster grid that fits 3 columns on a phone in portrait and more as the screen gets wider. */
+export function usePosterGrid() {
+  const { width } = useWindowDimensions();
+  const gutter = useGutter();
+  const available = width - gutter.paddingLeft - gutter.paddingRight;
+  const columns = Math.max(3, Math.floor(available / 160));
+  const cardWidth = (available - Spacing.two * (columns - 1)) / columns;
+  return { columns, cardWidth, gutter };
+}
+
+export function SectionTitle({ title }: { title: string }) {
+  const gutter = useGutter();
+  return <ThemedText style={[styles.rowTitle, gutter]}>{title}</ThemedText>;
 }
 
 export function Centered({ loading, error, onRetry }: { loading?: boolean; error?: Error; onRetry?: () => void }) {
@@ -157,9 +182,7 @@ export function Button({
           opacity: disabled ? 0.5 : pressed ? 0.7 : 1,
         },
       ]}>
-      <ThemedText type="smallBold" style={{ color: primary ? '#fff' : theme.text }}>
-        {title}
-      </ThemedText>
+      <ThemedText style={[styles.buttonText, { color: primary ? '#fff' : theme.text }]}>{title}</ThemedText>
     </Pressable>
   );
 }
@@ -203,11 +226,11 @@ const styles = StyleSheet.create({
     gap: Spacing.two,
   },
   rowTitle: {
-    fontSize: 18,
-    paddingHorizontal: Spacing.three,
+    fontSize: 22,
+    lineHeight: 28,
+    fontWeight: 700,
   },
   rowContent: {
-    paddingHorizontal: Spacing.three,
     gap: Spacing.two + Spacing.one,
   },
   centered: {
@@ -218,14 +241,17 @@ const styles = StyleSheet.create({
     gap: Spacing.three,
   },
   chip: {
-    paddingVertical: 8,
+    paddingVertical: 10,
     paddingHorizontal: Spacing.three,
     borderRadius: 999,
   },
   button: {
-    paddingVertical: 12,
+    paddingVertical: 14,
     paddingHorizontal: Spacing.four,
-    borderRadius: 10,
+    borderRadius: 12,
     alignItems: 'center',
+  },
+  buttonText: {
+    fontWeight: 600,
   },
 });
