@@ -83,6 +83,10 @@ function Player({
   const [ended, setEnded] = useState(false);
   const started = useRef(false);
   const position = useRef(startSeconds);
+  const inPictureInPicture = useRef(false);
+  /** Set when playback ends and we close or show Up next ourselves, so leaving fullscreen doesn't close. */
+  const keepOpen = useRef(false);
+  const closeTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
 
   const source: VideoSource = {
     uri: playback.url,
@@ -141,6 +145,7 @@ function Player({
 
   useEventListener(player, 'playToEnd', () => {
     position.current = player.duration;
+    keepOpen.current = true;
     if (!next) {
       router.back();
       return;
@@ -161,6 +166,7 @@ function Player({
   // Tell the server where we stopped so "Continue watching" is up to date.
   useEffect(() => {
     return () => {
+      clearTimeout(closeTimer.current);
       if (started.current) report('stopped');
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -178,9 +184,22 @@ function Player({
         startsPictureInPictureAutomatically
         fullscreenOptions={{ enable: true, orientation: 'default' }}
         onFullscreenEnter={() => setFullscreen(true)}
-        // Don't close the screen here: leaving fullscreen is also how Picture in Picture starts,
-        // and unmounting would kill it. The close button reappears instead.
-        onFullscreenExit={() => setFullscreen(false)}
+        // Closing the system player closes this screen too. Leaving fullscreen is also how Picture
+        // in Picture starts, and unmounting would kill it, so wait a moment to see whether it did.
+        onFullscreenExit={() => {
+          setFullscreen(false);
+          if (keepOpen.current) return;
+          clearTimeout(closeTimer.current);
+          closeTimer.current = setTimeout(() => {
+            if (!inPictureInPicture.current) router.back();
+          }, 700);
+        }}
+        onPictureInPictureStart={() => {
+          inPictureInPicture.current = true;
+        }}
+        onPictureInPictureStop={() => {
+          inPictureInPicture.current = false;
+        }}
       />
       {ended && next ? <UpNext client={client} next={next} onPlay={playNext} onClose={() => router.back()} /> : null}
     </Shell>
