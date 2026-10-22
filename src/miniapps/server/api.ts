@@ -46,6 +46,20 @@ export type Disk = {
   availableBytes: number;
 };
 
+/** Game mode stops the download stack while a game runs, or while switched on from the app. */
+export type GameMode = {
+  on: boolean;
+  /** Switched from the app rather than following games. */
+  manual: boolean;
+  /** The game running, or the last one, until its grace period ends. */
+  game?: string;
+  since?: number;
+  /** When it turns off by itself, once the game has closed. */
+  endsAt?: number;
+  /** Ids of the services it stops. */
+  services: string[];
+};
+
 export type Status = {
   host: { name: string; uptimeSec: number; kernel: string };
   /** Usage is 0–1, or missing for the first couple of seconds after the server starts. */
@@ -56,6 +70,7 @@ export type Status = {
   temperatures: { label: string; celsius: number }[];
   disks: Disk[];
   services: Service[];
+  gameMode: GameMode;
   at: number;
 };
 
@@ -231,6 +246,15 @@ export function fetchStatus(conn: Connection) {
 
 export function runAction(conn: Connection, id: string, action: ServiceAction) {
   return request<{ ok: true }>(conn, `/api/services/${encodeURIComponent(id)}/${action}`, { method: 'POST' });
+}
+
+export function fetchGameMode(conn: Connection) {
+  return request<GameMode>(conn, '/api/game-mode');
+}
+
+/** Waits for the services to stop or start, which can take a while. */
+export function setGameMode(conn: Connection, on: boolean) {
+  return request<GameMode>(conn, '/api/game-mode', { method: 'POST', body: JSON.stringify({ on }), timeoutMs: 200_000 });
 }
 
 export function fetchUsage(conn: Connection) {

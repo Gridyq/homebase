@@ -67,8 +67,11 @@ export type SeerrRequest = {
   media: { tmdbId: number; status: MediaStatus };
 };
 
+/** Seerr is stopped while unused; the server starts it on the first call, which takes a few seconds. */
+const SEERR_TIMEOUT_MS = 30_000;
+
 const arr = <T>(conn: Connection, path: string, init?: Parameters<typeof request>[2]) =>
-  request<T>(conn, `/api/arr/${path}`, init);
+  request<T>(conn, `/api/arr/${path}`, path.startsWith('seerr/') ? { timeoutMs: SEERR_TIMEOUT_MS, ...init } : init);
 
 // ---------------------------------------------------------------------------------------------
 // Seerr

@@ -1,6 +1,6 @@
 import { router, Stack } from 'expo-router';
 import { useState } from 'react';
-import { RefreshControl, ScrollView, StyleSheet, View } from 'react-native';
+import { Alert, RefreshControl, ScrollView, StyleSheet, Switch, View } from 'react-native';
 
 import { Button } from '@/components/button';
 import { ThemedText } from '@/components/themed-text';
@@ -8,7 +8,7 @@ import { Spacing } from '@/constants/theme';
 import { useGutter } from '@/hooks/use-gutter';
 import { useTheme } from '@/hooks/use-theme';
 import { Centered } from '@/miniapps/jellyfin/components';
-import { fetchStatus } from '@/miniapps/server/api';
+import { fetchStatus, setGameMode, type Connection, type Status } from '@/miniapps/server/api';
 import {
   Card,
   formatBytes,
@@ -157,6 +157,8 @@ function Dashboard() {
         </View>
       ) : null}
 
+      <GameModeCard conn={conn} status={data} onChanged={refresh} />
+
       <Section title="Analytics">
         <Card>
           <NavRow first title="Memory" caption="What's using it, by service" onPress={() => router.push('/server/memory')} />
@@ -207,7 +209,65 @@ function Dashboard() {
   );
 }
 
+function GameModeCard({ conn, status, onChanged }: { conn: Connection; status: Status; onChanged: () => Promise<void> }) {
+  const theme = useTheme();
+  // The value being switched to while the server stops or starts everything.
+  const [pending, setPending] = useState<boolean>();
+  const { gameMode } = status;
+  const on = pending ?? gameMode.on;
+
+  const toggle = async (next: boolean) => {
+    setPending(next);
+    try {
+      await setGameMode(conn, next);
+      await onChanged();
+    } catch (e) {
+      Alert.alert(`Couldn't turn game mode ${next ? 'on' : 'off'}`, e instanceof Error ? e.message : String(e));
+    } finally {
+      setPending(undefined);
+    }
+  };
+
+  let caption: string;
+  if (pending !== undefined) caption = pending ? 'Stopping downloads and requests…' : 'Starting downloads and requests…';
+  else if (gameMode.on && gameMode.manual) caption = 'Downloads and requests are stopped until you turn it off.';
+  else if (gameMode.on && gameMode.endsAt) {
+    caption = `${gameMode.game} closed. Downloads come back in ${formatDuration(Math.max(0, gameMode.endsAt - status.at))}.`;
+  } else if (gameMode.on) caption = `Downloads and requests are stopped while ${gameMode.game} runs.`;
+  else if (gameMode.manual && gameMode.game) caption = `Kept off while ${gameMode.game} runs.`;
+  else {
+    const ids = new Set(gameMode.services);
+    const freed = status.services.reduce((sum, s) => sum + (ids.has(s.id) ? (s.usage?.usedBytes ?? 0) : 0), 0);
+    caption = `Stops downloads and requests to free ${freed ? `about ${formatBytes(freed)}` : 'their memory'}. Turns on by itself while a Steam game or Starsector runs.`;
+  }
+
+  return (
+    <Card>
+      <View style={styles.gameRow}>
+        <View style={styles.flex}>
+          <ThemedText type="smallBold">Game mode</ThemedText>
+          <ThemedText type="small" themeColor="textSecondary">
+            {caption}
+          </ThemedText>
+        </View>
+        <Switch
+          value={on}
+          disabled={pending !== undefined}
+          onValueChange={toggle}
+          trackColor={{ true: theme.accent }}
+        />
+      </View>
+    </Card>
+  );
+}
+
 const styles = StyleSheet.create({
+  gameRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.three,
+    paddingVertical: Spacing.two,
+  },
   content: {
     paddingVertical: Spacing.three,
     gap: Spacing.three,

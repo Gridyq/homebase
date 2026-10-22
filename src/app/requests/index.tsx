@@ -27,7 +27,7 @@ import {
   type Seeding,
 } from '@/miniapps/requests/api';
 import { DownloadRow, SeedingRow, SpeedLimitRow, TitleCard, titleHref, UpcomingRow } from '@/miniapps/requests/components';
-import type { Connection } from '@/miniapps/server/api';
+import { fetchGameMode, setGameMode, type Connection, type GameMode } from '@/miniapps/server/api';
 import { Card } from '@/miniapps/server/components';
 import { useServerConnection } from '@/miniapps/server/connection';
 import { usePolling } from '@/miniapps/server/use-polling';
@@ -97,6 +97,7 @@ function Overview({ conn }: { conn: Connection }) {
   const queue = usePolling(() => downloads(conn), QUEUE_POLL_MS, conn.url);
   const limit = usePolling(() => speedLimit(conn), QUEUE_POLL_MS, conn.url);
   const seed = usePolling(() => seeding(conn), QUEUE_POLL_MS, conn.url);
+  const game = usePolling(() => fetchGameMode(conn), QUEUE_POLL_MS, conn.url);
   const rest = useAsync(() => Promise.all([upcoming(conn), requestedTitles(conn)]), 'overview');
   const [pulled, setPulled] = useState(false);
   if (pulled && !rest.loading) setPulled(false);
@@ -204,6 +205,22 @@ function Overview({ conn }: { conn: Connection }) {
     );
   };
 
+  if (game.data?.on) {
+    return (
+      <GameModeNotice
+        conn={conn}
+        gameMode={game.data}
+        onOff={async () => {
+          await game.refresh();
+          rest.reload();
+          queue.refresh();
+          limit.refresh();
+          seed.refresh();
+        }}
+      />
+    );
+  }
+
   if (!queue.data && !rest.data) {
     const error = queue.error ?? rest.error;
     return <Centered loading={!error} error={error} onRetry={rest.reload} />;
@@ -279,6 +296,34 @@ function Overview({ conn }: { conn: Connection }) {
         </ThemedText>
       ) : null}
     </ScrollView>
+  );
+}
+
+function GameModeNotice({ conn, gameMode, onOff }: { conn: Connection; gameMode: GameMode; onOff: () => Promise<void> }) {
+  const theme = useTheme();
+  const gutter = useGutter();
+  const [busy, setBusy] = useState(false);
+  const turnOff = async () => {
+    setBusy(true);
+    try {
+      await setGameMode(conn, false);
+      await onOff();
+    } catch (e) {
+      Alert.alert("Couldn't turn game mode off", e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <View style={[styles.empty, gutter, { backgroundColor: theme.background }]}>
+      <ThemedText type="smallBold">Game mode is on</ThemedText>
+      <ThemedText type="small" themeColor="textSecondary" style={styles.center}>
+        {gameMode.manual || !gameMode.game
+          ? 'Downloads and requests are stopped to leave memory for games.'
+          : `Downloads and requests are stopped while ${gameMode.game} runs, and come back shortly after it closes.`}
+      </ThemedText>
+      {busy ? <ActivityIndicator /> : <Button title="Turn off game mode" onPress={turnOff} />}
+    </View>
   );
 }
 

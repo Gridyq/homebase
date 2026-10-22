@@ -53,3 +53,4 @@ example
 /status-server/pairing
 /status-server/history.json
 /status-server/history.json.tmp
+/status-server/game-mode.json

@@ -2,8 +2,9 @@
 /**
  * Status server for Homebase's Server mini-app: system stats, services and containers, and
  * start/stop/restart for them. Also watches for problems and reports them through ntfy, since
- * the app can't get push notifications, and passes the Requests mini-app's calls on to Seerr,
- * Sonarr and Radarr, and qBittorrent's speed limit and seeding. No dependencies beyond Node.js.
+ * the app can't get push notifications. Stops the download stack while a game runs (game mode)
+ * and runs Seerr only while it's used. Passes the Requests mini-app's calls on to Seerr, Sonarr
+ * and Radarr, and qBittorrent's speed limit and seeding. No dependencies beyond Node.js.
  *
  * It also keeps a day of history (CPU, memory, network, and each service's memory and CPU) in
  * `history.json`, and can list the processes and cgroups using the most memory and CPU.
@@ -749,6 +750,27 @@ function unitState(props) {
   return 'stopped';
 }
 
+const QUADLET_DIR = path.join(os.homedir(), '.config/containers/systemd');
+
+/**
+ * Containers that systemd runs from Quadlet files, with their units. Quadlet removes a container
+ * when it stops, so this is how stopped ones still get listed.
+ */
+async function quadlets() {
+  const files = (await readdir(QUADLET_DIR).catch(() => [])).filter((f) => f.endsWith('.container'));
+  return Promise.all(
+    files.map(async (f) => {
+      const text = await readFile(path.join(QUADLET_DIR, f), 'utf8');
+      const base = f.slice(0, -'.container'.length);
+      return {
+        name: /^ContainerName=(.+)$/m.exec(text)?.[1].trim() ?? `systemd-${base}`,
+        image: /^Image=(.+)$/m.exec(text)?.[1].trim(),
+        unit: `${base}.service`,
+      };
+    }),
+  );
+}
+
 async function containers() {
   const { stdout } = await run('podman', ['ps', '--all', '--format', 'json']);
   return JSON.parse(stdout || '[]');
@@ -756,9 +778,13 @@ async function containers() {
 
 /** Everything the dashboard lists, with what each one can do. */
 async function services() {
-  const [pods, groups] = await Promise.all([
+  const [pods, quadletList, groups] = await Promise.all([
     containers().catch((e) => {
       console.error('podman ps failed:', e.message);
+      return [];
+    }),
+    quadlets().catch((e) => {
+      console.error('Reading Quadlet files failed:', e.message);
       return [];
     }),
     groupUsage().catch((e) => {
@@ -767,7 +793,8 @@ async function services() {
     }),
   ]);
   const usageById = serviceGroups(groups, pods);
-  const quadletUnits = pods.map((p) => p.Labels?.PODMAN_SYSTEMD_UNIT).filter(Boolean);
+  const gone = quadletList.filter((q) => !pods.some((p) => p.Names?.includes(q.name)));
+  const quadletUnits = [...pods.map((p) => p.Labels?.PODMAN_SYSTEMD_UNIT).filter(Boolean), ...gone.map((q) => q.unit)];
   const timerTargets = UNITS.filter((u) => u.runs).map((u) => u.runs);
   const [userProps, systemProps] = await Promise.all([
     showUnits([...quadletUnits, ...UNITS.filter((u) => !u.system).map((u) => u.unit), ...timerTargets], false),
@@ -791,6 +818,18 @@ async function services() {
       actions: running ? ['restart', 'stop'] : ['start'],
     };
   });
+
+  for (const q of gone) {
+    const state = unitState(userProps[q.unit] ?? {});
+    list.push({
+      id: `container:${q.name}`,
+      name: q.name,
+      kind: 'container',
+      detail: q.image?.replace(/^docker\.io\/(library\/)?/, ''),
+      state,
+      actions: state === 'changing' ? [] : ['start'],
+    });
+  }
 
   for (const u of UNITS) {
     const props = (u.system ? systemProps : userProps)[u.unit] ?? {};
@@ -831,9 +870,15 @@ async function services() {
 async function performAction(id, action) {
   const [kind, name] = [id.slice(0, id.indexOf(':')), id.slice(id.indexOf(':') + 1)];
   if (kind === 'container') {
-    const pod = (await containers()).find((p) => p.Names?.includes(name));
-    if (!pod) throw new HttpError(404, `No container named ${name}`);
     if (!['start', 'stop', 'restart'].includes(action)) throw new HttpError(400, `Can't ${action} a container`);
+    const pod = (await containers()).find((p) => p.Names?.includes(name));
+    if (!pod) {
+      // A stopped Quadlet container no longer exists; its unit creates it again.
+      const q = (await quadlets()).find((x) => x.name === name);
+      if (!q) throw new HttpError(404, `No container named ${name}`);
+      await run('systemctl', ['--user', action === 'stop' ? 'stop' : 'start', q.unit], { timeout: 120_000 });
+      return;
+    }
     // Quadlet containers go through systemd, which would otherwise restart or fight a direct
     // podman command.
     const unit = pod.Labels?.PODMAN_SYSTEMD_UNIT;
@@ -881,6 +926,7 @@ async function status() {
     temperatures: temps,
     disks: diskList,
     services: serviceList,
+    gameMode: gameModeState(),
     at: Date.now(),
   };
 }
@@ -1050,6 +1096,135 @@ async function watch() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Game mode: stops the download stack to leave its memory to a game. It turns on by itself while
+// a Steam game or Starsector runs and off half a minute after the game closes, or can be switched
+// from the app. Turned on from the app, it stays on until turned off there. Turned off while a
+// game runs, it stays off until that game closes. Jellyfin keeps running so the TV still works.
+
+/** In start order; systemd works out the rest from the units' own dependencies. */
+const GAME_MODE_UNITS = ['gluetun', 'qbittorrent', 'flaresolverr', 'prowlarr', 'sonarr', 'radarr', 'recyclarr', 'seerr'];
+const GAME_MODE_PATH = path.join(ROOT, 'game-mode.json');
+const GAME_CHECK_INTERVAL = 10_000;
+/** How long after a game closes before the services come back, so restarting a game doesn't bounce them. */
+const GAME_GRACE_MS = 30_000;
+const STEAM_DIR = path.join(os.homedir(), '.local/share/Steam');
+
+/**
+ * `manual` is true or false when set from the app, undefined when following games. `game` is the
+ * last game seen and `lastSeen` when, kept through the grace period.
+ */
+let gameMode = { manual: undefined, active: false, game: undefined, lastSeen: undefined, since: undefined };
+let gameModeBusy = Promise.resolve();
+const GAME_MODE_UNIT_FILES = GAME_MODE_UNITS.map((u) => `${u}.service`);
+
+async function stopGameModeUnits() {
+  await run('systemctl', ['--user', 'stop', ...GAME_MODE_UNIT_FILES], { timeout: 180_000 });
+  // Some exit with an error when stopped (gluetun with 1); that's not a failure worth showing.
+  await run('systemctl', ['--user', 'reset-failed', ...GAME_MODE_UNIT_FILES]).catch(() => {});
+}
+
+async function steamGameName(appId) {
+  const vdf = await readFile(path.join(STEAM_DIR, 'steamapps/libraryfolders.vdf'), 'utf8').catch(() => '');
+  const libraries = [...vdf.matchAll(/"path"\s+"([^"]+)"/g)].map((m) => m[1]);
+  for (const lib of libraries.length ? libraries : [STEAM_DIR]) {
+    const manifest = await readFile(path.join(lib, `steamapps/appmanifest_${appId}.acf`), 'utf8').catch(() => '');
+    const name = /"name"\s+"([^"]+)"/.exec(manifest)?.[1];
+    if (name) return name;
+  }
+  return 'A Steam game';
+}
+
+/** Name of a game that's running, or undefined. */
+async function runningGame() {
+  const pids = (await readdir('/proc')).filter((p) => /^\d+$/.test(p));
+  for (const pid of pids) {
+    const args = await readFile(`/proc/${pid}/cmdline`, 'utf8').then((t) => t.split('\0'), () => []);
+    if (args.includes('com.fs.starfarer.StarfarerLauncher')) return 'Starsector';
+    // Steam starts every game, native or Proton, under `reaper SteamLaunch AppId=<id> -- ...`.
+    if (args.includes('SteamLaunch')) {
+      const appId = args.map((a) => /^AppId=(\d+)$/.exec(a)?.[1]).find(Boolean);
+      if (appId) return steamGameName(appId);
+    }
+  }
+  return undefined;
+}
+
+async function saveGameMode() {
+  const { manual, active, game } = gameMode;
+  await writeFile(GAME_MODE_PATH, JSON.stringify({ manual, active, game })).catch((e) =>
+    console.error("Couldn't save game mode:", e.message),
+  );
+}
+
+/** Starts or stops the services if game mode should change. One change at a time. */
+function updateGameMode() {
+  gameModeBusy = gameModeBusy.then(async () => {
+    const want = gameMode.manual ?? !!gameMode.game;
+    if (want === gameMode.active) return;
+    console.log(`Game mode ${want ? 'on' : 'off'}${gameMode.game ? ` (${gameMode.game})` : ''}`);
+    gameMode.active = want;
+    gameMode.since = Date.now();
+    await saveGameMode();
+    await (want ? stopGameModeUnits() : run('systemctl', ['--user', 'start', ...GAME_MODE_UNIT_FILES.filter((u) => u !== SEERR_UNIT)], { timeout: 180_000 })).catch(
+      (e) => console.error(`Couldn't ${want ? 'stop' : 'start'} the game mode services:`, e.stderr?.trim() || e.message),
+    );
+  });
+  return gameModeBusy;
+}
+
+async function checkGame() {
+  try {
+    const game = await runningGame();
+    const now = Date.now();
+    if (game) Object.assign(gameMode, { game, lastSeen: now });
+    else if (gameMode.game && now - gameMode.lastSeen >= GAME_GRACE_MS) {
+      gameMode.game = undefined;
+      // Turning it off only lasted for that game.
+      if (gameMode.manual === false) gameMode.manual = undefined;
+    }
+    await updateGameMode();
+  } catch (e) {
+    console.error('Checking for games failed:', e);
+  }
+}
+
+async function setGameMode(on) {
+  if (typeof on !== 'boolean') throw new HttpError(400, 'Expected { "on": true | false }');
+  gameMode.manual = on ? true : gameMode.game ? false : undefined;
+  await updateGameMode();
+  return gameModeState();
+}
+
+function gameModeState() {
+  const { active, manual, game, lastSeen, since } = gameMode;
+  const closing = game && lastSeen && Date.now() - lastSeen > GAME_CHECK_INTERVAL * 2;
+  return {
+    on: active,
+    manual: manual !== undefined,
+    game,
+    since,
+    /** When it turns off by itself, once the game has closed. */
+    endsAt: active && manual === undefined && closing ? lastSeen + GAME_GRACE_MS : undefined,
+    services: GAME_MODE_UNITS.map((u) => `container:${u}`),
+  };
+}
+
+async function loadGameMode() {
+  const saved = await readFile(GAME_MODE_PATH, 'utf8').then(JSON.parse, () => undefined);
+  if (!saved?.active) return;
+  // On while a game ran: give it the grace period from now, in case the game is still going.
+  Object.assign(gameMode, { ...saved, lastSeen: Date.now(), since: Date.now() });
+  // After a reboot the services started with everything else, so stop them again.
+  await stopGameModeUnits().catch((e) => console.error("Couldn't stop the game mode services:", e.message));
+}
+
+function gameModeError(service) {
+  if (gameMode.active) {
+    throw new HttpError(503, `Game mode is on, so ${service} is stopped. Turn it off in the Server app to use it.`);
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
 // Media requests: the Requests mini-app talks to Seerr, Sonarr and Radarr through here, so their
 // API keys stay on this machine. Keys are read from each app's own config on every call, so a
 // rotated key just works. Only the calls the app makes are let through.
@@ -1060,21 +1235,64 @@ const xmlApiKey = async (app) =>
 
 const ARR_APPS = {
   seerr: {
+    label: 'Seerr',
     base: 'http://localhost:5055/api/v1',
     key: async () => JSON.parse(await readFile(path.join(ARR_DIR, 'seerr', 'settings.json'), 'utf8')).main?.apiKey,
     routes: { GET: /^(search|movie\/\d+|tv\/\d+|request)$/, POST: /^request$/ },
   },
   sonarr: {
+    label: 'Sonarr',
     base: 'http://localhost:8989/api/v3',
     key: () => xmlApiKey('sonarr'),
     routes: { GET: /^(queue|calendar|release|series\/\d+)$/, POST: /^release$/, DELETE: /^queue\/\d+$/ },
   },
   radarr: {
+    label: 'Radarr',
     base: 'http://localhost:7878/api/v3',
     key: () => xmlApiKey('radarr'),
     routes: { GET: /^(queue|calendar|release|movie\/\d+)$/, POST: /^release$/, DELETE: /^queue\/\d+$/ },
   },
 };
+
+// Seerr only runs while the Requests app uses it: the first call starts it (a few seconds), and
+// it stops after half an hour without calls. Its unit isn't started at boot.
+
+const SEERR_UNIT = 'seerr.service';
+const SEERR_IDLE_MS = 30 * 60_000;
+const SEERR_START_TIMEOUT_MS = 90_000;
+let seerrLastUsed = Date.now();
+let seerrStarting;
+
+const seerrAnswers = () =>
+  fetch(`${ARR_APPS.seerr.base}/status`, { signal: AbortSignal.timeout(2000) }).then((r) => r.ok, () => false);
+
+async function wakeSeerr() {
+  seerrLastUsed = Date.now();
+  if (seerrStarting || !(await seerrAnswers())) {
+    seerrStarting ??= (async () => {
+      console.log('Starting Seerr for the Requests app');
+      await run('systemctl', ['--user', 'start', SEERR_UNIT], { timeout: 120_000 });
+      const deadline = Date.now() + SEERR_START_TIMEOUT_MS;
+      while (!(await seerrAnswers())) {
+        if (Date.now() > deadline) throw new HttpError(504, 'Seerr is taking too long to start. Try again in a minute.');
+        await new Promise((r) => setTimeout(r, 500));
+      }
+    })().finally(() => {
+      seerrStarting = undefined;
+    });
+    await seerrStarting;
+  }
+}
+
+async function stopIdleSeerr() {
+  if (seerrStarting || Date.now() - seerrLastUsed < SEERR_IDLE_MS) return;
+  const { stdout } = await run('systemctl', ['--user', 'is-active', SEERR_UNIT]).catch((e) => e);
+  if (stdout?.trim() !== 'active') return;
+  console.log('Stopping Seerr, unused for half an hour');
+  await run('systemctl', ['--user', 'stop', SEERR_UNIT], { timeout: 120_000 }).catch((e) =>
+    console.error("Couldn't stop Seerr:", e.message),
+  );
+}
 
 /** A release search asks every indexer, some through FlareSolverr, so it can take a while. */
 const ARR_TIMEOUT_MS = 180_000;
@@ -1094,6 +1312,8 @@ async function readBody(req) {
 async function proxyArr(req, res, appName, apiPath, search) {
   const app = ARR_APPS[appName];
   if (!app?.routes[req.method]?.test(apiPath)) throw new HttpError(404, 'Not found');
+  gameModeError(app.label);
+  if (appName === 'seerr') await wakeSeerr();
   const key = await app.key().catch(() => undefined);
   if (!key) throw new HttpError(503, `${appName} isn't set up on the server`);
   if (req.method !== 'GET') log(req, `${req.method} ${appName}/${apiPath}`);
@@ -1146,6 +1366,7 @@ async function qbitLogin() {
 }
 
 async function qbit(apiPath, form) {
+  gameModeError('qBittorrent');
   for (let attempt = 0; ; attempt++) {
     if (!qbitCookie) await qbitLogin();
     let res;
@@ -1259,6 +1480,20 @@ async function handle(req, res) {
     return sendJson(res, 200, historyFor(range, url.searchParams.get('service') ?? undefined));
   }
 
+  if (url.pathname === '/api/game-mode') {
+    if (req.method === 'GET') return sendJson(res, 200, gameModeState());
+    if (req.method === 'POST') {
+      let on;
+      try {
+        on = JSON.parse((await readBody(req))?.toString() ?? '{}').on;
+      } catch {
+        throw new HttpError(400, 'Expected JSON');
+      }
+      log(req, `game mode ${on}`);
+      return sendJson(res, 200, await setGameMode(on));
+    }
+  }
+
   const match = /^\/api\/services\/([^/]+)\/(start|stop|restart|run)$/.exec(url.pathname);
   if (req.method === 'POST' && match) {
     const id = decodeURIComponent(match[1]);
@@ -1349,6 +1584,10 @@ if (process.argv[2] === 'pair') {
       process.exit(0);
     });
   }
+  await loadGameMode();
+  await checkGame();
+  setInterval(checkGame, GAME_CHECK_INTERVAL).unref();
+  setInterval(stopIdleSeerr, 60_000).unref();
   setTimeout(watch, 10_000).unref();
   setInterval(watch, WATCH_INTERVAL).unref();
 
