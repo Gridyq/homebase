@@ -1,6 +1,6 @@
 import { Image } from 'expo-image';
 import { Link } from 'expo-router';
-import { ActivityIndicator, FlatList, Pressable, StyleSheet, useWindowDimensions, View } from 'react-native';
+import { ActivityIndicator, FlatList, PixelRatio, Pressable, StyleSheet, useWindowDimensions, View } from 'react-native';
 
 import { ThemedText } from '@/components/themed-text';
 import { Spacing } from '@/constants/theme';
@@ -43,12 +43,14 @@ export function PosterCard({ item, width, shape = 'poster' }: PosterProps) {
   const theme = useTheme();
   const aspect = shape === 'wide' ? 16 / 9 : 2 / 3;
   const height = width / aspect;
+  // Ask for the image at the size it's drawn on screen, so it's sharp on 3x displays.
+  const pixels = PixelRatio.getPixelSizeForLayoutSize(height);
   const uri =
     shape === 'wide'
-      ? (client.imageUrl(item, { type: 'Thumb', height: 360 }) ??
-        client.imageUrl(item, { type: 'Backdrop', height: 360 }) ??
-        client.imageUrl(item, { height: 360 }))
-      : client.imageUrl(item, { height: 450 });
+      ? (client.imageUrl(item, { type: 'Thumb', height: pixels }) ??
+        client.imageUrl(item, { type: 'Backdrop', height: pixels }) ??
+        client.imageUrl(item, { height: pixels }))
+      : client.imageUrl(item, { height: pixels });
   const progress = item.UserData?.PlayedPercentage;
   const subtitle =
     item.Type === 'Episode'
@@ -62,7 +64,11 @@ export function PosterCard({ item, width, shape = 'poster' }: PosterProps) {
           {uri ? (
             <Image source={uri} style={StyleSheet.absoluteFill} contentFit="cover" transition={150} />
           ) : (
-            <ThemedText type="small" themeColor="textSecondary" style={styles.fallback} numberOfLines={3}>
+            <ThemedText
+              type={shape === 'wide' ? 'default' : 'small'}
+              themeColor="textSecondary"
+              style={[styles.fallback, shape === 'wide' && styles.fallbackWide]}
+              numberOfLines={3}>
               {item.Name}
             </ThemedText>
           )}
@@ -207,6 +213,11 @@ const styles = StyleSheet.create({
   fallback: {
     textAlign: 'center',
     padding: Spacing.two,
+  },
+  fallbackWide: {
+    fontSize: 28,
+    lineHeight: 34,
+    fontWeight: 700,
   },
   progressTrack: {
     position: 'absolute',
