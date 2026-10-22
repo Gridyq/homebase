@@ -47,3 +47,6 @@ example
 /update-server/updates/
 # Public code-signing certificate for updates (the private key stays ignored)
 !/certs/certificate.pem
+
+# Status server: access token stays on this machine
+/status-server/token

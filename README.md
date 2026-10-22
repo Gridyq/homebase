@@ -63,6 +63,22 @@ npm run publish-update
 3. Add an entry to `src/miniapps/registry.ts` so it shows on the launcher.
 4. Register its stack in `src/app/_layout.tsx` with `headerShown: false`.
 
+## Server mini-app
+
+Shows CPU, memory, GPU, network, temperatures, disks, and the Podman containers and systemd units
+on the home server, and can start, stop and restart them. The data comes from `status-server/`,
+which also sends an ntfy message when a disk passes 90%, a sensor passes 90°C, or a service fails
+(and again when it recovers).
+
+- It runs as a systemd user service: `systemctl --user status homebase-status`. It listens on
+  port 8788; open it on the tailnet zone once with
+  `sudo firewall-cmd --zone=tailnet --add-port=8788/tcp --permanent && sudo firewall-cmd --reload`.
+- Every request needs the token in `status-server/token` (git-ignored, created on first start).
+  `npm run status-server -- pair` sends a link through ntfy; tapping it on the phone fills in the
+  app's connection settings.
+- Containers are found on their own; Quadlet ones are controlled through their systemd unit.
+  Other units to show are listed in `UNITS` at the top of `status-server/server.mjs`.
+
 ## Jellyfin notes
 
 - The server decides per file whether the phone can play it directly or needs it converted to

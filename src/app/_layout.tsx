@@ -11,6 +11,7 @@ export default function RootLayout() {
       <Stack>
         <Stack.Screen name="index" options={{ title: 'Apps', headerLargeTitle: true }} />
         <Stack.Screen name="jellyfin" options={{ headerShown: false }} />
+        <Stack.Screen name="server" options={{ headerShown: false }} />
         <Stack.Screen
           name="whats-new"
           options={{

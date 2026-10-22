@@ -39,4 +39,12 @@ export const miniApps: MiniApp[] = [
     href: '/jellyfin',
     shortcuts: jellyfinShortcuts,
   },
+  {
+    id: 'server',
+    name: 'Server',
+    description: 'Health, storage and services on the home server',
+    glyph: '▤',
+    color: '#12A594',
+    href: '/server',
+  },
 ];
