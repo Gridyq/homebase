@@ -35,7 +35,10 @@ export default function Login() {
 
   return (
     <KeyboardAvoidingView behavior="padding" style={{ flex: 1, backgroundColor: theme.background }}>
-      <ScrollView contentContainerStyle={styles.form} keyboardShouldPersistTaps="handled">
+      <ScrollView
+        contentInsetAdjustmentBehavior="automatic"
+        contentContainerStyle={styles.form}
+        keyboardShouldPersistTaps="handled">
         <ThemedText type="small" themeColor="textSecondary">
           Server address
         </ThemedText>
