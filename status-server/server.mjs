@@ -867,6 +867,31 @@ async function services() {
   return list;
 }
 
+/**
+ * Starts a container that isn't a Quadlet in a transient systemd unit of its own. Started
+ * directly, it would land in this service's cgroup, inherit its sandbox, and be killed whenever
+ * this server restarts. `podman start --attach` stays in the foreground, so the unit lives as
+ * long as the container and its output goes to the journal.
+ */
+async function startContainerUnit(name, restart) {
+  const unit = `container-${name}.service`;
+  if (restart) {
+    await run('podman', ['stop', name], { timeout: 120_000 });
+    // The unit ends once `podman start --attach` notices; wait so the name is free again.
+    for (let i = 0; i < 50; i++) {
+      const state = await run('systemctl', ['--user', 'is-active', unit]).then((r) => r.stdout.trim(), (e) => e.stdout?.trim());
+      if (state !== 'active' && state !== 'deactivating') break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  }
+  await run('systemctl', ['--user', 'reset-failed', unit]).catch(() => {});
+  await run(
+    'systemd-run',
+    ['--user', '--collect', `--unit=${unit}`, `--description=Podman container ${name}`, 'podman', 'start', '--attach', name],
+    { timeout: 30_000 },
+  );
+}
+
 async function performAction(id, action) {
   const [kind, name] = [id.slice(0, id.indexOf(':')), id.slice(id.indexOf(':') + 1)];
   if (kind === 'container') {
@@ -883,7 +908,8 @@ async function performAction(id, action) {
     // podman command.
     const unit = pod.Labels?.PODMAN_SYSTEMD_UNIT;
     if (unit) await run('systemctl', ['--user', action, unit], { timeout: 120_000 });
-    else await run('podman', [action, name], { timeout: 120_000 });
+    else if (action === 'stop') await run('podman', ['stop', name], { timeout: 120_000 });
+    else await startContainerUnit(name, action === 'restart');
     return;
   }
 
