@@ -5,6 +5,7 @@ import { ThemedText } from '@/components/themed-text';
 import { useTheme } from '@/hooks/use-theme';
 import { Centered } from '@/miniapps/jellyfin/components';
 import { JellyfinSessionProvider, useJellyfinSession } from '@/miniapps/jellyfin/session';
+import { JellyfinSettingsProvider } from '@/miniapps/jellyfin/settings';
 
 function BackToLauncher() {
   const theme = useTheme();
@@ -28,6 +29,7 @@ function JellyfinStack() {
         />
         <Stack.Screen name="library/[id]" options={{ title: '' }} />
         <Stack.Screen name="item/[id]" options={{ title: '' }} />
+        <Stack.Screen name="settings" options={{ title: 'Settings' }} />
         <Stack.Screen
           name="player/[id]"
           options={{ presentation: 'fullScreenModal', headerShown: false, animation: 'fade' }}
@@ -46,7 +48,9 @@ function JellyfinStack() {
 export default function JellyfinLayout() {
   return (
     <JellyfinSessionProvider>
-      <JellyfinStack />
+      <JellyfinSettingsProvider>
+        <JellyfinStack />
+      </JellyfinSettingsProvider>
     </JellyfinSessionProvider>
   );
 }

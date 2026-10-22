@@ -3,6 +3,9 @@ import Constants from 'expo-constants';
 /** Jellyfin counts time in ticks of 100ns. */
 export const TICKS_PER_SECOND = 10_000_000;
 
+/** Highest bitrate we ever ask for: effectively "original quality". */
+export const MAX_BITRATE = 120_000_000;
+
 const CLIENT_NAME = 'Homebase';
 const CLIENT_VERSION = Constants.expoConfig?.version ?? '1.0.0';
 
@@ -19,7 +22,22 @@ export type UserData = {
   PlaybackPositionTicks?: number;
   PlayedPercentage?: number;
   Played?: boolean;
+  IsFavorite?: boolean;
   UnplayedItemCount?: number;
+};
+
+export type Person = {
+  Id: string;
+  Name: string;
+  Role?: string;
+  Type: 'Actor' | 'Director' | 'Writer' | 'Producer' | 'GuestStar' | string;
+  PrimaryImageTag?: string;
+};
+
+export type Chapter = {
+  StartPositionTicks: number;
+  Name?: string;
+  ImageTag?: string;
 };
 
 export type BaseItem = {
@@ -46,6 +64,29 @@ export type BaseItem = {
   IsFolder?: boolean;
   UserData?: UserData;
   MediaSources?: MediaSource[];
+  Genres?: string[];
+  Taglines?: string[];
+  People?: Person[];
+  Chapters?: Chapter[];
+  RemoteTrailers?: { Url: string; Name?: string }[];
+  LocalTrailerCount?: number;
+};
+
+export type LibrarySort = 'SortName' | 'DateCreated' | 'PremiereDate' | 'CommunityRating';
+
+export type LibraryQuery = {
+  sortBy: LibrarySort;
+  descending: boolean;
+  unwatched: boolean;
+  favorites: boolean;
+  genreId?: string;
+};
+
+export const DEFAULT_LIBRARY_QUERY: LibraryQuery = {
+  sortBy: 'SortName',
+  descending: false,
+  unwatched: false,
+  favorites: false,
 };
 
 export type MediaStream = {
@@ -59,7 +100,7 @@ export type MediaStream = {
   IsTextSubtitleStream?: boolean;
 };
 
-type ItemsResponse = { Items: BaseItem[]; TotalRecordCount: number };
+export type ItemsResponse = { Items: BaseItem[]; TotalRecordCount: number };
 
 export type MediaSource = {
   Id: string;
@@ -197,7 +238,13 @@ export function createClient(session: Session) {
         (r) => r.Items,
       ),
 
-    libraryItems: (library: BaseItem, startIndex = 0, limit = 60) => {
+    favorites: () =>
+      get<ItemsResponse>(
+        `/Items?userId=${userId}&filters=IsFavorite&recursive=true` +
+          `&includeItemTypes=Movie,Series,Episode,BoxSet,MusicVideo&sortBy=SortName&limit=40&fields=${itemFields}`,
+      ).then((r) => r.Items),
+
+    libraryItems: (library: BaseItem, query: LibraryQuery, startIndex = 0, limit = 60) => {
       const types: Record<string, string> = {
         movies: 'Movie',
         tvshows: 'Series',
@@ -207,11 +254,53 @@ export function createClient(session: Session) {
       };
       const type = library.CollectionType ? types[library.CollectionType] : undefined;
       const filter = type ? `&includeItemTypes=${type}&recursive=true` : '';
+      const filters = [query.unwatched && 'IsUnplayed', query.favorites && 'IsFavorite'].filter(Boolean);
+      // Break ties by name so items with the same date or rating stay in a stable order.
+      const sortBy = query.sortBy === 'SortName' ? 'SortName' : `${query.sortBy},SortName`;
       return get<ItemsResponse>(
         `/Items?userId=${userId}&parentId=${library.Id}${filter}` +
-          `&sortBy=SortName&sortOrder=Ascending&fields=${itemFields}` +
-          `&startIndex=${startIndex}&limit=${limit}`,
+          `&sortBy=${sortBy}&sortOrder=${query.descending ? 'Descending' : 'Ascending'}` +
+          (filters.length ? `&filters=${filters.join(',')}` : '') +
+          (query.genreId ? `&genreIds=${query.genreId}` : '') +
+          `&fields=${itemFields}&startIndex=${startIndex}&limit=${limit}`,
       );
+    },
+
+    genres: (libraryId: string) =>
+      get<ItemsResponse>(`/Genres?userId=${userId}&parentId=${libraryId}&sortBy=SortName`).then((r) => r.Items),
+
+    setPlayed: (itemId: string, played: boolean) =>
+      request<UserData>(serverUrl, `/UserPlayedItems/${itemId}?userId=${userId}`, deviceId, accessToken, {
+        method: played ? 'POST' : 'DELETE',
+      }),
+
+    setFavorite: (itemId: string, favorite: boolean) =>
+      request<UserData>(serverUrl, `/UserFavoriteItems/${itemId}?userId=${userId}`, deviceId, accessToken, {
+        method: favorite ? 'POST' : 'DELETE',
+      }),
+
+    similar: (itemId: string) =>
+      get<ItemsResponse>(`/Items/${itemId}/Similar?userId=${userId}&limit=12&fields=${itemFields}`).then(
+        (r) => r.Items,
+      ),
+
+    localTrailers: (itemId: string) => get<BaseItem[]>(`/Items/${itemId}/LocalTrailers?userId=${userId}`),
+
+    /** Movies and shows a person appears in. */
+    credits: (personId: string) =>
+      get<ItemsResponse>(
+        `/Items?userId=${userId}&personIds=${personId}&recursive=true&includeItemTypes=Movie,Series` +
+          `&sortBy=PremiereDate,SortName&sortOrder=Descending&fields=${itemFields}`,
+      ).then((r) => r.Items),
+
+    personImageUrl: (person: Person, height = 300) =>
+      person.PrimaryImageTag
+        ? `${serverUrl}/Items/${person.Id}/Images/Primary?tag=${person.PrimaryImageTag}&fillHeight=${height}&quality=90`
+        : undefined,
+
+    chapterImageUrl: (item: BaseItem, index: number, height = 270) => {
+      const tag = item.Chapters?.[index]?.ImageTag;
+      return tag ? `${serverUrl}/Items/${item.Id}/Images/Chapter/${index}?tag=${tag}&fillHeight=${height}&quality=90` : undefined;
     },
 
     children: (parentId: string) =>
@@ -263,12 +352,14 @@ export function createClient(session: Session) {
      * `subtitleIndex` picks a subtitle stream (-1 for none; omit for the server's default).
      * AVPlayer can't load sidecar subtitle files, so choosing one turns off direct play and
      * the server delivers it inside the HLS stream (or burns it in, for image subtitles).
+     *
+     * `maxBitrate` caps the stream; files above it are converted down instead of played as-is.
      */
-    playbackInfo: async (itemId: string, subtitleIndex?: number) => {
+    playbackInfo: async (itemId: string, subtitleIndex?: number, maxBitrate = MAX_BITRATE) => {
       const withSubtitles = subtitleIndex !== undefined && subtitleIndex >= 0;
       const info = await post<PlaybackInfoResponse>(`/Items/${itemId}/PlaybackInfo?userId=${userId}`, {
-        DeviceProfile: iosDeviceProfile,
-        MaxStreamingBitrate: 120_000_000,
+        DeviceProfile: { ...iosDeviceProfile, MaxStreamingBitrate: maxBitrate, MaxStaticBitrate: maxBitrate },
+        MaxStreamingBitrate: maxBitrate,
         AutoOpenLiveStream: true,
         SubtitleStreamIndex: subtitleIndex,
         EnableDirectPlay: !withSubtitles,
@@ -313,8 +404,8 @@ export type JellyfinClient = ReturnType<typeof createClient>;
 
 /** What AVPlayer on iOS can play without help from the server. */
 const iosDeviceProfile = {
-  MaxStreamingBitrate: 120_000_000,
-  MaxStaticBitrate: 120_000_000,
+  MaxStreamingBitrate: MAX_BITRATE,
+  MaxStaticBitrate: MAX_BITRATE,
   MusicStreamingTranscodingBitrate: 384_000,
   DirectPlayProfiles: [
     { Type: 'Video', Container: 'mp4,m4v,mov', VideoCodec: 'h264,hevc', AudioCodec: 'aac,mp3,ac3,eac3,alac,flac' },

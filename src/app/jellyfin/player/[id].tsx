@@ -11,6 +11,7 @@ import { Spacing } from '@/constants/theme';
 import { TICKS_PER_SECOND, type BaseItem, type JellyfinClient } from '@/miniapps/jellyfin/api';
 import { Button, episodeLabel } from '@/miniapps/jellyfin/components';
 import { useJellyfin } from '@/miniapps/jellyfin/session';
+import { currentMaxBitrate, useJellyfinSettings } from '@/miniapps/jellyfin/settings';
 import { subtitleIndexForLanguage, subtitleLanguage } from '@/miniapps/jellyfin/subtitles';
 import { useAsync } from '@/miniapps/jellyfin/use-async';
 
@@ -27,6 +28,7 @@ export default function PlayerScreen() {
     subtitleLang?: string;
   }>();
   const client = useJellyfin();
+  const { settings } = useJellyfinSettings();
   const { data, error, reload } = useAsync(async () => {
     const item = await client.item(id);
     const subtitleIndex =
@@ -35,8 +37,9 @@ export default function PlayerScreen() {
         : subtitleLang
           ? subtitleIndexForLanguage(item, subtitleLang)
           : undefined;
+    const maxBitrate = await currentMaxBitrate(settings);
     const [playback, next] = await Promise.all([
-      client.playbackInfo(id, subtitleIndex),
+      client.playbackInfo(id, subtitleIndex, maxBitrate),
       item.Type === 'Episode' ? client.nextEpisode(item).catch(() => undefined) : undefined,
     ]);
     return { item, playback: { ...playback, subtitleIndex }, next };

@@ -164,6 +164,17 @@ export function Button({
   );
 }
 
+export function Chip({ label, selected, onPress }: { label: string; selected: boolean; onPress: () => void }) {
+  const theme = useTheme();
+  return (
+    <Pressable onPress={onPress} style={[styles.chip, { backgroundColor: selected ? theme.accent : theme.backgroundElement }]}>
+      <ThemedText type="smallBold" style={{ color: selected ? '#fff' : theme.text }}>
+        {label}
+      </ThemedText>
+    </Pressable>
+  );
+}
+
 const styles = StyleSheet.create({
   art: {
     borderRadius: 8,
@@ -205,6 +216,11 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     padding: Spacing.four,
     gap: Spacing.three,
+  },
+  chip: {
+    paddingVertical: 8,
+    paddingHorizontal: Spacing.three,
+    borderRadius: 999,
   },
   button: {
     paddingVertical: 12,
