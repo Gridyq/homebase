@@ -9,6 +9,7 @@ import { useTheme } from '@/hooks/use-theme';
 import { TICKS_PER_SECOND, type BaseItem } from '@/miniapps/jellyfin/api';
 import { Button, Centered, formatRuntime, ItemRow, PosterCard } from '@/miniapps/jellyfin/components';
 import { useJellyfin } from '@/miniapps/jellyfin/session';
+import { defaultSubtitleIndex, subtitleLabel, subtitleStreams, SUBTITLES_OFF } from '@/miniapps/jellyfin/subtitles';
 import { useAsync } from '@/miniapps/jellyfin/use-async';
 
 export default function ItemDetail() {
@@ -16,6 +17,7 @@ export default function ItemDetail() {
   const client = useJellyfin();
   const theme = useTheme();
   const { width } = useWindowDimensions();
+  const [selectedSubtitle, setSubtitle] = useState<number>();
 
   const { data: item, error, loading, reload } = useAsync(() => client.item(id), id);
 
@@ -33,6 +35,8 @@ export default function ItemDetail() {
   const backdrop = client.imageUrl(item, { type: 'Backdrop', height: 720 }) ?? client.imageUrl(item, { height: 720 });
   const resumeTicks = item.UserData?.PlaybackPositionTicks ?? 0;
   const playable = item.MediaType === 'Video';
+  const subtitles = subtitleStreams(item);
+  const subtitle = selectedSubtitle ?? defaultSubtitleIndex(item);
   const meta = [
     item.Type === 'Episode' && item.SeriesName,
     item.ProductionYear,
@@ -44,7 +48,11 @@ export default function ItemDetail() {
   const play = (fromStart: boolean) =>
     router.push({
       pathname: '/jellyfin/player/[id]',
-      params: { id: item.Id, start: fromStart ? '0' : String(resumeTicks / TICKS_PER_SECOND) },
+      params: {
+        id: item.Id,
+        start: fromStart ? '0' : String(resumeTicks / TICKS_PER_SECOND),
+        ...(subtitles.length ? { subtitle: String(subtitle) } : {}),
+      },
     });
 
   return (
@@ -78,6 +86,19 @@ export default function ItemDetail() {
           </View>
         ) : null}
 
+        {playable && subtitles.length ? (
+          <View style={styles.picker}>
+            <ThemedText type="smallBold">Subtitles</ThemedText>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.pickerChips}>
+              {[{ index: SUBTITLES_OFF, label: 'Off' }, ...subtitles.map((s) => ({ index: s.Index, label: subtitleLabel(s) }))].map(
+                ({ index, label }) => (
+                  <Chip key={index} label={label} selected={index === subtitle} onPress={() => setSubtitle(index)} />
+                ),
+              )}
+            </ScrollView>
+          </View>
+        ) : null}
+
         {item.Overview ? <ThemedText type="small">{item.Overview}</ThemedText> : null}
       </View>
 
@@ -90,7 +111,6 @@ export default function ItemDetail() {
 
 function SeriesEpisodes({ series }: { series: BaseItem }) {
   const client = useJellyfin();
-  const theme = useTheme();
   const { width } = useWindowDimensions();
   const [selectedSeasonId, setSeasonId] = useState<string>();
 
@@ -106,14 +126,7 @@ function SeriesEpisodes({ series }: { series: BaseItem }) {
     <View style={styles.section}>
       <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chips}>
         {seasons?.map((s) => (
-          <Pressable
-            key={s.Id}
-            onPress={() => setSeasonId(s.Id)}
-            style={[styles.chip, { backgroundColor: s.Id === seasonId ? theme.accent : theme.backgroundElement }]}>
-            <ThemedText type="smallBold" style={{ color: s.Id === seasonId ? '#fff' : theme.text }}>
-              {s.Name}
-            </ThemedText>
-          </Pressable>
+          <Chip key={s.Id} label={s.Name} selected={s.Id === seasonId} onPress={() => setSeasonId(s.Id)} />
         ))}
       </ScrollView>
       <View style={styles.episodes}>
@@ -135,6 +148,17 @@ function SeriesEpisodes({ series }: { series: BaseItem }) {
         ))}
       </View>
     </View>
+  );
+}
+
+function Chip({ label, selected, onPress }: { label: string; selected: boolean; onPress: () => void }) {
+  const theme = useTheme();
+  return (
+    <Pressable onPress={onPress} style={[styles.chip, { backgroundColor: selected ? theme.accent : theme.backgroundElement }]}>
+      <ThemedText type="smallBold" style={{ color: selected ? '#fff' : theme.text }}>
+        {label}
+      </ThemedText>
+    </Pressable>
   );
 }
 
@@ -181,6 +205,13 @@ const styles = StyleSheet.create({
   actions: {
     gap: Spacing.two,
     marginVertical: Spacing.two,
+  },
+  picker: {
+    gap: Spacing.two,
+    marginBottom: Spacing.two,
+  },
+  pickerChips: {
+    gap: Spacing.two,
   },
   section: {
     gap: Spacing.three,

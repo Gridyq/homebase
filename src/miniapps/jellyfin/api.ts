@@ -45,6 +45,18 @@ export type BaseItem = {
   MediaType?: string;
   IsFolder?: boolean;
   UserData?: UserData;
+  MediaSources?: MediaSource[];
+};
+
+export type MediaStream = {
+  Index: number;
+  Type: 'Video' | 'Audio' | 'Subtitle' | string;
+  Language?: string;
+  DisplayTitle?: string;
+  IsDefault?: boolean;
+  IsForced?: boolean;
+  IsExternal?: boolean;
+  IsTextSubtitleStream?: boolean;
 };
 
 type ItemsResponse = { Items: BaseItem[]; TotalRecordCount: number };
@@ -54,6 +66,8 @@ export type MediaSource = {
   SupportsDirectPlay: boolean;
   SupportsDirectStream: boolean;
   TranscodingUrl?: string;
+  MediaStreams?: MediaStream[];
+  DefaultSubtitleStreamIndex?: number;
 };
 
 type PlaybackInfoResponse = {
@@ -207,6 +221,21 @@ export function createClient(session: Session) {
 
     item: (id: string) => get<BaseItem>(`/Items/${id}?userId=${userId}`),
 
+    search: (term: string) =>
+      get<ItemsResponse>(
+        `/Items?userId=${userId}&searchTerm=${encodeURIComponent(term)}&recursive=true` +
+          `&includeItemTypes=Movie,Series,Episode,BoxSet,MusicVideo&limit=60&fields=${itemFields}`,
+      ).then((r) => r.Items),
+
+    /** The episode after this one, across season boundaries. */
+    nextEpisode: async (episode: BaseItem) => {
+      if (!episode.SeriesId) return undefined;
+      const r = await get<ItemsResponse>(
+        `/Shows/${episode.SeriesId}/Episodes?userId=${userId}&startItemId=${episode.Id}&limit=2`,
+      );
+      return r.Items.find((i) => i.Id !== episode.Id);
+    },
+
     seasons: (seriesId: string) =>
       get<ItemsResponse>(`/Shows/${seriesId}/Seasons?userId=${userId}`).then((r) => r.Items),
 
@@ -230,12 +259,19 @@ export function createClient(session: Session) {
     /**
      * Ask the server how to play an item on iOS. Files AVPlayer can handle are played
      * as-is; everything else comes back as an HLS stream the server converts live.
+     *
+     * `subtitleIndex` picks a subtitle stream (-1 for none; omit for the server's default).
+     * AVPlayer can't load sidecar subtitle files, so choosing one turns off direct play and
+     * the server delivers it inside the HLS stream (or burns it in, for image subtitles).
      */
-    playbackInfo: async (itemId: string) => {
+    playbackInfo: async (itemId: string, subtitleIndex?: number) => {
+      const withSubtitles = subtitleIndex !== undefined && subtitleIndex >= 0;
       const info = await post<PlaybackInfoResponse>(`/Items/${itemId}/PlaybackInfo?userId=${userId}`, {
         DeviceProfile: iosDeviceProfile,
         MaxStreamingBitrate: 120_000_000,
         AutoOpenLiveStream: true,
+        SubtitleStreamIndex: subtitleIndex,
+        EnableDirectPlay: !withSubtitles,
       });
       if (info.ErrorCode) throw new JellyfinError(`Server can't play this item (${info.ErrorCode}).`);
       const source = info.MediaSources[0];
