@@ -7,27 +7,31 @@ import { ThemedText } from '@/components/themed-text';
 import { Spacing } from '@/constants/theme';
 import { useGutter } from '@/hooks/use-gutter';
 import { useTheme } from '@/hooks/use-theme';
-import { DEFAULT_URL, fetchStatus, normalizeUrl } from '@/miniapps/server/api';
+import { DEFAULT_URL, fetchStatus, normalizeUrl, redeemPairingCode } from '@/miniapps/server/api';
 import { useServerConnection } from '@/miniapps/server/connection';
 
-/** Also opened by the pairing link `homebase://server/connect?url=…&token=…`. */
+/**
+ * Also opened by the pairing link `homebase://server/connect?url=…&code=…`. The code is traded
+ * for the token on Save, so the token itself never travels through ntfy.
+ */
 export default function Connect() {
   const theme = useTheme();
   const gutter = useGutter();
-  const params = useLocalSearchParams<{ url?: string; token?: string }>();
+  const params = useLocalSearchParams<{ url?: string; code?: string }>();
   const { connection, save, forget } = useServerConnection();
   const [url, setUrl] = useState(params.url ?? connection?.url ?? DEFAULT_URL);
-  const [token, setToken] = useState(params.token ?? connection?.token ?? '');
+  const [token, setToken] = useState(params.code ? '' : (connection?.token ?? ''));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
 
   const submit = async () => {
     if (!url.trim()) return setError('Enter the server address.');
-    if (!token.trim()) return setError('Enter the token.');
-    const next = { url: normalizeUrl(url), token: token.trim() };
+    if (!token.trim() && !params.code) return setError('Enter the token.');
     setBusy(true);
     setError(undefined);
     try {
+      const next = { url: normalizeUrl(url), token: token.trim() };
+      if (!next.token && params.code) next.token = await redeemPairingCode(next.url, params.code);
       // Check it works before replacing a connection that might be fine.
       await fetchStatus(next);
       await save(next);
@@ -59,9 +63,9 @@ export default function Connect() {
         contentInsetAdjustmentBehavior="automatic"
         contentContainerStyle={[styles.form, gutter]}
         keyboardShouldPersistTaps="handled">
-        {params.token ? (
+        {params.code ? (
           <ThemedText type="small" themeColor="textSecondary" style={styles.note}>
-            Filled in from the pairing link. Tap Save to connect.
+            From the pairing link. Check the address is your server, then tap Save to connect.
           </ThemedText>
         ) : null}
         <ThemedText type="small" themeColor="textSecondary">
@@ -85,7 +89,7 @@ export default function Connect() {
           style={inputStyle}
           value={token}
           onChangeText={setToken}
-          placeholder="From status-server/token"
+          placeholder={params.code ? 'Comes from the pairing link' : 'From status-server/token'}
           placeholderTextColor={theme.textSecondary}
           autoCapitalize="none"
           autoCorrect={false}

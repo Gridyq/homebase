@@ -50,3 +50,4 @@ example
 
 # Status server: access token stays on this machine
 /status-server/token
+/status-server/pairing

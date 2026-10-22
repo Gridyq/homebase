@@ -75,7 +75,8 @@ which also sends an ntfy message when a disk passes 90%, a sensor passes 90°C, 
   `sudo firewall-cmd --zone=tailnet --add-port=8788/tcp --permanent && sudo firewall-cmd --reload`.
 - Every request needs the token in `status-server/token` (git-ignored, created on first start).
   `npm run status-server -- pair` sends a link through ntfy; tapping it on the phone fills in the
-  app's connection settings.
+  app's connection settings. The link holds a one-time code (good for 10 minutes), not the token.
+- Both servers only answer loopback and Tailscale addresses.
 - Containers are found on their own; Quadlet ones are controlled through their systemd unit.
   Other units to show are listed in `UNITS` at the top of `status-server/server.mjs`.
 

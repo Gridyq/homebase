@@ -7,11 +7,15 @@
  *
  * Every request needs `Authorization: Bearer <token>`. The token lives in `token` next to this
  * file and is created on first start. `node server.mjs pair` sends a link to the phone through
- * ntfy that fills in the app's connection settings.
+ * ntfy that fills in the app's connection settings. The link carries a one-time code rather than
+ * the token, since ntfy keeps messages for days.
+ *
+ * Only loopback and Tailscale addresses are answered, in case the firewall ever opens the port to
+ * the home network.
  */
 import { execFile } from 'node:child_process';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { readdir, readFile, statfs, writeFile } from 'node:fs/promises';
+import { readdir, readFile, statfs, unlink, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
@@ -22,6 +26,8 @@ const run = promisify(execFile);
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const TOKEN_PATH = path.join(ROOT, 'token');
+const PAIRING_PATH = path.join(ROOT, 'pairing');
+const PAIRING_TTL_MS = 10 * 60_000;
 const PORT = Number(process.env.PORT ?? 8788);
 /** Address the phone uses, sent in the pairing link. */
 const PUBLIC_URL = process.env.PUBLIC_URL ?? `http://fedora.tail27f991.ts.net:${PORT}`;
@@ -67,6 +73,15 @@ function authorized(req, expected) {
   const given = Buffer.from(/^Bearer (.+)$/.exec(req.headers.authorization ?? '')?.[1] ?? '');
   const want = Buffer.from(expected);
   return given.length === want.length && timingSafeEqual(given, want);
+}
+
+/** Loopback, or Tailscale's 100.64.0.0/10 and fd7a:115c:a1e0::/48. */
+function allowedPeer(address = '') {
+  const a = address.replace(/^::ffff:/, '').toLowerCase();
+  if (a === '127.0.0.1' || a === '::1') return true;
+  const second = Number(/^100\.(\d+)\./.exec(a)?.[1]);
+  if (second) return second >= 64 && second <= 127;
+  return a.startsWith('fd7a:115c:a1e0:');
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -568,7 +583,12 @@ function log(req, message) {
 
 async function handle(req, res) {
   const url = new URL(req.url ?? '/', 'http://localhost');
+  if (!allowedPeer(req.socket.remoteAddress)) {
+    log(req, 'refused: not a Tailscale or local address');
+    return sendJson(res, 403, { error: 'Only reachable over Tailscale' });
+  }
   if (url.pathname === '/health') return sendJson(res, 200, { ok: true });
+  if (req.method === 'POST' && url.pathname === '/api/pair') return sendJson(res, 200, await redeemPairing(req));
   if (!authorized(req, await getToken())) return sendJson(res, 401, { error: 'Wrong or missing token' });
 
   if (req.method === 'GET' && url.pathname === '/api/status') return sendJson(res, 200, await status());
@@ -602,14 +622,36 @@ async function handle(req, res) {
 }
 
 async function pair() {
-  const link = `homebase://server/connect?${new URLSearchParams({ url: PUBLIC_URL, token: await getToken() })}`;
+  const code = randomBytes(24).toString('base64url');
+  await writeFile(PAIRING_PATH, JSON.stringify({ code, expires: Date.now() + PAIRING_TTL_MS }), { mode: 0o600 });
+  const link = `homebase://server/connect?${new URLSearchParams({ url: PUBLIC_URL, code })}`;
   console.log(`Pairing link: ${link}`);
   const res = await fetch(NTFY_URL, {
     method: 'POST',
     headers: { Title: 'Connect Homebase to this server', Tags: 'link', Click: link },
-    body: 'Tap to fill in the Server mini-app settings.',
+    body: 'Tap to fill in the Server mini-app settings. The link works once, within 10 minutes.',
   }).catch((e) => ({ ok: false, statusText: e.message }));
   console.log(res.ok ? 'Sent through ntfy.' : `Couldn't send through ntfy: ${res.statusText}`);
+}
+
+/** Trades the code from a pairing link for the token. Each code works once. */
+async function redeemPairing(req) {
+  let given;
+  try {
+    given = JSON.parse((await readBody(req))?.toString() ?? '{}').code;
+  } catch {
+    throw new HttpError(400, 'Expected JSON');
+  }
+  const pending = await readFile(PAIRING_PATH, 'utf8').then(JSON.parse, () => undefined);
+  const ok =
+    typeof given === 'string' &&
+    pending?.expires > Date.now() &&
+    given.length === pending.code.length &&
+    timingSafeEqual(Buffer.from(given), Buffer.from(pending.code));
+  log(req, `pairing ${ok ? 'accepted' : 'refused'}`);
+  if (pending && (ok || pending.expires <= Date.now())) await unlink(PAIRING_PATH).catch(() => {});
+  if (!ok) throw new HttpError(403, 'This pairing link has expired or was already used. Run pair again.');
+  return { token: await getToken() };
 }
 
 if (process.argv[2] === 'pair') {

@@ -84,6 +84,15 @@ export async function request<T>(
   return body as T;
 }
 
+/** Trades the one-time code from a pairing link for the server's token. */
+export async function redeemPairingCode(url: string, code: string) {
+  const { token } = await request<{ token: string }>({ url, token: '' }, '/api/pair', {
+    method: 'POST',
+    body: JSON.stringify({ code }),
+  });
+  return token;
+}
+
 export function fetchStatus(conn: Connection) {
   return request<Status>(conn, '/api/status');
 }

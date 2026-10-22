@@ -7,7 +7,8 @@
  *   keys/private-key.pem               signs manifests; the app only accepts updates signed with it
  *   updates/<runtimeVersion>/<ms>/     one `expo export` output per update, newest wins
  *
- * Publish with `npm run publish-update` from the project root.
+ * Publish with `npm run publish-update` from the project root. Only loopback and Tailscale
+ * addresses are answered, in case the firewall ever opens the port to the home network.
  *
  * Spec: https://docs.expo.dev/technical-specs/expo-updates-1/
  */
@@ -183,6 +184,15 @@ function send(res, status, text) {
   res.writeHead(status, { 'content-type': 'text/plain' }).end(text);
 }
 
+/** Loopback, or Tailscale's 100.64.0.0/10 and fd7a:115c:a1e0::/48. */
+function allowedPeer(address = '') {
+  const a = address.replace(/^::ffff:/, '').toLowerCase();
+  if (a === '127.0.0.1' || a === '::1') return true;
+  const second = Number(/^100\.(\d+)\./.exec(a)?.[1]);
+  if (second) return second >= 64 && second <= 127;
+  return a.startsWith('fd7a:115c:a1e0:');
+}
+
 function log(req, message) {
   console.log(`${new Date().toISOString()} ${req.socket.remoteAddress} ${message}`);
 }
@@ -190,6 +200,7 @@ function log(req, message) {
 createServer(async (req, res) => {
   const url = new URL(req.url ?? '/', 'http://localhost');
   try {
+    if (!allowedPeer(req.socket.remoteAddress)) return send(res, 403, 'Only reachable over Tailscale');
     if (req.method !== 'GET') return send(res, 405, 'Method not allowed');
     if (url.pathname === '/api/manifest') return await handleManifest(req, res);
     if (url.pathname === '/api/assets') return await handleAsset(req, res, url);
