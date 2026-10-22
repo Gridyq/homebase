@@ -1,6 +1,6 @@
 import { router, Stack, useLocalSearchParams } from 'expo-router';
 import { useState } from 'react';
-import { ActivityIndicator, Alert, FlatList, Pressable, StyleSheet, View } from 'react-native';
+import { ActionSheetIOS, ActivityIndicator, Alert, FlatList, Pressable, ScrollView, StyleSheet, View } from 'react-native';
 
 import { ThemedText } from '@/components/themed-text';
 import { Spacing } from '@/constants/theme';
@@ -13,14 +13,36 @@ import { formatAge } from '@/miniapps/requests/components';
 import { formatBytes, StatusColors } from '@/miniapps/server/components';
 import { useServerConnection } from '@/miniapps/server/connection';
 
+const GB = 1e9;
+const RESOLUTIONS = ['2160p', '1080p', '720p'] as const;
+/** Size caps to pick from: per episode for a show, for the whole file for a movie. */
+const EPISODE_CAPS = [1, 2, 4].map((n) => n * GB);
+const MOVIE_CAPS = [4, 8, 15].map((n) => n * GB);
+const SORTS = { best: 'Best first', smallest: 'Smallest first', seeders: 'Most seeders' } as const;
+type Sort = keyof typeof SORTS;
+
+const resolutionOf = (r: Release) => /(\d{3,4})p/.exec(r.quality)?.[0] ?? (/(\d{3,4})p/i.exec(r.title)?.[0].toLowerCase());
+const isHevc = (r: Release) => /\b(x265|hevc|h\.?265)\b/i.test(r.title);
+
 /** Interactive search: every release the indexers have, scored by the TRaSH rules, to pick by hand. */
 export default function Releases() {
-  const { app, id, season, title } = useLocalSearchParams<{ app: Arr; id: string; season?: string; title: string }>();
+  const { app, id, season, title, episodes } = useLocalSearchParams<{
+    app: Arr;
+    id: string;
+    season?: string;
+    title: string;
+    /** Episodes in the season, to size a season pack per episode. */
+    episodes?: string;
+  }>();
   const { connection } = useServerConnection();
   const conn = connection!;
   const theme = useTheme();
   const gutter = useGutter();
   const [showRejected, setShowRejected] = useState(false);
+  const [resolution, setResolution] = useState<string>();
+  const [cap, setCap] = useState<number>();
+  const [hevcOnly, setHevcOnly] = useState(false);
+  const [sort, setSort] = useState<Sort>('best');
   const [grabbing, setGrabbing] = useState<string>();
   const { data, error, loading, reload } = useAsync(
     () => searchReleases(conn, app, Number(id), season !== undefined ? Number(season) : undefined),
@@ -47,8 +69,32 @@ export default function Releases() {
     );
   }
 
+  const tv = app === 'sonarr';
+  const perEpisode = (r: Release) =>
+    tv ? r.size / Math.max(1, r.fullSeason ? Number(episodes) || 1 : r.episodeNumbers?.length || 1) : r.size;
   const approved = data.filter((r) => r.approved);
-  const shown = showRejected ? data : approved;
+  const unfiltered = showRejected ? data : approved;
+  const filtered = unfiltered.filter(
+    (r) =>
+      (!resolution || resolutionOf(r) === resolution) && (!cap || perEpisode(r) <= cap) && (!hevcOnly || isHevc(r)),
+  );
+  // The server's order is "best first".
+  const shown =
+    sort === 'smallest'
+      ? [...filtered].sort((a, b) => perEpisode(a) - perEpisode(b))
+      : sort === 'seeders'
+        ? [...filtered].sort((a, b) => (b.seeders ?? 0) - (a.seeders ?? 0))
+        : filtered;
+  const filtering = !!(resolution || cap || hevcOnly);
+  const caps = tv ? EPISODE_CAPS : MOVIE_CAPS;
+
+  const pickSort = () => {
+    const keys = Object.keys(SORTS) as Sort[];
+    ActionSheetIOS.showActionSheetWithOptions(
+      { title: 'Sort releases', options: [...keys.map((k) => SORTS[k]), 'Cancel'], cancelButtonIndex: keys.length },
+      (index) => keys[index] && setSort(keys[index]),
+    );
+  };
 
   const grab = (r: Release) => {
     Alert.alert('Download this release?', `${r.title}\n\n${r.quality} · ${formatBytes(r.size)} · ${r.seeders ?? 0} seeders`, [
@@ -82,36 +128,85 @@ export default function Releases() {
         ListHeaderComponent={
           <View style={styles.header}>
             <ThemedText type="small" themeColor="textSecondary">
-              {approved.length} of {data.length} releases pass your quality rules, best first.
+              {approved.length} of {data.length} releases pass your quality rules
+              {filtering ? `, ${shown.length} shown` : ''}.{' '}
+              <ThemedText type="small" style={{ color: theme.accent }} onPress={pickSort}>
+                {SORTS[sort]} ▾
+              </ThemedText>
             </ThemedText>
             {data.length > approved.length ? (
-              <View style={styles.chips}>
+              <ChipRow>
                 <Chip label="Passing" selected={!showRejected} onPress={() => setShowRejected(false)} />
                 <Chip label={`All ${data.length}`} selected={showRejected} onPress={() => setShowRejected(true)} />
-              </View>
+              </ChipRow>
             ) : null}
+            <ChipRow>
+              <Chip label="Any quality" selected={!resolution} onPress={() => setResolution(undefined)} />
+              {RESOLUTIONS.map((res) => (
+                <Chip key={res} label={res} selected={resolution === res} onPress={() => setResolution(res)} />
+              ))}
+              <Chip label="x265 only" selected={hevcOnly} onPress={() => setHevcOnly(!hevcOnly)} />
+            </ChipRow>
+            <ChipRow>
+              <Chip label="Any size" selected={!cap} onPress={() => setCap(undefined)} />
+              {caps.map((c) => (
+                <Chip
+                  key={c}
+                  label={`Under ${c / GB} GB${tv ? '/ep' : ''}`}
+                  selected={cap === c}
+                  onPress={() => setCap(c)}
+                />
+              ))}
+            </ChipRow>
           </View>
         }
         ListEmptyComponent={
           <ThemedText themeColor="textSecondary" style={styles.center}>
-            {data.length ? 'Nothing passes your quality rules. Show all to see why.' : 'No releases found.'}
+            {unfiltered.length
+              ? 'Nothing matches these filters.'
+              : data.length
+                ? 'Nothing passes your quality rules. Show all to see why.'
+                : 'No releases found.'}
           </ThemedText>
         }
         renderItem={({ item }) => (
-          <ReleaseRow release={item} busy={grabbing === item.guid} disabled={!!grabbing} onPress={() => grab(item)} />
+          <ReleaseRow
+            release={item}
+            perEpisode={tv && item.fullSeason ? perEpisode(item) : undefined}
+            busy={grabbing === item.guid}
+            disabled={!!grabbing}
+            onPress={() => grab(item)}
+          />
         )}
       />
     </>
   );
 }
 
+/** Chips in a line that scrolls sideways, running to the screen edges. */
+function ChipRow({ children }: { children: React.ReactNode }) {
+  const gutter = useGutter();
+  return (
+    <ScrollView
+      horizontal
+      showsHorizontalScrollIndicator={false}
+      style={{ marginLeft: -gutter.paddingLeft, marginRight: -gutter.paddingRight }}
+      contentContainerStyle={[styles.chips, gutter]}>
+      {children}
+    </ScrollView>
+  );
+}
+
 function ReleaseRow({
   release: r,
+  perEpisode,
   busy,
   disabled,
   onPress,
 }: {
   release: Release;
+  /** A season pack's size per episode. */
+  perEpisode?: number;
   busy: boolean;
   disabled: boolean;
   onPress: () => void;
@@ -121,7 +216,7 @@ function ReleaseRow({
   const meta = [
     r.fullSeason && 'Season pack',
     r.quality,
-    formatBytes(r.size),
+    perEpisode ? `${formatBytes(r.size)} (${formatBytes(perEpisode)}/ep)` : formatBytes(r.size),
     r.seeders !== undefined && `${r.seeders} seeders`,
     formatAge(r.ageHours),
     r.indexer,

@@ -1,7 +1,7 @@
 import { Image } from 'expo-image';
 import { router, Stack, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { useCallback, useRef, useState } from 'react';
-import { Alert, Pressable, ScrollView, StyleSheet, useWindowDimensions, View } from 'react-native';
+import { ActionSheetIOS, Alert, Pressable, ScrollView, StyleSheet, useWindowDimensions, View } from 'react-native';
 
 import { Button } from '@/components/button';
 import { ThemedText } from '@/components/themed-text';
@@ -13,6 +13,7 @@ import { useAsync } from '@/miniapps/jellyfin/use-async';
 import {
   details,
   MediaStatus,
+  qualityProfiles,
   requestMedia,
   titleOf,
   tmdbImage,
@@ -103,10 +104,11 @@ function realSeasons(item: Details) {
 
 function useRequest(conn: Connection, item: Details, type: MediaType, onDone: () => void) {
   const [busy, setBusy] = useState(false);
+  const [profileId, setProfileId] = useState<number>();
   const send = async (seasons?: number[]) => {
     setBusy(true);
     try {
-      await requestMedia(conn, type, item.id, seasons);
+      await requestMedia(conn, type, item.id, seasons, profileId);
       onDone();
     } catch (e) {
       Alert.alert("Couldn't request it", e instanceof Error ? e.message : String(e));
@@ -114,23 +116,75 @@ function useRequest(conn: Connection, item: Details, type: MediaType, onDone: ()
       setBusy(false);
     }
   };
-  return { busy, send };
+  return { busy, send, profileId, setProfileId };
 }
 
-function releasesHref(app: 'sonarr' | 'radarr', id: number, title: string, season?: number) {
+/** Which Sonarr or Radarr quality profile a request uses; smaller ones save disk space. */
+function QualityRow({
+  conn,
+  type,
+  profileId,
+  onChange,
+}: {
+  conn: Connection;
+  type: MediaType;
+  profileId: number | undefined;
+  onChange: (id: number | undefined) => void;
+}) {
+  const theme = useTheme();
+  const { data: profiles } = useAsync(() => qualityProfiles(conn, type === 'tv' ? 'sonarr' : 'radarr'), `profiles:${type}`);
+  if (!profiles?.length) return null;
+  const pick = () => {
+    const labels = ['Server default', ...profiles.map((p) => p.name)];
+    ActionSheetIOS.showActionSheetWithOptions(
+      {
+        title: 'Quality',
+        message: 'Lower resolutions take far less space. The default is the one set in Seerr.',
+        options: [...labels, 'Cancel'],
+        cancelButtonIndex: labels.length,
+      },
+      (index) => {
+        if (index === 0) onChange(undefined);
+        else if (profiles[index - 1]) onChange(profiles[index - 1].id);
+      },
+    );
+  };
+  return (
+    <Pressable onPress={pick} style={({ pressed }) => [styles.quality, { opacity: pressed ? 0.6 : 1 }]}>
+      <ThemedText type="small" themeColor="textSecondary">
+        Quality
+      </ThemedText>
+      <ThemedText type="small" style={{ color: theme.accent }}>
+        {profiles.find((p) => p.id === profileId)?.name ?? 'Server default'} ▾
+      </ThemedText>
+    </Pressable>
+  );
+}
+
+function releasesHref(app: 'sonarr' | 'radarr', id: number, title: string, season?: Season) {
   return {
     pathname: '/requests/releases',
-    params: { app, id: String(id), title, ...(season !== undefined ? { season: String(season) } : {}) },
+    params: {
+      app,
+      id: String(id),
+      title,
+      ...(season ? { season: String(season.seasonNumber), episodes: String(season.episodeCount) } : {}),
+    },
   } as const;
 }
 
 function MovieActions({ conn, item, onChange }: { conn: Connection; item: Details; onChange: () => void }) {
-  const { busy, send } = useRequest(conn, item, 'movie', onChange);
+  const { busy, send, profileId, setProfileId } = useRequest(conn, item, 'movie', onChange);
   const status = item.mediaInfo?.status;
   const radarrId = item.mediaInfo?.externalServiceId;
   return (
     <View style={styles.actions}>
-      {missing(status) ? <Button title={busy ? 'Requesting…' : 'Request'} disabled={busy} onPress={() => send()} /> : null}
+      {missing(status) ? (
+        <>
+          <Button title={busy ? 'Requesting…' : 'Request'} disabled={busy} onPress={() => send()} />
+          <QualityRow conn={conn} type="movie" profileId={profileId} onChange={setProfileId} />
+        </>
+      ) : null}
       {radarrId ? (
         <Button
           title={status === MediaStatus.Available ? 'Find a better release' : 'Pick a release'}
@@ -144,7 +198,7 @@ function MovieActions({ conn, item, onChange }: { conn: Connection; item: Detail
 
 function SeasonPicker({ conn, item, onChange }: { conn: Connection; item: Details; onChange: () => void }) {
   const theme = useTheme();
-  const { busy, send } = useRequest(conn, item, 'tv', onChange);
+  const { busy, send, profileId, setProfileId } = useRequest(conn, item, 'tv', onChange);
   const statusOf = (s: Season) => item.mediaInfo?.seasons?.find((x) => x.seasonNumber === s.seasonNumber)?.status;
   const seasons = realSeasons(item);
   const requestable = seasons.filter((s) => missing(statusOf(s)));
@@ -175,6 +229,10 @@ function SeasonPicker({ conn, item, onChange }: { conn: Connection; item: Detail
           disabled={busy || !chosen.length}
           onPress={() => send(chosen)}
         />
+      ) : null}
+      {/* Seerr only uses the profile when it first adds the show to Sonarr. */}
+      {requestable.length && !sonarrId ? (
+        <QualityRow conn={conn} type="tv" profileId={profileId} onChange={setProfileId} />
       ) : null}
       <Card>
         {seasons.map((s, i) => {
@@ -208,7 +266,7 @@ function SeasonPicker({ conn, item, onChange }: { conn: Connection; item: Detail
               {sonarrId ? (
                 <Pressable
                   hitSlop={8}
-                  onPress={() => router.push(releasesHref('sonarr', sonarrId, `${titleOf(item)} · Season ${s.seasonNumber}`, s.seasonNumber))}>
+                  onPress={() => router.push(releasesHref('sonarr', sonarrId, `${titleOf(item)} · Season ${s.seasonNumber}`, s))}>
                   <ThemedText type="small" style={{ color: theme.accent }}>
                     Releases
                   </ThemedText>
@@ -234,6 +292,11 @@ const styles = StyleSheet.create({
   actions: {
     gap: Spacing.two,
     marginTop: Spacing.two,
+  },
+  quality: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    paddingHorizontal: Spacing.one,
   },
   tagline: {
     marginTop: Spacing.two,

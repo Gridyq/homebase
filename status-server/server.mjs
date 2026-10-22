@@ -1264,19 +1264,28 @@ const ARR_APPS = {
     label: 'Seerr',
     base: 'http://localhost:5055/api/v1',
     key: async () => JSON.parse(await readFile(path.join(ARR_DIR, 'seerr', 'settings.json'), 'utf8')).main?.apiKey,
-    routes: { GET: /^(search|movie\/\d+|tv\/\d+|request)$/, POST: /^request$/ },
+    routes: { GET: /^(search|movie\/\d+|tv\/\d+|request)$/, POST: /^request$/, DELETE: /^media\/\d+$/ },
   },
   sonarr: {
     label: 'Sonarr',
     base: 'http://localhost:8989/api/v3',
     key: () => xmlApiKey('sonarr'),
-    routes: { GET: /^(queue|calendar|release|series\/\d+)$/, POST: /^release$/, DELETE: /^queue\/\d+$/ },
+    routes: {
+      GET: /^(queue|calendar|release|series|series\/\d+|episodefile|qualityprofile|diskspace)$/,
+      POST: /^release$/,
+      PUT: /^series\/\d+$/,
+      DELETE: /^(queue\/\d+|series\/\d+|episodefile\/bulk)$/,
+    },
   },
   radarr: {
     label: 'Radarr',
     base: 'http://localhost:7878/api/v3',
     key: () => xmlApiKey('radarr'),
-    routes: { GET: /^(queue|calendar|release|movie\/\d+)$/, POST: /^release$/, DELETE: /^queue\/\d+$/ },
+    routes: {
+      GET: /^(queue|calendar|release|movie|movie\/\d+|qualityprofile)$/,
+      POST: /^release$/,
+      DELETE: /^(queue\/\d+|movie\/\d+)$/,
+    },
   },
 };
 

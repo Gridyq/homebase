@@ -65,6 +65,14 @@ function Home({ conn }: { conn: Connection }) {
     return () => clearTimeout(timer);
   }, [query]);
 
+  const header = (
+    <Stack.Toolbar placement="right">
+      <Stack.Toolbar.Button icon="internaldrive" onPress={() => router.push('/requests/library')}>
+        Library
+      </Stack.Toolbar.Button>
+    </Stack.Toolbar>
+  );
+
   const searchBar = (
     <Stack.SearchBar
       placeholder="Find a movie or show"
@@ -77,6 +85,7 @@ function Home({ conn }: { conn: Connection }) {
   if (query.trim()) {
     return (
       <>
+        {header}
         {searchBar}
         <SearchResults conn={conn} term={term} />
       </>
@@ -85,6 +94,7 @@ function Home({ conn }: { conn: Connection }) {
 
   return (
     <>
+      {header}
       {searchBar}
       <Overview conn={conn} />
     </>

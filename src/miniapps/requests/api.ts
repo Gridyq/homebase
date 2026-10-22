@@ -19,6 +19,8 @@ export enum MediaStatus {
 }
 
 export type MediaInfo = {
+  /** Seerr's own id for the title, not TMDB's. */
+  id: number;
   status: MediaStatus;
   /** Sonarr series id or Radarr movie id, once it's been sent there. */
   externalServiceId?: number | null;
@@ -98,11 +100,14 @@ export function details(conn: Connection, type: MediaType, id: number) {
   return arr<Details>(conn, `seerr/${type}/${id}`);
 }
 
-/** Ask for a movie, or for some seasons of a show. Seerr sends it on to Sonarr or Radarr. */
-export function requestMedia(conn: Connection, type: MediaType, id: number, seasons?: number[]) {
+/**
+ * Ask for a movie, or for some seasons of a show. Seerr sends it on to Sonarr or Radarr, with
+ * the given quality profile or else the one set in Seerr.
+ */
+export function requestMedia(conn: Connection, type: MediaType, id: number, seasons?: number[], profileId?: number) {
   return arr<SeerrRequest>(conn, 'seerr/request', {
     method: 'POST',
-    body: JSON.stringify({ mediaType: type, mediaId: id, ...(type === 'tv' ? { seasons } : {}) }),
+    body: JSON.stringify({ mediaType: type, mediaId: id, ...(type === 'tv' ? { seasons } : {}), ...(profileId ? { profileId } : {}) }),
   });
 }
 
@@ -311,6 +316,8 @@ export type Release = {
   approved: boolean;
   rejections: string[];
   fullSeason?: boolean;
+  /** Episodes a single-episode or multi-episode release covers; empty for a season pack. */
+  episodeNumbers?: number[];
 };
 
 type RawRelease = Omit<Release, 'quality' | 'customFormats' | 'indexer'> & {
@@ -352,6 +359,121 @@ export function grabRelease(conn: Connection, app: Arr, release: Pick<Release, '
     body: JSON.stringify({ guid: release.guid, indexerId: release.indexerId }),
     timeoutMs: 60_000,
   });
+}
+
+export type QualityProfile = { id: number; name: string };
+
+export function qualityProfiles(conn: Connection, app: Arr) {
+  return arr<QualityProfile[]>(conn, `${app}/qualityprofile`).then((list) => list.map(({ id, name }) => ({ id, name })));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Library: what Sonarr and Radarr have on disk
+
+export type LibrarySeason = { seasonNumber: number; episodes: number; size: number };
+
+export type LibraryItem = {
+  key: string;
+  arr: Arr;
+  /** Sonarr series id or Radarr movie id. */
+  id: number;
+  tmdbId?: number;
+  title: string;
+  year?: number;
+  posterUrl?: string;
+  size: number;
+  /** Shows only: seasons with something on disk. */
+  seasons: LibrarySeason[];
+  episodes?: number;
+};
+
+type SeriesResource = {
+  id: number;
+  title: string;
+  year?: number;
+  tmdbId?: number;
+  images: ArrImage[];
+  statistics?: { sizeOnDisk: number; episodeFileCount: number };
+  seasons: { seasonNumber: number; monitored: boolean; statistics?: { sizeOnDisk: number; episodeFileCount: number } }[];
+};
+
+type MovieResource = { id: number; title: string; year?: number; tmdbId: number; images: ArrImage[]; sizeOnDisk?: number };
+
+/** Every show and movie with files on disk, biggest first. A side that fails is left out. */
+export async function library(conn: Connection) {
+  const results = await Promise.allSettled([
+    arr<SeriesResource[]>(conn, 'sonarr/series').then((list) =>
+      list.map(
+        (s): LibraryItem => ({
+          key: `sonarr:${s.id}`,
+          arr: 'sonarr',
+          id: s.id,
+          tmdbId: s.tmdbId || undefined,
+          title: s.title,
+          year: s.year,
+          posterUrl: poster(s.images),
+          size: s.statistics?.sizeOnDisk ?? 0,
+          episodes: s.statistics?.episodeFileCount ?? 0,
+          seasons: s.seasons
+            .filter((x) => x.statistics?.episodeFileCount)
+            .map((x) => ({ seasonNumber: x.seasonNumber, episodes: x.statistics!.episodeFileCount, size: x.statistics!.sizeOnDisk })),
+        }),
+      ),
+    ),
+    arr<MovieResource[]>(conn, 'radarr/movie').then((list) =>
+      list.map(
+        (m): LibraryItem => ({
+          key: `radarr:${m.id}`,
+          arr: 'radarr',
+          id: m.id,
+          tmdbId: m.tmdbId,
+          title: m.title,
+          year: m.year,
+          posterUrl: poster(m.images),
+          size: m.sizeOnDisk ?? 0,
+          seasons: [],
+        }),
+      ),
+    ),
+  ]);
+  if (results.every((r) => r.status === 'rejected')) throw (results[0] as PromiseRejectedResult).reason;
+  return results.flatMap((r) => (r.status === 'fulfilled' ? r.value : [])).sort((a, b) => b.size - a.size);
+}
+
+/** Free and total space on the media drive, as Sonarr sees it. */
+export async function mediaDisk(conn: Connection) {
+  const disks = await arr<{ path: string; freeSpace: number; totalSpace: number }[]>(conn, 'sonarr/diskspace');
+  const disk = disks.find((d) => d.path === '/data');
+  return disk && { free: disk.freeSpace, total: disk.totalSpace };
+}
+
+/** Lets the title be asked for again in Seerr, instead of it still showing as available. */
+async function forgetInSeerr(conn: Connection, type: MediaType, tmdbId: number | undefined) {
+  if (!tmdbId) return;
+  const mediaId = (await details(conn, type, tmdbId).catch(() => undefined))?.mediaInfo?.id;
+  if (mediaId) await arr(conn, `seerr/media/${mediaId}`, { method: 'DELETE' }).catch(() => undefined);
+}
+
+/** Delete a whole show or movie, files and all. */
+export async function deleteFromLibrary(conn: Connection, item: LibraryItem) {
+  const path =
+    item.arr === 'sonarr'
+      ? `sonarr/series/${item.id}?deleteFiles=true&addImportListExclusion=false`
+      : `radarr/movie/${item.id}?deleteFiles=true&addImportExclusion=false`;
+  await arr(conn, path, { method: 'DELETE' });
+  await forgetInSeerr(conn, item.arr === 'sonarr' ? 'tv' : 'movie', item.tmdbId);
+}
+
+/** Delete one season's files and stop Sonarr watching for it, so it isn't downloaded again. */
+export async function deleteSeason(conn: Connection, seriesId: number, seasonNumber: number) {
+  const series = await arr<SeriesResource>(conn, `sonarr/series/${seriesId}`);
+  const seasons = series.seasons.map((s) => (s.seasonNumber === seasonNumber ? { ...s, monitored: false } : s));
+  await arr(conn, `sonarr/series/${seriesId}`, { method: 'PUT', body: JSON.stringify({ ...series, seasons }) });
+  const files = await arr<{ id: number; seasonNumber: number }[]>(conn, `sonarr/episodefile?seriesId=${seriesId}`);
+  const ids = files.filter((f) => f.seasonNumber === seasonNumber).map((f) => f.id);
+  if (ids.length) {
+    await arr(conn, 'sonarr/episodefile/bulk', { method: 'DELETE', body: JSON.stringify({ episodeFileIds: ids }) });
+  }
 }
 
 // ---------------------------------------------------------------------------------------------

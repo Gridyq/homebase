@@ -23,6 +23,7 @@ function RequestsStack() {
       </Stack.Screen>
       <Stack.Screen name="[type]/[id]" options={{ title: '' }} />
       <Stack.Screen name="releases" options={{ title: 'Releases' }} />
+      <Stack.Screen name="library" options={{ title: 'Library' }} />
     </Stack>
   );
 }
