@@ -74,7 +74,8 @@ export function PlayerControls({
   return (
     <View style={StyleSheet.absoluteFill}>
       <Pressable style={StyleSheet.absoluteFill} onPress={() => setVisible((v) => !v)} />
-      {loading && !scrubbing ? (
+      {/* With the controls up, the spinner takes the play button's place instead. */}
+      {loading && !visible ? (
         <View style={styles.center} pointerEvents="none">
           <ActivityIndicator color="#fff" size="large" />
         </View>
@@ -114,6 +115,7 @@ export function PlayerControls({
               <RoundButton label={`↺ ${SKIP_SECONDS}`} large onPress={() => seek(player.currentTime - SKIP_SECONDS)} />
               <RoundButton
                 label={playing ? '❚❚' : '▶'}
+                busy={loading}
                 huge
                 onPress={() => {
                   if (playing) player.pause();
@@ -286,7 +288,20 @@ export function formatClock(seconds: number) {
   return h ? `${h}:${String(m).padStart(2, '0')}:${s}` : `${m}:${s}`;
 }
 
-function RoundButton({ label, onPress, large, huge }: { label: string; onPress: () => void; large?: boolean; huge?: boolean }) {
+function RoundButton({
+  label,
+  onPress,
+  large,
+  huge,
+  busy,
+}: {
+  label: string;
+  onPress: () => void;
+  large?: boolean;
+  huge?: boolean;
+  /** Show a spinner instead of the label. */
+  busy?: boolean;
+}) {
   const size = huge ? 72 : large ? 56 : 36;
   return (
     <Pressable
@@ -296,7 +311,11 @@ function RoundButton({ label, onPress, large, huge }: { label: string; onPress: 
         styles.round,
         { width: size, height: size, borderRadius: size / 2, opacity: pressed ? 0.6 : 1 },
       ]}>
-      <ThemedText style={[styles.light, huge ? styles.hugeLabel : large ? styles.largeLabel : null]}>{label}</ThemedText>
+      {busy ? (
+        <ActivityIndicator color="#fff" size="large" />
+      ) : (
+        <ThemedText style={[styles.light, huge ? styles.hugeLabel : large ? styles.largeLabel : null]}>{label}</ThemedText>
+      )}
     </Pressable>
   );
 }
