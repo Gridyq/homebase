@@ -364,3 +364,15 @@ export function speedLimit(conn: Connection) {
 export function setSpeedLimit(conn: Connection, limit: number) {
   return request<SpeedLimit>(conn, '/api/qbittorrent/limit', { method: 'POST', body: JSON.stringify({ limit }) });
 }
+
+/** Finished torrents seeding and stopped, and the upload speed in bytes per second. */
+export type Seeding = { seeding: number; stopped: number; speed: number; stopWhenDone: boolean };
+
+export function seeding(conn: Connection) {
+  return request<Seeding>(conn, '/api/qbittorrent/seeding');
+}
+
+/** `seed` starts or stops every finished torrent; `stopWhenDone` stops new ones as they finish. */
+export function setSeeding(conn: Connection, change: { seed?: boolean; stopWhenDone?: boolean }) {
+  return request<Seeding>(conn, '/api/qbittorrent/seeding', { method: 'POST', body: JSON.stringify(change) });
+}

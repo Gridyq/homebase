@@ -15,6 +15,8 @@ import {
   recentRequests,
   removeDownload,
   search,
+  seeding,
+  setSeeding,
   setSpeedLimit,
   speedLimit,
   titleOf,
@@ -22,8 +24,9 @@ import {
   upcoming,
   yearOf,
   type Download,
+  type Seeding,
 } from '@/miniapps/requests/api';
-import { DownloadRow, SpeedLimitRow, TitleCard, titleHref, UpcomingRow } from '@/miniapps/requests/components';
+import { DownloadRow, SeedingRow, SpeedLimitRow, TitleCard, titleHref, UpcomingRow } from '@/miniapps/requests/components';
 import type { Connection } from '@/miniapps/server/api';
 import { Card } from '@/miniapps/server/components';
 import { useServerConnection } from '@/miniapps/server/connection';
@@ -93,6 +96,7 @@ function Overview({ conn }: { conn: Connection }) {
   const gutter = useGutter();
   const queue = usePolling(() => downloads(conn), QUEUE_POLL_MS, conn.url);
   const limit = usePolling(() => speedLimit(conn), QUEUE_POLL_MS, conn.url);
+  const seed = usePolling(() => seeding(conn), QUEUE_POLL_MS, conn.url);
   const rest = useAsync(() => Promise.all([upcoming(conn), requestedTitles(conn)]), 'overview');
   const [pulled, setPulled] = useState(false);
   if (pulled && !rest.loading) setPulled(false);
@@ -162,6 +166,44 @@ function Overview({ conn }: { conn: Connection }) {
     );
   };
 
+  const pickSeeding = (current: Seeding) => {
+    const options = [
+      current.seeding ? 'Stop seeding now' : undefined,
+      current.stopped && !current.stopWhenDone ? 'Resume seeding' : undefined,
+      current.stopWhenDone ? 'Keep seeding when done' : 'Always stop when done',
+    ].filter((o): o is string => !!o);
+    ActionSheetIOS.showActionSheetWithOptions(
+      {
+        title: 'Seeding',
+        message: current.stopWhenDone
+          ? 'Torrents stop as soon as they finish downloading.'
+          : 'Finished torrents keep uploading until you stop them.',
+        options: [...options, 'Cancel'],
+        cancelButtonIndex: options.length,
+      },
+      async (index) => {
+        const choice = options[index];
+        if (!choice) return;
+        try {
+          await setSeeding(
+            conn,
+            choice === 'Stop seeding now'
+              ? { seed: false }
+              : choice === 'Resume seeding'
+                ? { seed: true }
+                : // Stopping new ones as they finish should stop the ones seeding now too.
+                  choice === 'Always stop when done'
+                  ? { stopWhenDone: true, seed: false }
+                  : { stopWhenDone: false },
+          );
+        } catch (e) {
+          Alert.alert("Couldn't change seeding", e instanceof Error ? e.message : String(e));
+        }
+        await seed.refresh();
+      },
+    );
+  };
+
   if (!queue.data && !rest.data) {
     const error = queue.error ?? rest.error;
     return <Centered loading={!error} error={error} onRetry={rest.reload} />;
@@ -171,6 +213,7 @@ function Overview({ conn }: { conn: Connection }) {
   const active = queue.data ?? [];
   const nothing = !active.length && !comingUp?.length && !requested?.length;
   const speed = limit.data;
+  const seeds = seed.data;
 
   return (
     <ScrollView
@@ -185,6 +228,7 @@ function Overview({ conn }: { conn: Connection }) {
             rest.reload();
             queue.refresh();
             limit.refresh();
+            seed.refresh();
           }}
         />
       }>
@@ -194,14 +238,20 @@ function Overview({ conn }: { conn: Connection }) {
         </ThemedText>
       ) : null}
 
-      {active.length || speed ? (
+      {active.length || speed || seeds ? (
         <View style={styles.section}>
           <SectionTitle title="Downloading" />
           <View style={gutter}>
             <Card>
               {speed ? <SpeedLimitRow limit={speed} onPress={() => pickSpeedLimit(speed.limit)} /> : null}
+              {seeds ? <SeedingRow seeding={seeds} first={!speed} onPress={() => pickSeeding(seeds)} /> : null}
               {active.map((d, i) => (
-                <DownloadRow key={d.key} download={d} first={i === 0 && !speed} onPress={() => showActions(d)} />
+                <DownloadRow
+                  key={d.key}
+                  download={d}
+                  first={i === 0 && !speed && !seeds}
+                  onPress={() => showActions(d)}
+                />
               ))}
             </Card>
           </View>

@@ -7,7 +7,7 @@ import { Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 import { formatBytes, formatRate, formatWhen, Meter, StatusColors } from '@/miniapps/server/components';
 
-import { MediaStatus, type Download, type MediaType, type SpeedLimit, type Upcoming } from './api';
+import { MediaStatus, type Download, type MediaType, type Seeding, type SpeedLimit, type Upcoming } from './api';
 
 export function titleHref(type: MediaType, id: number) {
   return { pathname: '/requests/[type]/[id]', params: { type, id: String(id) } } as const;
@@ -188,6 +188,34 @@ export function SpeedLimitRow({ limit, onPress }: { limit: SpeedLimit; onPress: 
       </View>
       <ThemedText type="small" themeColor="textSecondary">
         {limit.limit ? formatRate(limit.limit) : 'None'}
+      </ThemedText>
+    </Pressable>
+  );
+}
+
+export function SeedingRow({ seeding, first, onPress }: { seeding: Seeding; first: boolean; onPress: () => void }) {
+  const theme = useTheme();
+  const caption = seeding.seeding
+    ? `${seeding.seeding} torrent${seeding.seeding === 1 ? '' : 's'} · ${formatRate(seeding.speed)} up`
+    : seeding.stopped
+      ? `${seeding.stopped} stopped`
+      : 'Nothing finished';
+  return (
+    <Pressable
+      onPress={onPress}
+      style={({ pressed }) => [
+        styles.row,
+        !first && { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: theme.backgroundSelected },
+        { opacity: pressed ? 0.6 : 1 },
+      ]}>
+      <View style={styles.rowText}>
+        <ThemedText type="smallBold">Seeding</ThemedText>
+        <ThemedText type="small" themeColor="textSecondary" style={styles.caption}>
+          {caption}
+        </ThemedText>
+      </View>
+      <ThemedText type="small" themeColor="textSecondary">
+        {seeding.stopWhenDone ? 'Stops when done' : seeding.seeding ? 'On' : 'Off'}
       </ThemedText>
     </Pressable>
   );

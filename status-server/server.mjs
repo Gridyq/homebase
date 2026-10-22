@@ -3,7 +3,7 @@
  * Status server for Homebase's Server mini-app: system stats, services and containers, and
  * start/stop/restart for them. Also watches for problems and reports them through ntfy, since
  * the app can't get push notifications, and passes the Requests mini-app's calls on to Seerr,
- * Sonarr and Radarr, and qBittorrent's speed limit. No dependencies beyond Node.js.
+ * Sonarr and Radarr, and qBittorrent's speed limit and seeding. No dependencies beyond Node.js.
  *
  * It also keeps a day of history (CPU, memory, network, and each service's memory and CPU) in
  * `history.json`, and can list the processes and cgroups using the most memory and CPU.
@@ -915,7 +915,8 @@ async function proxyArr(req, res, appName, apiPath, search) {
 }
 
 // qBittorrent's Web API wants a login cookie rather than a key, and form bodies, so it gets its
-// own small client instead of going through the proxy above. It only exposes the speed limit.
+// own small client instead of going through the proxy above. It only exposes the speed limit and
+// seeding.
 
 const QBIT_URL = process.env.QBIT_URL ?? 'http://localhost:8090';
 let qbitCookie;
@@ -976,6 +977,42 @@ async function setSpeedLimit(limit) {
   return speedLimit();
 }
 
+// States of finished torrents that are uploading or waiting to, and of ones stopped after
+// finishing. qBittorrent 5 renamed "paused" to "stopped".
+const SEEDING_STATES = new Set(['uploading', 'stalledUP', 'forcedUP', 'queuedUP', 'checkingUP']);
+const STOPPED_STATES = new Set(['stoppedUP', 'pausedUP']);
+
+/**
+ * How many finished torrents are seeding and how many are stopped, the upload speed in bytes per
+ * second, and whether torrents stop by themselves as soon as they finish.
+ */
+async function seeding() {
+  const [torrents, info, prefs] = await Promise.all([qbit('torrents/info'), qbit('transfer/info'), qbit('app/preferences')]);
+  return {
+    seeding: torrents.filter((t) => SEEDING_STATES.has(t.state)).length,
+    stopped: torrents.filter((t) => STOPPED_STATES.has(t.state)).length,
+    speed: info.up_info_speed,
+    stopWhenDone: prefs.max_ratio_enabled && prefs.max_ratio === 0 && prefs.max_ratio_act === 0,
+  };
+}
+
+async function setSeeding({ seed, stopWhenDone }) {
+  if (typeof stopWhenDone === 'boolean') {
+    // A share ratio limit of 0 is reached the moment a torrent finishes, and action 0 stops it.
+    // Turning it off goes back to seeding with no limit.
+    await qbit('app/setPreferences', {
+      json: JSON.stringify(stopWhenDone ? { max_ratio_enabled: true, max_ratio: 0, max_ratio_act: 0 } : { max_ratio_enabled: false }),
+    });
+  }
+  if (typeof seed === 'boolean') {
+    // Only finished torrents: stopping everything would also stop downloads.
+    const states = seed ? STOPPED_STATES : SEEDING_STATES;
+    const hashes = (await qbit('torrents/info')).filter((t) => states.has(t.state)).map((t) => t.hash);
+    if (hashes.length) await qbit(seed ? 'torrents/start' : 'torrents/stop', { hashes: hashes.join('|') });
+  }
+  return seeding();
+}
+
 // ---------------------------------------------------------------------------------------------
 // HTTP
 
@@ -1032,6 +1069,20 @@ async function handle(req, res) {
       }
       log(req, `download limit ${limit}`);
       return sendJson(res, 200, await setSpeedLimit(limit));
+    }
+  }
+
+  if (url.pathname === '/api/qbittorrent/seeding') {
+    if (req.method === 'GET') return sendJson(res, 200, await seeding());
+    if (req.method === 'POST') {
+      let body;
+      try {
+        body = JSON.parse((await readBody(req))?.toString() ?? '{}');
+      } catch {
+        throw new HttpError(400, 'Expected JSON');
+      }
+      log(req, `seeding ${JSON.stringify(body)}`);
+      return sendJson(res, 200, await setSeeding(body ?? {}));
     }
   }
 
