@@ -55,4 +55,12 @@ export const miniApps: MiniApp[] = [
     color: '#E5484D',
     href: '/requests',
   },
+  {
+    id: 'drop',
+    name: 'Drop',
+    description: 'Send photos, files, text and links to the PC, and get files back',
+    glyph: '⇄',
+    color: '#0090FF',
+    href: '/drop',
+  },
 ];

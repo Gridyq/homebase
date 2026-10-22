@@ -4,7 +4,8 @@
  * start/stop/restart for them. Also watches for problems and reports them through ntfy, since
  * the app can't get push notifications. Stops the download stack while a game runs (game mode)
  * and runs Seerr only while it's used. Passes the Requests mini-app's calls on to Seerr, Sonarr
- * and Radarr, and qBittorrent's speed limit and seeding. No dependencies beyond Node.js.
+ * and Radarr, and qBittorrent's speed limit and seeding. Takes files, text and links from the
+ * Drop mini-app, and hands back the files in its folder. No dependencies beyond Node.js.
  *
  * It also keeps a day of history (CPU, memory, network, and each service's memory and CPU) in
  * `history.json`, and can list the processes and cgroups using the most memory and CPU.
@@ -17,12 +18,14 @@
  * Only loopback and Tailscale addresses are answered, in case the firewall ever opens the port to
  * the home network.
  */
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { readdir, readFile, readlink, realpath, rename, statfs, unlink, writeFile } from 'node:fs/promises';
+import { constants, createWriteStream } from 'node:fs';
+import { link, mkdir, open, readdir, readFile, readlink, realpath, rename, stat, statfs, unlink, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
+import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
@@ -1489,6 +1492,137 @@ async function setSeeding({ seed, stopWhenDone }) {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Drop: files sent from the phone land in ~/Downloads/Homebase, and the phone can list, fetch and
+// delete what's there, so putting a file in that folder sends it the other way. Text sent from
+// the phone goes on the clipboard, and a lone link opens in the browser instead.
+
+const DROP_DIR = process.env.DROP_DIR ?? path.join(os.homedir(), 'Downloads', 'Homebase');
+const DROP_MAX_BYTES = 8 * 1024 ** 3;
+const DROP_TYPES = {
+  jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp', heic: 'image/heic',
+  mp4: 'video/mp4', mov: 'video/quicktime', mkv: 'video/x-matroska', mp3: 'audio/mpeg', m4a: 'audio/mp4',
+  pdf: 'application/pdf', txt: 'text/plain', zip: 'application/zip',
+};
+
+/** A plain file name in the drop folder. Hidden names are left out so uploads in progress stay out of the way. */
+function dropName(raw) {
+  let name;
+  try {
+    name = decodeURIComponent(raw).normalize('NFC').trim();
+  } catch {}
+  if (!name || name.length > 255 || name.startsWith('.') || /[/\\\0]/.test(name)) throw new HttpError(400, 'Bad file name');
+  return name;
+}
+
+async function dropFiles() {
+  await mkdir(DROP_DIR, { recursive: true });
+  const files = [];
+  for (const entry of await readdir(DROP_DIR, { withFileTypes: true })) {
+    if (!entry.isFile() || entry.name.startsWith('.')) continue;
+    const info = await stat(path.join(DROP_DIR, entry.name)).catch(() => undefined);
+    if (info) files.push({ name: entry.name, size: info.size, modified: info.mtimeMs });
+  }
+  files.sort((a, b) => b.modified - a.modified);
+  return { folder: DROP_DIR.replace(os.homedir(), '~'), files };
+}
+
+function notifyDesktop(title, body) {
+  run('notify-send', ['--app-name=Homebase', '--icon=smartphone', title, body], { timeout: 5000 }).catch((e) =>
+    console.error("Couldn't show a desktop notification:", e.message),
+  );
+}
+
+/** Writes the upload to a hidden file first, then gives it the name, or "name (2).ext" when that's taken. */
+async function receiveDropFile(req, name) {
+  if (Number(req.headers['content-length']) > DROP_MAX_BYTES) throw new HttpError(413, 'Files can be up to 8 GB');
+  await mkdir(DROP_DIR, { recursive: true });
+  const part = path.join(DROP_DIR, `.${randomBytes(6).toString('hex')}.part`);
+  try {
+    let size = 0;
+    await pipeline(
+      req,
+      async function* (chunks) {
+        for await (const chunk of chunks) {
+          size += chunk.length;
+          if (size > DROP_MAX_BYTES) throw new HttpError(413, 'Files can be up to 8 GB');
+          yield chunk;
+        }
+      },
+      createWriteStream(part, { flags: 'wx' }),
+    );
+    const { name: stem, ext } = path.parse(name);
+    for (let n = 1; ; n++) {
+      const saved = n === 1 ? name : `${stem} (${n})${ext}`;
+      try {
+        // Unlike rename, link won't replace a file that's already there.
+        await link(part, path.join(DROP_DIR, saved));
+      } catch (e) {
+        if (e.code === 'EEXIST') continue;
+        throw e;
+      }
+      notifyDesktop('Received from your phone', saved);
+      return { name: saved, size };
+    }
+  } finally {
+    await unlink(part).catch(() => {});
+  }
+}
+
+async function sendDropFile(res, name) {
+  let handle;
+  try {
+    handle = await open(path.join(DROP_DIR, name), constants.O_RDONLY | constants.O_NOFOLLOW);
+  } catch (e) {
+    if (e.code === 'ENOENT' || e.code === 'ELOOP') throw new HttpError(404, 'That file is gone');
+    throw e;
+  }
+  const info = await handle.stat();
+  if (!info.isFile()) {
+    await handle.close();
+    throw new HttpError(404, 'That file is gone');
+  }
+  res.writeHead(200, {
+    'content-type': DROP_TYPES[path.extname(name).slice(1).toLowerCase()] ?? 'application/octet-stream',
+    'content-length': info.size,
+    'content-disposition': `attachment; filename*=UTF-8''${encodeURIComponent(name)}`,
+    'cache-control': 'no-store',
+  });
+  await pipeline(handle.createReadStream(), res);
+}
+
+async function deleteDropFile(name) {
+  await unlink(path.join(DROP_DIR, name)).catch((e) => {
+    if (e.code !== 'ENOENT') throw e;
+  });
+  return { ok: true };
+}
+
+/** Runs a desktop program that might stay open, and resolves once it has started or failed. */
+function startDesktop(command, args, input) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { stdio: [input === undefined ? 'ignore' : 'pipe', 'ignore', 'pipe'] });
+    let stderr = '';
+    child.stderr.on('data', (d) => (stderr += d));
+    child.on('error', reject);
+    child.on('exit', (code) => (code === 0 ? resolve() : reject(new Error(stderr.trim() || `${command} failed (${code})`))));
+    child.stdin?.end(input);
+  });
+}
+
+async function receiveDropText(text) {
+  const trimmed = typeof text === 'string' ? text.trim() : '';
+  if (!trimmed) throw new HttpError(400, 'Nothing to send');
+  if (/^https?:\/\/\S+$/i.test(trimmed)) {
+    await startDesktop('xdg-open', [trimmed]);
+    return { action: 'opened' };
+  }
+  // wl-copy stays behind in the background to hand the text to whoever pastes it.
+  await startDesktop('wl-copy', [], text);
+  notifyDesktop('Copied from your phone', trimmed.length > 200 ? `${trimmed.slice(0, 200)}…` : trimmed);
+  return { action: 'copied' };
+}
+
+// ---------------------------------------------------------------------------------------------
 // HTTP
 
 class HttpError extends Error {
@@ -1576,6 +1710,31 @@ async function handle(req, res) {
     }
   }
 
+  if (req.method === 'GET' && url.pathname === '/api/drop') return sendJson(res, 200, await dropFiles());
+  if (req.method === 'POST' && url.pathname === '/api/drop/text') {
+    let text;
+    try {
+      text = JSON.parse((await readBody(req))?.toString() ?? '{}').text;
+    } catch {
+      throw new HttpError(400, 'Expected JSON');
+    }
+    log(req, 'drop text');
+    return sendJson(res, 200, await receiveDropText(text));
+  }
+  const drop = /^\/api\/drop\/files\/([^/]+)$/.exec(url.pathname);
+  if (drop) {
+    const name = dropName(drop[1]);
+    if (req.method === 'GET') return sendDropFile(res, name);
+    if (req.method === 'PUT') {
+      log(req, `drop ${name}`);
+      return sendJson(res, 200, await receiveDropFile(req, name));
+    }
+    if (req.method === 'DELETE') {
+      log(req, `drop delete ${name}`);
+      return sendJson(res, 200, await deleteDropFile(name));
+    }
+  }
+
   const arr = /^\/api\/arr\/(\w+)\/(.+)$/.exec(url.pathname);
   if (arr) return proxyArr(req, res, arr[1], arr[2], url.search);
 
@@ -1637,7 +1796,8 @@ if (process.argv[2] === 'pair') {
   setTimeout(watch, 10_000).unref();
   setInterval(watch, WATCH_INTERVAL).unref();
 
-  createServer(async (req, res) => {
+  // Node gives up on a request after 5 minutes by default, too soon for a large file over a slow link.
+  createServer({ requestTimeout: 60 * 60_000 }, async (req, res) => {
     try {
       await handle(req, res);
     } catch (e) {
