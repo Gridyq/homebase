@@ -86,7 +86,6 @@ function Player({
   const inPictureInPicture = useRef(false);
   /** Set when playback ends and we close or show Up next ourselves, so leaving fullscreen doesn't close. */
   const keepOpen = useRef(false);
-  const closeTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
 
   const source: VideoSource = {
     uri: playback.url,
@@ -166,7 +165,6 @@ function Player({
   // Tell the server where we stopped so "Continue watching" is up to date.
   useEffect(() => {
     return () => {
-      clearTimeout(closeTimer.current);
       if (started.current) report('stopped');
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -184,15 +182,11 @@ function Player({
         startsPictureInPictureAutomatically
         fullscreenOptions={{ enable: true, orientation: 'default' }}
         onFullscreenEnter={() => setFullscreen(true)}
-        // Closing the system player closes this screen too. Leaving fullscreen is also how Picture
-        // in Picture starts, and unmounting would kill it, so wait a moment to see whether it did.
+        // Closing the system player closes this screen too, unless it left fullscreen to start
+        // Picture in Picture, which unmounting would kill.
         onFullscreenExit={() => {
           setFullscreen(false);
-          if (keepOpen.current) return;
-          clearTimeout(closeTimer.current);
-          closeTimer.current = setTimeout(() => {
-            if (!inPictureInPicture.current) router.back();
-          }, 700);
+          if (!keepOpen.current && !inPictureInPicture.current) router.back();
         }}
         onPictureInPictureStart={() => {
           inPictureInPicture.current = true;
