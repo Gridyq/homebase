@@ -1,3 +1,4 @@
+import { requireOptionalNativeModule } from 'expo';
 import * as SecureStore from 'expo-secure-store';
 import { createContext, use, useEffect, useMemo, useState, type ReactNode } from 'react';
 
@@ -65,16 +66,16 @@ export function useJellyfinSettings() {
 
 // App builds made before expo-network was added don't contain its native code, and importing
 // it there throws. Load it lazily so over-the-air updates keep working on those builds; they
-// just always get the Wi-Fi limit.
+// just always get the Wi-Fi limit. Check for the native module first rather than catching:
+// Metro reports a module that throws while loading as a fatal error (crashing a release
+// build) instead of letting the caller's try/catch see it.
 let network: typeof import('expo-network') | null | undefined;
 function loadNetwork() {
   if (network === undefined) {
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      network = require('expo-network') as typeof import('expo-network');
-    } catch {
-      network = null;
-    }
+    network = requireOptionalNativeModule('ExpoNetwork')
+      ? // eslint-disable-next-line @typescript-eslint/no-require-imports
+        (require('expo-network') as typeof import('expo-network'))
+      : null;
   }
   return network;
 }
