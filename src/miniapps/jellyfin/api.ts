@@ -40,6 +40,17 @@ export type Chapter = {
   ImageTag?: string;
 };
 
+/** Scrub preview thumbnails, packed into tile images of `TileWidth` x `TileHeight` thumbnails. */
+export type TrickplayInfo = {
+  Width: number;
+  Height: number;
+  TileWidth: number;
+  TileHeight: number;
+  ThumbnailCount: number;
+  /** Milliseconds between thumbnails. */
+  Interval: number;
+};
+
 export type BaseItem = {
   Id: string;
   Name: string;
@@ -70,6 +81,10 @@ export type BaseItem = {
   Chapters?: Chapter[];
   RemoteTrailers?: { Url: string; Name?: string }[];
   LocalTrailerCount?: number;
+  /** By media source id, then thumbnail width. */
+  Trickplay?: Record<string, Record<string, TrickplayInfo>>;
+  /** Playlist entries only: identifies this entry, for removing or moving it. */
+  PlaylistItemId?: string;
 };
 
 export type LibrarySort = 'SortName' | 'DateCreated' | 'PremiereDate' | 'CommunityRating';
@@ -251,6 +266,7 @@ export function createClient(session: Session) {
         music: 'MusicAlbum',
         boxsets: 'BoxSet',
         musicvideos: 'MusicVideo',
+        playlists: 'Playlist',
       };
       const type = library.CollectionType ? types[library.CollectionType] : undefined;
       const filter = type ? `&includeItemTypes=${type}&recursive=true` : '';
@@ -302,6 +318,43 @@ export function createClient(session: Session) {
       const tag = item.Chapters?.[index]?.ImageTag;
       return tag ? `${serverUrl}/Items/${item.Id}/Images/Chapter/${index}?tag=${tag}&fillHeight=${height}&quality=90` : undefined;
     },
+
+    /** The smallest set of scrub thumbnails for a media source, and the URL of each tile. */
+    trickplay: (item: BaseItem, mediaSourceId: string) => {
+      const sizes = item.Trickplay?.[mediaSourceId];
+      const info = sizes && Object.values(sizes).sort((a, b) => a.Width - b.Width)[0];
+      if (!info?.ThumbnailCount) return undefined;
+      const tileUrl = (tile: number) =>
+        `${serverUrl}/Videos/${item.Id}/Trickplay/${info.Width}/${tile}.jpg?mediaSourceId=${mediaSourceId}&api_key=${accessToken}`;
+      return { info, tileUrl };
+    },
+
+    playlists: () =>
+      get<ItemsResponse>(
+        `/Items?userId=${userId}&includeItemTypes=Playlist&recursive=true&sortBy=SortName&fields=${itemFields}`,
+      ).then((r) => r.Items),
+
+    /** In playlist order. */
+    playlistItems: (playlistId: string) =>
+      get<ItemsResponse>(`/Playlists/${playlistId}/Items?userId=${userId}&fields=${itemFields}`).then((r) => r.Items),
+
+    /** Adding a show, season or collection adds everything in it. */
+    createPlaylist: (name: string, itemIds: string[]) =>
+      post<{ Id: string }>('/Playlists', { Name: name, Ids: itemIds, UserId: userId, MediaType: 'Video' }),
+
+    addToPlaylist: (playlistId: string, itemIds: string[]) =>
+      post<void>(`/Playlists/${playlistId}/Items?ids=${itemIds.join(',')}&userId=${userId}`),
+
+    removeFromPlaylist: (playlistId: string, entryIds: string[]) =>
+      request<void>(serverUrl, `/Playlists/${playlistId}/Items?entryIds=${entryIds.join(',')}`, deviceId, accessToken, {
+        method: 'DELETE',
+      }),
+
+    movePlaylistItem: (playlistId: string, entryId: string, newIndex: number) =>
+      post<void>(`/Playlists/${playlistId}/Items/${entryId}/Move/${newIndex}`),
+
+    deleteItem: (itemId: string) =>
+      request<void>(serverUrl, `/Items/${itemId}`, deviceId, accessToken, { method: 'DELETE' }),
 
     children: (parentId: string) =>
       get<ItemsResponse>(

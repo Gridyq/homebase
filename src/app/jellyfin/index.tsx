@@ -25,7 +25,10 @@ export default function JellyfinHome() {
 
   const { data, error, loading, reload } = useAsync(
     () =>
-      Promise.all([client.resume(), client.nextUp(), client.libraries(), client.favorites().catch(() => [])]),
+      Promise.all([
+        client.resume(), client.nextUp(), client.libraries(), client.favorites().catch(() => []),
+        client.playlists().catch(() => []),
+      ]),
     'home',
   );
 
@@ -82,7 +85,7 @@ export default function JellyfinHome() {
     );
   }
 
-  const [resume, nextUp, libraries, favorites] = data;
+  const [resume, nextUp, libraries, favorites, playlists] = data;
   return (
     <ScrollView
       contentInsetAdjustmentBehavior="automatic"
@@ -103,6 +106,7 @@ export default function JellyfinHome() {
       <ItemRow title="Next up" items={nextUp} shape="wide" />
       <ItemRow title="Libraries" items={libraries} shape="wide" />
       <ItemRow title="Favorites" items={favorites} />
+      <ItemRow title="Playlists" items={playlists} />
     </ScrollView>
   );
 }

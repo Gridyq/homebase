@@ -1,9 +1,10 @@
 import { useEventListener } from 'expo';
 import { Image } from 'expo-image';
 import { router, useLocalSearchParams } from 'expo-router';
-import { useVideoPlayer, VideoView, type VideoPlayer, type VideoSource } from 'expo-video';
+import { StatusBar } from 'expo-status-bar';
+import { useVideoPlayer, VideoView, type AudioTrack, type VideoPlayer, type VideoSource } from 'expo-video';
 import { useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Pressable, StyleSheet, View } from 'react-native';
+import { ActionSheetIOS, ActivityIndicator, Pressable, StyleSheet, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Button } from '@/components/button';
@@ -13,21 +14,30 @@ import { TICKS_PER_SECOND, type BaseItem, type JellyfinClient } from '@/miniapps
 import { episodeLabel } from '@/miniapps/jellyfin/components';
 import { clearLastPlayed, saveLastPlayed } from '@/miniapps/jellyfin/last-played';
 import { useJellyfin } from '@/miniapps/jellyfin/session';
+import { PlayerControls, type ControlAction } from '@/miniapps/jellyfin/player-controls';
 import { currentMaxBitrate, useJellyfinSettings } from '@/miniapps/jellyfin/settings';
-import { subtitleIndexForLanguage, subtitleLanguage } from '@/miniapps/jellyfin/subtitles';
+import {
+  SUBTITLES_OFF,
+  subtitleIndexForLanguage,
+  subtitleLabel,
+  subtitleLanguage,
+  subtitleStreams,
+} from '@/miniapps/jellyfin/subtitles';
 import { useAsync } from '@/miniapps/jellyfin/use-async';
 
 const PROGRESS_INTERVAL_SECONDS = 10;
 const UP_NEXT_SECONDS = 10;
 
 export default function PlayerScreen() {
-  const { id, start, subtitle, subtitleLang } = useLocalSearchParams<{
+  const { id, start, subtitle, subtitleLang, playlist } = useLocalSearchParams<{
     id: string;
     start?: string;
     /** Subtitle stream index picked on the item screen. */
     subtitle?: string;
     /** Subtitle language carried over from the previous episode, or "off". */
     subtitleLang?: string;
+    /** Playing through a playlist: what comes next is the playlist's next entry. */
+    playlist?: string;
   }>();
   const client = useJellyfin();
   const { settings } = useJellyfinSettings();
@@ -42,10 +52,14 @@ export default function PlayerScreen() {
     const maxBitrate = await currentMaxBitrate(settings);
     const [playback, next] = await Promise.all([
       client.playbackInfo(id, subtitleIndex, maxBitrate),
-      item.Type === 'Episode' ? client.nextEpisode(item).catch(() => undefined) : undefined,
+      playlist
+        ? client.playlistItems(playlist).then((items) => nextInPlaylist(items, id), () => undefined)
+        : item.Type === 'Episode'
+          ? client.nextEpisode(item).catch(() => undefined)
+          : undefined,
     ]);
     return { item, playback: { ...playback, subtitleIndex }, next };
-  }, id);
+  }, `${id}/${subtitle}/${playlist}`);
 
   if (!data) {
     return (
@@ -62,7 +76,13 @@ export default function PlayerScreen() {
     );
   }
 
-  return <Player client={client} {...data} startSeconds={Number(start) || 0} />;
+  return <Player client={client} {...data} playlist={playlist} startSeconds={Number(start) || 0} />;
+}
+
+/** The first video after this item in a playlist. */
+function nextInPlaylist(items: BaseItem[], currentId: string) {
+  const at = items.findIndex((i) => i.Id === currentId);
+  return at < 0 ? undefined : items.slice(at + 1).find((i) => i.MediaType === 'Video');
 }
 
 type Playback = Awaited<ReturnType<JellyfinClient['playbackInfo']>> & { subtitleIndex?: number };
@@ -72,23 +92,25 @@ function Player({
   item,
   playback,
   next,
+  playlist,
   startSeconds,
 }: {
   client: JellyfinClient;
   item: BaseItem;
   playback: Playback;
   next: BaseItem | undefined;
+  playlist: string | undefined;
   startSeconds: number;
 }) {
   const viewRef = useRef<VideoView>(null);
-  const [fullscreen, setFullscreen] = useState(false);
+  /** Handed over to the iOS player (for AirPlay and its menus); our controls are hidden meanwhile. */
+  const [systemPlayer, setSystemPlayer] = useState(false);
   const [ended, setEnded] = useState(false);
+  const [audioTracks, setAudioTracks] = useState<AudioTrack[]>([]);
   const started = useRef(false);
   const position = useRef(startSeconds);
-  const inPictureInPicture = useRef(false);
+  const lastReport = useRef(0);
   const finished = useRef(false);
-  /** Set when playback ends and we close or show Up next ourselves, so leaving fullscreen doesn't close. */
-  const keepOpen = useRef(false);
 
   const source: VideoSource = {
     uri: playback.url,
@@ -102,11 +124,15 @@ function Player({
   const player = useVideoPlayer(source, (p) => {
     p.staysActiveInBackground = true;
     p.showNowPlayingNotification = true;
-    p.timeUpdateEventInterval = PROGRESS_INTERVAL_SECONDS;
+    // Often enough for the controls' clock; the server only hears every PROGRESS_INTERVAL_SECONDS.
+    p.timeUpdateEventInterval = 0.5;
   });
 
-  const report = (phase: 'start' | 'progress' | 'stopped', isPaused = false) =>
-    client.reportPlayback(phase, {
+  const trickplay = client.trickplay(item, playback.mediaSourceId);
+
+  const report = (phase: 'start' | 'progress' | 'stopped', isPaused = false) => {
+    lastReport.current = Date.now();
+    return client.reportPlayback(phase, {
       ItemId: item.Id,
       MediaSourceId: playback.mediaSourceId,
       PlaySessionId: playback.playSessionId,
@@ -114,6 +140,7 @@ function Player({
       PlayMethod: playback.playMethod,
       IsPaused: isPaused,
     });
+  };
 
   // Subtitles chosen up front arrive as a track in the HLS stream; switch it on once, when it
   // shows up, and leave later changes in the system menu alone.
@@ -123,6 +150,7 @@ function Player({
     subtitleApplied.current = showFirstSubtitleTrack(player);
   };
   useEventListener(player, 'availableSubtitleTracksChange', applySubtitle);
+  useEventListener(player, 'availableAudioTracksChange', ({ availableAudioTracks }) => setAudioTracks(availableAudioTracks));
 
   useEventListener(player, 'statusChange', ({ status }) => {
     if (status !== 'readyToPlay' || started.current) return;
@@ -131,13 +159,11 @@ function Player({
     player.play();
     report('start');
     applySubtitle();
-    // Hand over to the system player: rotation, scrubbing, audio and subtitle menus, AirPlay, PiP.
-    viewRef.current?.enterFullscreen().catch(() => undefined);
   });
 
   useEventListener(player, 'timeUpdate', ({ currentTime }) => {
     position.current = currentTime;
-    report('progress', !player.playing);
+    if (Date.now() - lastReport.current >= PROGRESS_INTERVAL_SECONDS * 1000) report('progress', !player.playing);
   });
 
   useEventListener(player, 'playingChange', ({ isPlaying }) => {
@@ -148,7 +174,6 @@ function Player({
   useEventListener(player, 'playToEnd', () => {
     position.current = player.duration;
     finished.current = true;
-    keepOpen.current = true;
     if (!next) {
       router.back();
       return;
@@ -157,12 +182,13 @@ function Player({
     setEnded(true);
   });
 
+  const lang = () => subtitleLanguage(item, playback.subtitleIndex);
   const playNext = () => {
     if (!next) return;
-    const lang = subtitleLanguage(item, playback.subtitleIndex);
+    const l = lang();
     router.replace({
       pathname: '/jellyfin/player/[id]',
-      params: { id: next.Id, start: '0', ...(lang ? { subtitleLang: lang } : {}) },
+      params: { id: next.Id, start: '0', ...(l ? { subtitleLang: l } : {}), ...(playlist ? { playlist } : {}) },
     });
   };
 
@@ -172,39 +198,107 @@ function Player({
     return () => {
       if (!started.current) return;
       report('stopped');
-      const lang = subtitleLanguage(item, playback.subtitleIndex);
-      if (!finished.current) saveLastPlayed(item, position.current, lang);
-      else if (next) saveLastPlayed(next, 0, lang);
+      const l = lang();
+      if (!finished.current) saveLastPlayed(item, position.current, l);
+      else if (next) saveLastPlayed(next, 0, l);
       else clearLastPlayed();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const pickSubtitles = () => {
+    const streams = subtitleStreams(item);
+    const choices = [{ index: SUBTITLES_OFF, label: 'Off' }, ...streams.map((s) => ({ index: s.Index, label: subtitleLabel(s) }))];
+    const current = player.subtitleTrack ? playback.subtitleIndex : SUBTITLES_OFF;
+    ActionSheetIOS.showActionSheetWithOptions(
+      {
+        title: 'Subtitles',
+        options: [...choices.map((c) => (c.index === current ? `✓ ${c.label}` : c.label)), 'Cancel'],
+        cancelButtonIndex: choices.length,
+      },
+      (i) => {
+        const choice = choices[i];
+        if (!choice || choice.index === current) return;
+        if (choice.index === SUBTITLES_OFF) {
+          player.subtitleTrack = null;
+          return;
+        }
+        if (choice.index === playback.subtitleIndex && showFirstSubtitleTrack(player)) return;
+        // The stream only carries the subtitle asked for, so another one means asking again.
+        router.replace({
+          pathname: '/jellyfin/player/[id]',
+          params: {
+            id: item.Id,
+            start: String(player.currentTime),
+            subtitle: String(choice.index),
+            ...(playlist ? { playlist } : {}),
+          },
+        });
+      },
+    );
+  };
+
+  const pickAudio = () => {
+    const current = player.audioTrack;
+    ActionSheetIOS.showActionSheetWithOptions(
+      {
+        title: 'Audio',
+        options: [
+          ...audioTracks.map((t) => (t.language === current?.language && t.label === current?.label ? `✓ ${t.label}` : t.label)),
+          'Cancel',
+        ],
+        cancelButtonIndex: audioTracks.length,
+      },
+      (i) => {
+        const track = audioTracks[i];
+        if (track) player.audioTrack = track;
+      },
+    );
+  };
+
+  const actions: ControlAction[] = [
+    ...(subtitleStreams(item).length ? [{ label: 'CC', onPress: pickSubtitles }] : []),
+    ...(audioTracks.length > 1 ? [{ label: 'Audio', onPress: pickAudio }] : []),
+    { label: 'PiP', onPress: () => viewRef.current?.startPictureInPicture().catch(() => undefined) },
+    { label: 'iOS', onPress: () => setSystemPlayer(true) },
+  ];
+
+  // Go fullscreen only once the native controls are switched on, or the iOS player would open
+  // without any way to close it.
+  useEffect(() => {
+    if (!systemPlayer) return;
+    const frame = requestAnimationFrame(() => {
+      viewRef.current?.enterFullscreen().catch(() => setSystemPlayer(false));
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [systemPlayer]);
+
   return (
-    <Shell showClose={!fullscreen}>
+    <Shell showClose={false}>
+      <StatusBar hidden />
       <VideoView
         ref={viewRef}
         style={StyleSheet.absoluteFill}
         player={player}
         contentFit="contain"
-        nativeControls
+        nativeControls={systemPlayer}
         allowsPictureInPicture
         startsPictureInPictureAutomatically
         fullscreenOptions={{ enable: true, orientation: 'default' }}
-        onFullscreenEnter={() => setFullscreen(true)}
-        // Closing the system player closes this screen too, unless it left fullscreen to start
-        // Picture in Picture, which unmounting would kill.
-        onFullscreenExit={() => {
-          setFullscreen(false);
-          if (!keepOpen.current && !inPictureInPicture.current) router.back();
-        }}
-        onPictureInPictureStart={() => {
-          inPictureInPicture.current = true;
-        }}
-        onPictureInPictureStop={() => {
-          inPictureInPicture.current = false;
-        }}
+        // Leaving the iOS player comes back to ours rather than closing.
+        onFullscreenExit={() => setSystemPlayer(false)}
       />
+      {!systemPlayer && !ended ? (
+        <PlayerControls
+          player={player}
+          title={item.Type === 'Episode' ? (item.SeriesName ?? item.Name) : item.Name}
+          subtitle={item.Type === 'Episode' ? [episodeLabel(item), item.Name].filter(Boolean).join(' · ') : undefined}
+          fallbackDuration={(item.RunTimeTicks ?? 0) / TICKS_PER_SECOND}
+          trickplay={trickplay}
+          actions={actions}
+          onClose={() => router.back()}
+        />
+      ) : null}
       {ended && next ? <UpNext client={client} next={next} onPlay={playNext} onClose={() => router.back()} /> : null}
     </Shell>
   );

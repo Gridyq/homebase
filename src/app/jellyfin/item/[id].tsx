@@ -20,6 +20,7 @@ import {
   usePosterGrid,
   useRowCardWidth,
 } from '@/miniapps/jellyfin/components';
+import { addToPlaylist, PlaylistEntries } from '@/miniapps/jellyfin/playlists';
 import { useJellyfin } from '@/miniapps/jellyfin/session';
 import { defaultSubtitleIndex, subtitleLabel, subtitleStreams, SUBTITLES_OFF } from '@/miniapps/jellyfin/subtitles';
 import { useAsync } from '@/miniapps/jellyfin/use-async';
@@ -54,7 +55,9 @@ export default function ItemDetail() {
 
   const backdrop = client.imageUrl(item, { type: 'Backdrop', height: 720 }) ?? client.imageUrl(item, { height: 720 });
   const resumeTicks = item.UserData?.PlaybackPositionTicks ?? 0;
-  const playable = item.MediaType === 'Video';
+  // A playlist of videos has MediaType Video too, but it's played from its entries.
+  const playable = item.MediaType === 'Video' && !item.IsFolder;
+  const isPlaylist = item.Type === 'Playlist';
   const subtitles = subtitleStreams(item);
   const subtitle = selectedSubtitle ?? defaultSubtitleIndex(item);
   const toggle = async (change: (current: UserData) => Promise<UserData>) => {
@@ -70,6 +73,7 @@ export default function ItemDetail() {
   const favorite = !!item.UserData?.IsFavorite;
   const canMarkPlayed = playable || item.Type === 'Series' || item.Type === 'Season' || item.Type === 'BoxSet';
   const isPerson = item.Type === 'Person';
+  const canAddToPlaylist = playable || item.Type === 'Series' || item.Type === 'Season' || item.Type === 'BoxSet';
 
   const meta = [
     item.Type === 'Episode' && item.SeriesName,
@@ -126,7 +130,7 @@ export default function ItemDetail() {
           </View>
         ) : null}
 
-        {!isPerson ? (
+        {!isPerson && !isPlaylist ? (
           <View style={styles.toggles}>
             {canMarkPlayed ? (
               <Chip
@@ -140,6 +144,7 @@ export default function ItemDetail() {
               selected={favorite}
               onPress={() => toggle(() => client.setFavorite(item.Id, !favorite))}
             />
+            {canAddToPlaylist ? <Chip label="+ Playlist" selected={false} onPress={() => addToPlaylist(client, item)} /> : null}
             <Trailers item={item} />
           </View>
         ) : null}
@@ -168,7 +173,8 @@ export default function ItemDetail() {
 
       <View style={styles.sections}>
         {item.Type === 'Series' ? <SeriesEpisodes series={item} /> : null}
-        {item.IsFolder && item.Type !== 'Series' ? <FolderChildren parent={item} /> : null}
+        {isPlaylist ? <PlaylistEntries playlist={item} /> : null}
+        {item.IsFolder && item.Type !== 'Series' && !isPlaylist ? <FolderChildren parent={item} /> : null}
         {playable ? <Chapters item={item} onPlay={play} /> : null}
         <Cast people={item.People} />
         {isPerson ? <Credits person={item} /> : null}
