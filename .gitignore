@@ -45,3 +45,5 @@ example
 # OTA update server: private signing key and published updates stay on this machine
 /update-server/keys/
 /update-server/updates/
+# Public code-signing certificate for updates (the private key stays ignored)
+!/certs/certificate.pem
