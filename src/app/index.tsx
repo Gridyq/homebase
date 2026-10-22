@@ -2,6 +2,7 @@ import { Link } from 'expo-router';
 import { Pressable, ScrollView, StyleSheet, View } from 'react-native';
 
 import { ThemedText } from '@/components/themed-text';
+import { UpdateBanner } from '@/components/update-banner';
 import { Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 import { miniApps } from '@/miniapps/registry';
@@ -14,6 +15,7 @@ export default function Launcher() {
       contentInsetAdjustmentBehavior="automatic"
       contentContainerStyle={styles.grid}
       style={{ backgroundColor: theme.background }}>
+      <UpdateBanner />
       {miniApps.map((app) => (
         <Link key={app.id} href={app.href} asChild>
           <Pressable style={({ pressed }) => [styles.tile, { opacity: pressed ? 0.6 : 1 }]}>

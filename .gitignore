@@ -41,3 +41,7 @@ example
 # generated native folders
 /ios
 /android
+
+# OTA update server: private signing key and published updates stay on this machine
+/update-server/keys/
+/update-server/updates/

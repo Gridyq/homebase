@@ -36,6 +36,26 @@ npx tsc --noEmit
 npx expo lint
 ```
 
+## Over-the-air updates
+
+JavaScript changes don't need a new build. The app checks a self-hosted update server
+(`update-server/`, running on the Jellyfin PC) when it starts and when it comes back to the
+foreground, then shows "Update ready. Tap to restart" on the launcher.
+
+```sh
+npm run publish-update
+```
+
+- The server runs as a systemd user service: `systemctl --user status homebase-updates`.
+  It listens on port 8787, and the app reaches it at `fedora.tail27f991.ts.net` (Tailscale).
+  Without Tailscale the app keeps running the last update it downloaded.
+- Updates are signed with `update-server/keys/private-key.pem`, which is git-ignored. The app
+  rejects anything not signed with it. Back that key up: if it's lost, you need a new build
+  with a new certificate.
+- Updates only reach builds with the same `version` in `app.json`. When you change native code
+  (packages with native code, `app.json` plugins or iOS settings), bump `version` and make a
+  new build.
+
 ## Adding a mini-app
 
 1. Create its screens in `src/app/<id>/`, with a `_layout.tsx` for its own navigation stack.
