@@ -1,4 +1,4 @@
-import { Link } from 'expo-router';
+import { router } from 'expo-router';
 import { Pressable, ScrollView, StyleSheet, View } from 'react-native';
 
 import { ThemedText } from '@/components/themed-text';
@@ -19,19 +19,22 @@ export default function Launcher() {
       style={{ backgroundColor: theme.background }}>
       <UpdateBanner />
       {miniApps.map((app) => (
-        <Link key={app.id} href={app.href} asChild>
-          <Pressable style={({ pressed }) => [styles.tile, { opacity: pressed ? 0.6 : 1 }]}>
-            <View style={[styles.icon, { backgroundColor: app.color }]}>
-              <ThemedText style={styles.glyph}>{app.glyph}</ThemedText>
-            </View>
-            <ThemedText type="smallBold" numberOfLines={1}>
-              {app.name}
-            </ThemedText>
-            <ThemedText type="small" themeColor="textSecondary" numberOfLines={2} style={styles.desc}>
-              {app.description}
-            </ThemedText>
-          </Pressable>
-        </Link>
+        // Not <Link asChild>: it flattens the child's style, which drops a function style like
+        // this one (and with it the tile width).
+        <Pressable
+          key={app.id}
+          onPress={() => router.push(app.href)}
+          style={({ pressed }) => [styles.tile, { opacity: pressed ? 0.6 : 1 }]}>
+          <View style={[styles.icon, { backgroundColor: app.color }]}>
+            <ThemedText style={styles.glyph}>{app.glyph}</ThemedText>
+          </View>
+          <ThemedText type="smallBold" numberOfLines={1}>
+            {app.name}
+          </ThemedText>
+          <ThemedText type="small" themeColor="textSecondary" numberOfLines={2} style={styles.desc}>
+            {app.description}
+          </ThemedText>
+        </Pressable>
       ))}
     </ScrollView>
   );

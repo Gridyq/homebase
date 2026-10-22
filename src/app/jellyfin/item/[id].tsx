@@ -324,21 +324,22 @@ function Cast({ people }: { people: Person[] | undefined }) {
         renderItem={({ item: person }) => {
           const uri = client.personImageUrl(person);
           return (
-            <Link href={{ pathname: '/jellyfin/item/[id]', params: { id: person.Id } }} asChild>
-              <Pressable style={({ pressed }) => [styles.person, { opacity: pressed ? 0.6 : 1 }]}>
-                <View style={[styles.personPhoto, { backgroundColor: theme.backgroundElement }]}>
-                  {uri ? <Image source={uri} style={StyleSheet.absoluteFill} contentFit="cover" transition={150} /> : null}
-                </View>
-                <ThemedText type="smallBold" numberOfLines={2} style={styles.personText}>
-                  {person.Name}
+            // Not <Link asChild>, which drops function styles (see PosterCard).
+            <Pressable
+              onPress={() => router.push({ pathname: '/jellyfin/item/[id]', params: { id: person.Id } })}
+              style={({ pressed }) => [styles.person, { opacity: pressed ? 0.6 : 1 }]}>
+              <View style={[styles.personPhoto, { backgroundColor: theme.backgroundElement }]}>
+                {uri ? <Image source={uri} style={StyleSheet.absoluteFill} contentFit="cover" transition={150} /> : null}
+              </View>
+              <ThemedText type="smallBold" numberOfLines={2} style={styles.personText}>
+                {person.Name}
+              </ThemedText>
+              {person.Role ? (
+                <ThemedText type="small" themeColor="textSecondary" numberOfLines={2} style={styles.personText}>
+                  {person.Role}
                 </ThemedText>
-                {person.Role ? (
-                  <ThemedText type="small" themeColor="textSecondary" numberOfLines={2} style={styles.personText}>
-                    {person.Role}
-                  </ThemedText>
-                ) : null}
-              </Pressable>
-            </Link>
+              ) : null}
+            </Pressable>
           );
         }}
       />

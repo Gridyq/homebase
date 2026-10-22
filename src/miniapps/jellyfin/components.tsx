@@ -1,5 +1,5 @@
 import { Image } from 'expo-image';
-import { Link } from 'expo-router';
+import { router } from 'expo-router';
 import { ActivityIndicator, FlatList, PixelRatio, Pressable, StyleSheet, useWindowDimensions, View } from 'react-native';
 
 import { ThemedText } from '@/components/themed-text';
@@ -58,40 +58,42 @@ export function PosterCard({ item, width, shape = 'poster' }: PosterProps) {
       : item.ProductionYear?.toString();
 
   return (
-    <Link href={itemHref(item)} asChild>
-      <Pressable style={({ pressed }) => [{ width, opacity: pressed ? 0.6 : 1 }]}>
-        <View style={[styles.art, { height, backgroundColor: theme.backgroundElement }]}>
-          {uri ? (
-            <Image source={uri} style={StyleSheet.absoluteFill} contentFit="cover" transition={150} />
-          ) : (
-            <ThemedText
-              type={shape === 'wide' ? 'default' : 'small'}
-              themeColor="textSecondary"
-              style={[styles.fallback, shape === 'wide' && styles.fallbackWide]}
-              numberOfLines={3}>
-              {item.Name}
-            </ThemedText>
-          )}
-          {progress ? (
-            <View style={styles.progressTrack}>
-              <View style={[styles.progressFill, { width: `${progress}%`, backgroundColor: theme.accent }]} />
-            </View>
-          ) : null}
-        </View>
-        <ThemedText type="smallBold" numberOfLines={1} style={styles.title}>
-          {item.Type === 'Episode' && item.SeriesName ? item.SeriesName : item.Name}
-        </ThemedText>
-        {subtitle && item.Type !== 'Episode' ? (
-          <ThemedText type="small" themeColor="textSecondary" numberOfLines={1}>
-            {subtitle}
+    // Not <Link asChild>: it flattens the child's style, which drops a function style like
+    // this one (and with it the width), so the card would shrink to fit its text.
+    <Pressable
+      onPress={() => router.push(itemHref(item))}
+      style={({ pressed }) => [{ width, opacity: pressed ? 0.6 : 1 }]}>
+      <View style={[styles.art, { height, backgroundColor: theme.backgroundElement }]}>
+        {uri ? (
+          <Image source={uri} style={StyleSheet.absoluteFill} contentFit="cover" transition={150} />
+        ) : (
+          <ThemedText
+            type={shape === 'wide' ? 'default' : 'small'}
+            themeColor="textSecondary"
+            style={[styles.fallback, shape === 'wide' && styles.fallbackWide]}
+            numberOfLines={3}>
+            {item.Name}
           </ThemedText>
-        ) : item.Type === 'Episode' ? (
-          <ThemedText type="small" themeColor="textSecondary" numberOfLines={1}>
-            {[episodeLabel(item), item.Name].filter(Boolean).join(' · ')}
-          </ThemedText>
+        )}
+        {progress ? (
+          <View style={styles.progressTrack}>
+            <View style={[styles.progressFill, { width: `${progress}%`, backgroundColor: theme.accent }]} />
+          </View>
         ) : null}
-      </Pressable>
-    </Link>
+      </View>
+      <ThemedText type="smallBold" numberOfLines={1} style={styles.title}>
+        {item.Type === 'Episode' && item.SeriesName ? item.SeriesName : item.Name}
+      </ThemedText>
+      {subtitle && item.Type !== 'Episode' ? (
+        <ThemedText type="small" themeColor="textSecondary" numberOfLines={1}>
+          {subtitle}
+        </ThemedText>
+      ) : item.Type === 'Episode' ? (
+        <ThemedText type="small" themeColor="textSecondary" numberOfLines={1}>
+          {[episodeLabel(item), item.Name].filter(Boolean).join(' · ')}
+        </ThemedText>
+      ) : null}
+    </Pressable>
   );
 }
 
