@@ -106,8 +106,11 @@ async function request<T>(
       },
       body: init.body === undefined ? undefined : JSON.stringify(init.body),
     });
-  } catch {
-    throw new JellyfinError(`Couldn't reach ${serverUrl}. Check the address and your network.`);
+  } catch (e) {
+    const reason = e instanceof Error ? e.message : String(e);
+    throw new JellyfinError(
+      `Couldn't reach ${serverUrl}. Check the address and your network.\n(${reason})`,
+    );
   }
   if (res.status === 401) throw new JellyfinError('Your session has expired. Sign in again.', 401);
   if (!res.ok) throw new JellyfinError(`Server returned ${res.status} for ${path}`, res.status);
