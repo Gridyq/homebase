@@ -15,19 +15,23 @@ import {
   recentRequests,
   removeDownload,
   search,
+  setSpeedLimit,
+  speedLimit,
   titleOf,
   tmdbImage,
   upcoming,
   yearOf,
   type Download,
 } from '@/miniapps/requests/api';
-import { DownloadRow, TitleCard, titleHref, UpcomingRow } from '@/miniapps/requests/components';
+import { DownloadRow, formatSpeed, SpeedLimitRow, TitleCard, titleHref, UpcomingRow } from '@/miniapps/requests/components';
 import type { Connection } from '@/miniapps/server/api';
 import { Card } from '@/miniapps/server/components';
 import { useServerConnection } from '@/miniapps/server/connection';
 import { usePolling } from '@/miniapps/server/use-polling';
 
 const QUEUE_POLL_MS = 5000;
+/** Download limits to pick from, in bytes per second. 0 is no limit. */
+const SPEED_LIMITS = [0, 1e6, 2e6, 5e6, 10e6, 20e6, 50e6];
 
 export default function RequestsHome() {
   const { connection } = useServerConnection();
@@ -88,6 +92,7 @@ function Overview({ conn }: { conn: Connection }) {
   const theme = useTheme();
   const gutter = useGutter();
   const queue = usePolling(() => downloads(conn), QUEUE_POLL_MS, conn.url);
+  const limit = usePolling(() => speedLimit(conn), QUEUE_POLL_MS, conn.url);
   const rest = useAsync(() => Promise.all([upcoming(conn), requestedTitles(conn)]), 'overview');
   const [pulled, setPulled] = useState(false);
   if (pulled && !rest.loading) setPulled(false);
@@ -132,6 +137,29 @@ function Overview({ conn }: { conn: Connection }) {
     );
   };
 
+  const pickSpeedLimit = (current: number) => {
+    const labels = SPEED_LIMITS.map((l) => (l ? formatSpeed(l) : 'No limit'));
+    ActionSheetIOS.showActionSheetWithOptions(
+      {
+        title: 'Download speed limit',
+        message: 'For everything qBittorrent downloads.',
+        options: [...labels, 'Cancel'],
+        cancelButtonIndex: labels.length,
+      },
+      async (index) => {
+        const next = SPEED_LIMITS[index];
+        // qBittorrent keeps limits in whole KiB, so a pick comes back a little under.
+        if (next === undefined || Math.abs(next - current) < 1024) return;
+        try {
+          await setSpeedLimit(conn, next);
+        } catch (e) {
+          Alert.alert("Couldn't change the speed limit", e instanceof Error ? e.message : String(e));
+        }
+        await limit.refresh();
+      },
+    );
+  };
+
   if (!queue.data && !rest.data) {
     const error = queue.error ?? rest.error;
     return <Centered loading={!error} error={error} onRetry={rest.reload} />;
@@ -140,6 +168,7 @@ function Overview({ conn }: { conn: Connection }) {
   const [comingUp, requested] = rest.data ?? [];
   const active = queue.data ?? [];
   const nothing = !active.length && !comingUp?.length && !requested?.length;
+  const speed = limit.data;
 
   return (
     <ScrollView
@@ -153,6 +182,7 @@ function Overview({ conn }: { conn: Connection }) {
             setPulled(true);
             rest.reload();
             queue.refresh();
+            limit.refresh();
           }}
         />
       }>
@@ -162,13 +192,14 @@ function Overview({ conn }: { conn: Connection }) {
         </ThemedText>
       ) : null}
 
-      {active.length ? (
+      {active.length || speed ? (
         <View style={styles.section}>
           <SectionTitle title="Downloading" />
           <View style={gutter}>
             <Card>
+              {speed ? <SpeedLimitRow limit={speed} onPress={() => pickSpeedLimit(speed.limit)} /> : null}
               {active.map((d, i) => (
-                <DownloadRow key={d.key} download={d} first={i === 0} onPress={() => showActions(d)} />
+                <DownloadRow key={d.key} download={d} first={i === 0 && !speed} onPress={() => showActions(d)} />
               ))}
             </Card>
           </View>

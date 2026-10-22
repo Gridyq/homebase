@@ -350,3 +350,17 @@ export function grabRelease(conn: Connection, app: Arr, release: Pick<Release, '
     timeoutMs: 60_000,
   });
 }
+
+// ---------------------------------------------------------------------------------------------
+// qBittorrent
+
+/** Both in bytes per second. A limit of 0 means none. */
+export type SpeedLimit = { speed: number; limit: number };
+
+export function speedLimit(conn: Connection) {
+  return request<SpeedLimit>(conn, '/api/qbittorrent/limit');
+}
+
+export function setSpeedLimit(conn: Connection, limit: number) {
+  return request<SpeedLimit>(conn, '/api/qbittorrent/limit', { method: 'POST', body: JSON.stringify({ limit }) });
+}

@@ -7,7 +7,7 @@ import { Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 import { formatBytes, formatWhen, Meter, StatusColors } from '@/miniapps/server/components';
 
-import { MediaStatus, type Download, type MediaType, type Upcoming } from './api';
+import { MediaStatus, type Download, type MediaType, type SpeedLimit, type Upcoming } from './api';
 
 export function titleHref(type: MediaType, id: number) {
   return { pathname: '/requests/[type]/[id]', params: { type, id: String(id) } } as const;
@@ -173,6 +173,28 @@ export function DownloadRow({ download, first, onPress }: { download: Download; 
           </ThemedText>
         ) : null}
       </View>
+    </Pressable>
+  );
+}
+
+/** Torrent speeds in megabytes, the way qBittorrent shows them. */
+export function formatSpeed(bytesPerSec: number) {
+  const mb = bytesPerSec / 1e6;
+  return `${mb >= 10 ? Math.round(mb) : mb.toFixed(1)} MB/s`;
+}
+
+export function SpeedLimitRow({ limit, onPress }: { limit: SpeedLimit; onPress: () => void }) {
+  return (
+    <Pressable onPress={onPress} style={({ pressed }) => [styles.row, { opacity: pressed ? 0.6 : 1 }]}>
+      <View style={styles.rowText}>
+        <ThemedText type="smallBold">Speed limit</ThemedText>
+        <ThemedText type="small" themeColor="textSecondary" style={styles.caption}>
+          {formatSpeed(limit.speed)} now
+        </ThemedText>
+      </View>
+      <ThemedText type="small" themeColor="textSecondary">
+        {limit.limit ? formatSpeed(limit.limit) : 'None'}
+      </ThemedText>
     </Pressable>
   );
 }

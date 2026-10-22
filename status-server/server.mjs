@@ -3,7 +3,7 @@
  * Status server for Homebase's Server mini-app: system stats, services and containers, and
  * start/stop/restart for them. Also watches for problems and reports them through ntfy, since
  * the app can't get push notifications, and passes the Requests mini-app's calls on to Seerr,
- * Sonarr and Radarr. No dependencies beyond Node.js.
+ * Sonarr and Radarr, and qBittorrent's speed limit. No dependencies beyond Node.js.
  *
  * Every request needs `Authorization: Bearer <token>`. The token lives in `token` next to this
  * file and is created on first start. `node server.mjs pair` sends a link to the phone through
@@ -486,6 +486,68 @@ async function proxyArr(req, res, appName, apiPath, search) {
   res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }).end(text || 'null');
 }
 
+// qBittorrent's Web API wants a login cookie rather than a key, and form bodies, so it gets its
+// own small client instead of going through the proxy above. It only exposes the speed limit.
+
+const QBIT_URL = process.env.QBIT_URL ?? 'http://localhost:8090';
+let qbitCookie;
+
+async function qbitLogin() {
+  // The shared password from the credentials file; qBittorrent's user is always "admin".
+  const password = /^password=(.*)$/m.exec(await readFile(path.join(ARR_DIR, 'credentials'), 'utf8').catch(() => ''))?.[1];
+  if (!password) throw new HttpError(503, "qBittorrent's login isn't set up on the server");
+  const res = await fetch(`${QBIT_URL}/api/v2/auth/login`, {
+    method: 'POST',
+    headers: { Referer: QBIT_URL },
+    body: new URLSearchParams({ username: 'admin', password: password.trim() }),
+    signal: AbortSignal.timeout(10_000),
+  });
+  // Older versions answer a wrong password with 200 "Fails." and no cookie.
+  const cookie = res.headers.get('set-cookie')?.split(';')[0];
+  if (!res.ok || !cookie) throw new HttpError(502, "qBittorrent didn't accept the login");
+  qbitCookie = cookie;
+}
+
+async function qbit(apiPath, form) {
+  for (let attempt = 0; ; attempt++) {
+    if (!qbitCookie) await qbitLogin();
+    let res;
+    try {
+      res = await fetch(`${QBIT_URL}/api/v2/${apiPath}`, {
+        method: form ? 'POST' : 'GET',
+        headers: { Cookie: qbitCookie, Referer: QBIT_URL },
+        body: form && new URLSearchParams(form),
+        signal: AbortSignal.timeout(10_000),
+      });
+    } catch (e) {
+      throw new HttpError(502, `qBittorrent didn't answer (${e.name === 'TimeoutError' ? 'timed out' : e.message})`);
+    }
+    // The session expired or qBittorrent restarted: log in again once.
+    if ((res.status === 401 || res.status === 403) && attempt === 0) {
+      qbitCookie = undefined;
+      continue;
+    }
+    if (!res.ok) throw new HttpError(502, `qBittorrent answered ${res.status}`);
+    const text = await res.text();
+    return text && res.headers.get('content-type')?.includes('json') ? JSON.parse(text) : text;
+  }
+}
+
+/** Current download speed and the global limit, both in bytes per second; a limit of 0 is none. */
+async function speedLimit() {
+  const info = await qbit('transfer/info');
+  return { speed: info.dl_info_speed, limit: info.dl_rate_limit };
+}
+
+async function setSpeedLimit(limit) {
+  if (!Number.isInteger(limit) || limit < 0) throw new HttpError(400, 'The limit must be a whole number of bytes per second');
+  // The alternative ("turtle") limits replace the global ones while they're on, so turn them off
+  // or the new limit wouldn't apply.
+  if ((await qbit('transfer/speedLimitsMode')) === '1') await qbit('transfer/toggleSpeedLimitsMode', {});
+  await qbit('transfer/setDownloadLimit', { limit: String(limit) });
+  return speedLimit();
+}
+
 // ---------------------------------------------------------------------------------------------
 // HTTP
 
@@ -517,6 +579,20 @@ async function handle(req, res) {
     log(req, `${match[2]} ${id}`);
     await performAction(id, match[2]);
     return sendJson(res, 200, { ok: true });
+  }
+
+  if (url.pathname === '/api/qbittorrent/limit') {
+    if (req.method === 'GET') return sendJson(res, 200, await speedLimit());
+    if (req.method === 'POST') {
+      let limit;
+      try {
+        limit = JSON.parse((await readBody(req))?.toString() ?? '{}').limit;
+      } catch {
+        throw new HttpError(400, 'Expected JSON');
+      }
+      log(req, `download limit ${limit}`);
+      return sendJson(res, 200, await setSpeedLimit(limit));
+    }
   }
 
   const arr = /^\/api\/arr\/(\w+)\/(.+)$/.exec(url.pathname);
