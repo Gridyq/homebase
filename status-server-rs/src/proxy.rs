@@ -53,12 +53,24 @@ pub async fn forward(AxumState(state): AxumState<State>, ConnectInfo(peer): Conn
 
 /// One of the Node server's endpoints, for what only it knows, such as game mode.
 pub async fn get_json(state: &State, path: &str) -> Result<serde_json::Value, String> {
+    node_json(state, Method::GET, path, None).await
+}
+
+/// Tells the Node server something it keeps track of, such as an action taken from the app.
+pub async fn post_json(state: &State, path: &str, body: serde_json::Value) -> Result<serde_json::Value, String> {
+    node_json(state, Method::POST, path, Some(body)).await
+}
+
+async fn node_json(state: &State, method: Method, path: &str, body: Option<serde_json::Value>) -> Result<serde_json::Value, String> {
     let token = tokio::fs::read_to_string(&state.config.token_path)
         .await
         .map_err(|e| e.to_string())?;
-    let req = Request::get(format!("{}{path}", state.config.upstream))
+    let req = Request::builder()
+        .method(method)
+        .uri(format!("{}{path}", state.config.upstream))
         .header(header::AUTHORIZATION, format!("Bearer {}", token.trim()))
-        .body(Body::empty())
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(body.map_or_else(Body::empty, |b| Body::from(b.to_string())))
         .map_err(|e| e.to_string())?;
     let res = state.upstream.0.request(req).await.map_err(|e| e.to_string())?;
     if !res.status().is_success() {

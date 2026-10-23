@@ -4051,6 +4051,20 @@ async function handle(req, res) {
     return sendJson(res, 200, await serviceLogs(decodeURIComponent(logs[1]), { after, errors: url.searchParams.get('errors') === '1' }));
   }
 
+  // The Rust server in front starts and stops services now, and says so here first, so the
+  // events log can put what follows down to you.
+  if (req.method === 'POST' && url.pathname === '/api/intents') {
+    let id;
+    try {
+      id = JSON.parse((await readBody(req))?.toString() ?? '{}').id;
+    } catch {
+      throw new HttpError(400, 'Expected JSON');
+    }
+    if (typeof id !== 'string') throw new HttpError(400, 'Expected { id }');
+    intents.set(id, { by: 'you', at: Date.now() });
+    return sendJson(res, 200, { ok: true });
+  }
+
   const match = /^\/api\/services\/([^/]+)\/(start|stop|restart|run)$/.exec(url.pathname);
   if (req.method === 'POST' && match) {
     const id = decodeURIComponent(match[1]);

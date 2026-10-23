@@ -6,7 +6,9 @@
 //! Like the Node server, it only answers loopback and Tailscale addresses, and its own endpoints
 //! need `Authorization: Bearer <token>`, read from the token file the Node server creates.
 
+mod actions;
 mod cache;
+mod command;
 mod gpu;
 mod http;
 mod kernel;
@@ -22,7 +24,7 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::middleware;
-use axum::routing::get;
+use axum::routing::{get, post};
 
 pub struct Config {
     /// Where the Node server listens, for everything not answered here.
@@ -43,6 +45,8 @@ async fn main() {
 
     let api = Router::new()
         .route("/api/status", get(status::handler))
+        .route("/api/services/{id}/logs", get(actions::logs))
+        .route("/api/services/{id}/{action}", post(actions::handler))
         .route("/api/usage", get(usage::handler))
         .route("/api/processes", get(processes::handler))
         .route("/api/gpu", get(gpu::handler))

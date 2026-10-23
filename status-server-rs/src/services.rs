@@ -13,7 +13,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde::Serialize;
-use tokio::process::Command;
 
 use crate::cache::Refreshed;
 use crate::http::HttpError;
@@ -44,7 +43,10 @@ impl Services {
             let mut readings = self.unit_readings.lock().unwrap();
             let args = args.clone();
             Arc::clone(readings.entry(args.clone()).or_insert_with(|| {
-                let take: Take = Box::new(move || Box::pin(run("systemctl", args.clone())));
+                let take: Take = Box::new(move || {
+                    let args = args.clone();
+                    Box::pin(async move { crate::command::run("systemctl", &args, Duration::from_secs(30)).await })
+                });
                 Refreshed::new("systemctl show", Duration::from_secs(2), Duration::from_secs(10), take)
             }))
         };
@@ -78,22 +80,14 @@ impl Services {
     }
 }
 
-async fn run(program: &str, args: Vec<String>) -> Result<String, String> {
-    let out = Command::new(program).args(&args).output().await.map_err(|e| e.to_string())?;
-    if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).trim().to_owned());
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
-}
-
-struct Quadlet {
-    name: String,
+pub struct Quadlet {
+    pub name: String,
     image: Option<String>,
-    unit: String,
+    pub unit: String,
 }
 
 /// Containers that systemd runs from Quadlet files, with their units.
-async fn quadlets() -> Vec<Quadlet> {
+pub async fn quadlets() -> Vec<Quadlet> {
     let dir = PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config/containers/systemd");
     tokio::task::spawn_blocking(move || {
         crate::kernel::names(&dir)

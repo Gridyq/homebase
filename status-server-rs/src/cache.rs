@@ -55,6 +55,11 @@ where
         }
     }
 
+    /// A reading no older than `stale_after`, waiting for a new one if need be.
+    pub async fn get_fresh(&self) -> Result<Arc<T>, String> {
+        self.refresh().await
+    }
+
     async fn refresh(&self) -> Result<Arc<T>, String> {
         let _taking = self.taking.lock().await;
         // Taken by someone else while this waited its turn.
