@@ -21,7 +21,7 @@ import {
 import { useServerConnection } from '@/miniapps/server/connection';
 import { useEventMarkers } from '@/miniapps/server/events';
 import { HistoryNote, LONG_RANGES, rangeName, TrendCard } from '@/miniapps/server/trends';
-import { usePolling } from '@/miniapps/server/use-polling';
+import { usePolling, useRangedPolling } from '@/miniapps/server/use-polling';
 
 const LIVE_POLL_MS = 5000;
 const HISTORY_POLL_MS = 60_000;
@@ -36,10 +36,10 @@ export default function PowerScreen() {
   const theme = useTheme();
   const gutter = useGutter();
   const colors = useSeriesColors();
-  const [range, setRange] = useState(LONG_RANGES[1].value);
   const power = usePolling(() => fetchPower(conn), LIVE_POLL_MS, conn.url);
   const gpu = usePolling(() => fetchGpu(conn), LIVE_POLL_MS, conn.url);
-  const history = usePolling(() => fetchHistory(conn, range), HISTORY_POLL_MS, `${conn.url}|${range}`, { keepPrevious: true });
+  const history = useRangedPolling(LONG_RANGES[1].value, (range) => fetchHistory(conn, range), HISTORY_POLL_MS, conn.url);
+  const { range, setRange } = history;
   const refreshControl = usePullToRefresh(power.refresh, gpu.refresh, history.refresh);
   const markers = useEventMarkers(history.data?.events);
 

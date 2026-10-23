@@ -1,5 +1,4 @@
 import { router } from 'expo-router';
-import { useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, View } from 'react-native';
 
 import { ThemedText } from '@/components/themed-text';
@@ -23,7 +22,7 @@ import {
 } from '@/miniapps/server/components';
 import { useServerConnection } from '@/miniapps/server/connection';
 import { RANGES, rangeName } from '@/miniapps/server/trends';
-import { usePolling } from '@/miniapps/server/use-polling';
+import { useRangedPolling } from '@/miniapps/server/use-polling';
 
 const POLL_MS = 15_000;
 
@@ -34,10 +33,12 @@ export default function NetworkScreen() {
   const theme = useTheme();
   const gutter = useGutter();
   const colors = useSeriesColors();
-  const [range, setRange] = useState(RANGES[2].value);
-  const { data, error, stale, refresh } = usePolling(() => fetchNetwork(conn, range), POLL_MS, `${conn.url}|${range}`, {
-    keepPrevious: true,
-  });
+  const { data, error, stale, refresh, range, setRange } = useRangedPolling(
+    RANGES[2].value,
+    (range) => fetchNetwork(conn, range),
+    POLL_MS,
+    conn.url,
+  );
   const refreshControl = usePullToRefresh(refresh);
 
   const picker = <Segmented value={range} onChange={setRange} options={RANGES} />;

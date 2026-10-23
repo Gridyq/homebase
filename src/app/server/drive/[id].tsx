@@ -1,5 +1,4 @@
 import { Stack, useLocalSearchParams } from 'expo-router';
-import { useState } from 'react';
 import { ScrollView, StyleSheet } from 'react-native';
 
 import { ThemedText } from '@/components/themed-text';
@@ -12,7 +11,7 @@ import { formatBytes, formatPercent, Segmented, usePullToRefresh, useSeriesColor
 import { useServerConnection } from '@/miniapps/server/connection';
 import { useEventMarkers } from '@/miniapps/server/events';
 import { HistoryNote, RANGES, rangeName, TrendCard } from '@/miniapps/server/trends';
-import { usePolling } from '@/miniapps/server/use-polling';
+import { useRangedPolling } from '@/miniapps/server/use-polling';
 
 const POLL_MS = 30_000;
 const formatSpeed = (bytesPerSec: number) => `${formatBytes(bytesPerSec)}/s`;
@@ -26,12 +25,11 @@ export default function DriveHistoryScreen() {
   const theme = useTheme();
   const gutter = useGutter();
   const colors = useSeriesColors();
-  const [range, setRange] = useState(RANGES[2].value);
-  const { data, error, stale, refresh } = usePolling(
-    () => fetchDriveHistory(conn, range, id),
+  const { data, error, stale, refresh, range, setRange } = useRangedPolling(
+    RANGES[2].value,
+    (range) => fetchDriveHistory(conn, range, id),
     POLL_MS,
-    `${conn.url}|${id}|${range}`,
-    { keepPrevious: true },
+    `${conn.url}|${id}`,
   );
   const refreshControl = usePullToRefresh(refresh);
   const markers = useEventMarkers(data?.events);

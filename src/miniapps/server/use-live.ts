@@ -1,23 +1,15 @@
 import { useFocusEffect } from 'expo-router';
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { AppState } from 'react-native';
+import { useCallback, useState } from 'react';
 
 import type { Connection } from './api';
+import { useKeyedData, type KeyedData } from './use-keyed-data';
 
 /** What `/api/live` can send; each matches the endpoint the screen would otherwise poll. */
 export type LiveTopic = 'status' | 'conversions' | 'sessions';
 
-type LiveState<T> = {
-  /** Last good value, from the socket or a poll. */
-  data: T | undefined;
-  /** Error from the latest poll, cleared by the next value that arrives. */
-  error: Error | undefined;
-  /** `data` is from before the app was last in the background. */
-  stale: boolean;
+type LiveState<T> = KeyedData<T> & {
   /** Whether values are arriving over the socket rather than by polling. */
   live: boolean;
-  /** Load again now. */
-  refresh: () => Promise<void>;
 };
 
 /** React Native's WebSocket takes headers, which the DOM typings it's checked against don't know. */
@@ -44,51 +36,9 @@ const SILENT_MS = 60_000;
  */
 export function useLive<T>(conn: Connection, topic: LiveTopic, load: () => Promise<T>, fallbackMs: number): LiveState<T> {
   const key = `${conn.url}|${conn.token}|${topic}`;
-  const [data, setData] = useState<T>();
-  const [error, setError] = useState<Error>();
-  const [stale, setStale] = useState(false);
+  const { state, foreground, generation, accept } = useKeyedData(load, key, false);
+  const { refresh } = state;
   const [live, setLive] = useState(false);
-  const loadRef = useRef(load);
-  useEffect(() => {
-    loadRef.current = load;
-  });
-
-  // Results that come back for an earlier key are ignored.
-  const generation = useRef(0);
-  const [prevKey, setPrevKey] = useState(key);
-  if (prevKey !== key) {
-    setPrevKey(key);
-    setData(undefined);
-    setError(undefined);
-    setStale(false);
-  }
-  useEffect(() => {
-    generation.current++;
-  }, [key]);
-
-  const refresh = useCallback(async () => {
-    const gen = generation.current;
-    try {
-      const next = await loadRef.current();
-      if (gen !== generation.current) return;
-      setData(next);
-      setError(undefined);
-      setStale(false);
-    } catch (e) {
-      if (gen !== generation.current) return;
-      setError(e instanceof Error ? e : new Error(String(e)));
-      setStale(false);
-    }
-  }, []);
-
-  const [foreground, setForeground] = useState(AppState.currentState === 'active');
-  useEffect(() => {
-    const sub = AppState.addEventListener('change', (s) => {
-      setForeground(s === 'active');
-      if (s !== 'active') setStale(true);
-    });
-    return () => sub.remove();
-  }, []);
 
   // The socket, reopened after it closes.
   useFocusEffect(
@@ -125,9 +75,7 @@ export function useLive<T>(conn: Connection, topic: LiveTopic, load: () => Promi
           try {
             const message = JSON.parse(String(e.data)) as { topic: string; data: T };
             if (message.topic !== topic) return;
-            setData(message.data);
-            setError(undefined);
-            setStale(false);
+            accept(gen, message.data);
             setLive(true);
           } catch {
             // A message this version doesn't understand.
@@ -154,7 +102,7 @@ export function useLive<T>(conn: Connection, topic: LiveTopic, load: () => Promi
         drop();
         setLive(false);
       };
-    }, [foreground, conn.url, conn.token, topic]),
+    }, [foreground, conn.url, conn.token, topic, accept, generation]),
   );
 
   // Polling, while the socket isn't delivering.
@@ -177,5 +125,5 @@ export function useLive<T>(conn: Connection, topic: LiveTopic, load: () => Promi
     }, [foreground, live, fallbackMs, refresh, key]),
   );
 
-  return { data, error, stale: stale && data !== undefined, live, refresh };
+  return { ...state, live };
 }

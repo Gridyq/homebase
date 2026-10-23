@@ -21,7 +21,7 @@ import {
 import { useServerConnection } from '@/miniapps/server/connection';
 import { EventRow } from '@/miniapps/server/events';
 import { LONG_RANGES, rangeName } from '@/miniapps/server/trends';
-import { usePolling } from '@/miniapps/server/use-polling';
+import { useRangedPolling } from '@/miniapps/server/use-polling';
 
 const POLL_MS = 30_000;
 const TROUBLE = new Set(['crashed', 'failed', 'oom', 'problem', 'boot']);
@@ -36,11 +36,13 @@ export default function ReliabilityScreen() {
   const conn = connection!;
   const theme = useTheme();
   const gutter = useGutter();
-  const [range, setRange] = useState(LONG_RANGES[1].value);
   const [filter, setFilter] = useState<'trouble' | 'all'>('trouble');
-  const { data, error, stale, refresh } = usePolling(() => fetchReliability(conn, range), POLL_MS, `${conn.url}|${range}`, {
-    keepPrevious: true,
-  });
+  const { data, error, stale, refresh, range, setRange } = useRangedPolling(
+    LONG_RANGES[1].value,
+    (range) => fetchReliability(conn, range),
+    POLL_MS,
+    conn.url,
+  );
   const refreshControl = usePullToRefresh(refresh);
 
   const picker = <Segmented value={range} onChange={setRange} options={LONG_RANGES} />;

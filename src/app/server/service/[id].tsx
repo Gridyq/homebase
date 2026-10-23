@@ -33,7 +33,7 @@ import { useServerConnection } from '@/miniapps/server/connection';
 import { EventRow, useEventMarkers } from '@/miniapps/server/events';
 import { HistoryNote, RANGES, rangeName, TrendCard } from '@/miniapps/server/trends';
 import { useLive } from '@/miniapps/server/use-live';
-import { usePolling } from '@/miniapps/server/use-polling';
+import { useRangedPolling } from '@/miniapps/server/use-polling';
 
 const POLL_MS = 3000;
 const HISTORY_POLL_MS = 30_000;
@@ -55,13 +55,13 @@ export default function ServiceScreen() {
   const gutter = useGutter();
   const colors = useSeriesColors();
   const status = useLive(conn, 'status', () => fetchStatus(conn), POLL_MS);
-  const [range, setRange] = useState(RANGES[0].value);
-  const history = usePolling(
-    () => fetchServiceHistory(conn, range, id),
+  const history = useRangedPolling(
+    RANGES[0].value,
+    (range) => fetchServiceHistory(conn, range, id),
     HISTORY_POLL_MS,
-    `${conn.url}|${id}|${range}`,
-    { keepPrevious: true },
+    `${conn.url}|${id}`,
   );
+  const { range, setRange } = history;
   const refreshControl = usePullToRefresh(status.refresh, history.refresh);
   const markers = useEventMarkers(history.data?.events, { all: true });
   const [busy, setBusy] = useState<ServiceAction>();

@@ -1,5 +1,4 @@
 import { Stack, useLocalSearchParams } from 'expo-router';
-import { useState } from 'react';
 import { ScrollView, StyleSheet } from 'react-native';
 
 import { ThemedText } from '@/components/themed-text';
@@ -11,7 +10,7 @@ import { fetchDeviceHistory } from '@/miniapps/server/api';
 import { formatBytes, formatRate, Segmented, usePullToRefresh, useSeriesColors } from '@/miniapps/server/components';
 import { useServerConnection } from '@/miniapps/server/connection';
 import { HistoryNote, RANGES, rangeName, TrendCard } from '@/miniapps/server/trends';
-import { usePolling } from '@/miniapps/server/use-polling';
+import { useRangedPolling } from '@/miniapps/server/use-polling';
 
 const POLL_MS = 60_000;
 
@@ -23,12 +22,11 @@ export default function DeviceHistoryScreen() {
   const theme = useTheme();
   const gutter = useGutter();
   const colors = useSeriesColors();
-  const [range, setRange] = useState(RANGES[2].value);
-  const { data, error, stale, refresh } = usePolling(
-    () => fetchDeviceHistory(conn, range, name),
+  const { data, error, stale, refresh, range, setRange } = useRangedPolling(
+    RANGES[2].value,
+    (range) => fetchDeviceHistory(conn, range, name),
     POLL_MS,
-    `${conn.url}|${name}|${range}`,
-    { keepPrevious: true },
+    `${conn.url}|${name}`,
   );
   const refreshControl = usePullToRefresh(refresh);
 

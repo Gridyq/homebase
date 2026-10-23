@@ -1,4 +1,3 @@
-import { useState } from 'react';
 import { ScrollView, StyleSheet } from 'react-native';
 
 import { ThemedText } from '@/components/themed-text';
@@ -21,7 +20,7 @@ import {
 import { useServerConnection } from '@/miniapps/server/connection';
 import { EventRow, useEventMarkers } from '@/miniapps/server/events';
 import { HistoryNote, RANGES, rangeName, TrendCard } from '@/miniapps/server/trends';
-import { usePolling } from '@/miniapps/server/use-polling';
+import { useRangedPolling } from '@/miniapps/server/use-polling';
 
 const POLL_MS = 30_000;
 /** Events listed under the charts; the Reliability screen has them all. */
@@ -38,10 +37,12 @@ export default function TrendsScreen() {
   const theme = useTheme();
   const gutter = useGutter();
   const colors = useSeriesColors();
-  const [range, setRange] = useState(RANGES[0].value);
-  const { data, error, stale, refresh } = usePolling(() => fetchHistory(conn, range), POLL_MS, `${conn.url}|${range}`, {
-    keepPrevious: true,
-  });
+  const { data, error, stale, refresh, range, setRange } = useRangedPolling(
+    RANGES[0].value,
+    (range) => fetchHistory(conn, range),
+    POLL_MS,
+    conn.url,
+  );
   const refreshControl = usePullToRefresh(refresh);
   const markers = useEventMarkers(data?.events);
 

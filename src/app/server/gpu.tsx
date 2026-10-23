@@ -1,4 +1,3 @@
-import { useState } from 'react';
 import { ScrollView, StyleSheet, View } from 'react-native';
 
 import { ThemedText } from '@/components/themed-text';
@@ -23,7 +22,7 @@ import {
 } from '@/miniapps/server/components';
 import { useServerConnection } from '@/miniapps/server/connection';
 import { HistoryNote, RANGES, TrendCard } from '@/miniapps/server/trends';
-import { usePolling } from '@/miniapps/server/use-polling';
+import { usePolling, useRangedPolling } from '@/miniapps/server/use-polling';
 
 const POLL_MS = 3000;
 const HISTORY_POLL_MS = 30_000;
@@ -48,10 +47,8 @@ export default function GpuScreen() {
   const gutter = useGutter();
   const colors = useSeriesColors();
   const { data, error, refresh } = usePolling(() => fetchGpu(conn), POLL_MS, conn.url);
-  const [range, setRange] = useState(RANGES[0].value);
-  const history = usePolling(() => fetchHistory(conn, range), HISTORY_POLL_MS, `${conn.url}|${range}`, {
-    keepPrevious: true,
-  });
+  const history = useRangedPolling(RANGES[0].value, (range) => fetchHistory(conn, range), HISTORY_POLL_MS, conn.url);
+  const { range, setRange } = history;
   const refreshControl = usePullToRefresh(refresh, history.refresh);
 
   if (!data) return <Centered loading={!error} error={error} onRetry={refresh} />;

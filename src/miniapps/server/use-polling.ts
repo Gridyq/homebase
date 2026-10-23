@@ -1,20 +1,7 @@
 import { useFocusEffect } from 'expo-router';
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { AppState } from 'react-native';
+import { useCallback, useState } from 'react';
 
-type PollingState<T> = {
-  /** Last good value; kept through failed polls so the screen doesn't blank out. */
-  data: T | undefined;
-  /** Error from the latest poll, cleared by the next successful one. */
-  error: Error | undefined;
-  /**
-   * `data` isn't current: it's from before the app was last in the background, or (with
-   * `keepPrevious`) from an earlier key. Cleared by the next poll that answers.
-   */
-  stale: boolean;
-  /** Load again now, without waiting for the next tick. */
-  refresh: () => Promise<void>;
-};
+import { useKeyedData, type KeyedData } from './use-keyed-data';
 
 type PollingOptions = {
   /** While false it doesn't call at all. */
@@ -33,56 +20,9 @@ export function usePolling<T>(
   intervalMs: number,
   key: string,
   { enabled = true, keepPrevious = false }: PollingOptions = {},
-): PollingState<T> {
-  const [data, setData] = useState<T>();
-  const [error, setError] = useState<Error>();
-  const [stale, setStale] = useState(false);
-  const loadRef = useRef(load);
-  useEffect(() => {
-    loadRef.current = load;
-  });
-
-  // Counts up on every key change, so results that come back for an old key are ignored.
-  const generation = useRef(0);
-  const [prevKey, setPrevKey] = useState(key);
-  if (prevKey !== key) {
-    setPrevKey(key);
-    if (keepPrevious) {
-      setStale(true);
-    } else {
-      setData(undefined);
-      setStale(false);
-    }
-    setError(undefined);
-  }
-  useEffect(() => {
-    generation.current++;
-  }, [key]);
-
-  const refresh = useCallback(async () => {
-    const gen = generation.current;
-    try {
-      const next = await loadRef.current();
-      if (gen !== generation.current) return;
-      setData(next);
-      setError(undefined);
-      setStale(false);
-    } catch (e) {
-      if (gen !== generation.current) return;
-      setError(e instanceof Error ? e : new Error(String(e)));
-      setStale(false);
-    }
-  }, []);
-
-  const [foreground, setForeground] = useState(AppState.currentState === 'active');
-  useEffect(() => {
-    const sub = AppState.addEventListener('change', (s) => {
-      setForeground(s === 'active');
-      // Whatever was on screen may be hours old by the time the app comes back.
-      if (s !== 'active') setStale(true);
-    });
-    return () => sub.remove();
-  }, []);
+): KeyedData<T> {
+  const { state, foreground } = useKeyedData(load, key, keepPrevious);
+  const { refresh } = state;
 
   useFocusEffect(
     useCallback(() => {
@@ -103,5 +43,15 @@ export function usePolling<T>(
     }, [foreground, enabled, intervalMs, refresh, key]),
   );
 
-  return { data, error, stale: stale && data !== undefined, refresh };
+  return state;
+}
+
+/**
+ * A history screen's data: polled for the range picked, which starts at `initialRange`. Changing
+ * the range keeps the old range's data on screen (marked stale) until the new one's arrives.
+ */
+export function useRangedPolling<T>(initialRange: number, load: (range: number) => Promise<T>, intervalMs: number, key: string) {
+  const [range, setRange] = useState(initialRange);
+  const polled = usePolling(() => load(range), intervalMs, `${key}|${range}`, { keepPrevious: true });
+  return { ...polled, range, setRange };
 }
