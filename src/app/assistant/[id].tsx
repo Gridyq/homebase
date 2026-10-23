@@ -1,12 +1,12 @@
 import { Image } from 'expo-image';
 import { router, Stack, useLocalSearchParams } from 'expo-router';
-import { useHeaderHeight } from 'expo-router/react-navigation';
 import { SymbolView } from 'expo-symbols';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActionSheetIOS,
   ActivityIndicator,
   Alert,
+  Keyboard,
   KeyboardAvoidingView,
   Modal,
   Pressable,
@@ -65,7 +65,7 @@ function ChatView({ conn, id }: { conn: Connection; id: string }) {
   const theme = useTheme();
   const gutter = useGutter();
   const insets = useSafeAreaInsets();
-  const headerHeight = useHeaderHeight();
+  const keyboardOpen = useKeyboardOpen();
   const [chat, setChat] = useState<Chat>();
   const [loaded, setLoaded] = useState(false);
   const [models, setModels] = useState<AssistantModel[]>([]);
@@ -244,10 +244,8 @@ function ChatView({ conn, id }: { conn: Connection; id: string }) {
 
   const messages = chat?.messages ?? [];
   return (
-    <KeyboardAvoidingView
-      behavior="padding"
-      keyboardVerticalOffset={headerHeight}
-      style={{ flex: 1, backgroundColor: theme.background }}>
+    // The header is see-through and the screen runs under it, so the keyboard needs no offset.
+    <KeyboardAvoidingView behavior="padding" style={{ flex: 1, backgroundColor: theme.background }}>
       <Stack.Screen options={{ title: chat?.title ?? 'New chat' }} />
       <Stack.Toolbar placement="right">
         <Stack.Toolbar.Menu icon="ellipsis">
@@ -266,6 +264,7 @@ function ChatView({ conn, id }: { conn: Connection; id: string }) {
       <ScrollView
         ref={scroll}
         style={styles.flex}
+        contentInsetAdjustmentBehavior="automatic"
         contentContainerStyle={[styles.messages, gutter]}
         keyboardDismissMode="interactive"
         onScroll={onScroll}
@@ -310,7 +309,7 @@ function ChatView({ conn, id }: { conn: Connection; id: string }) {
           ))}
         </ScrollView>
       ) : null}
-      <View style={[styles.composer, gutter, { paddingBottom: Math.max(insets.bottom, Spacing.two) }]}>
+      <View style={[styles.composer, gutter, { paddingBottom: keyboardOpen ? Spacing.two : Math.max(insets.bottom, Spacing.two) }]}>
         {model?.vision && canAddPhotos() ? (
           <Pressable
             onPress={choosePhotoSource}
@@ -355,6 +354,20 @@ function ChatView({ conn, id }: { conn: Connection; id: string }) {
       </Modal>
     </KeyboardAvoidingView>
   );
+}
+
+/** Whether the keyboard is up; the composer then sits on it instead of above the home indicator. */
+function useKeyboardOpen() {
+  const [open, setOpen] = useState(Keyboard.isVisible());
+  useEffect(() => {
+    const show = Keyboard.addListener('keyboardWillShow', () => setOpen(true));
+    const hide = Keyboard.addListener('keyboardWillHide', () => setOpen(false));
+    return () => {
+      show.remove();
+      hide.remove();
+    };
+  }, []);
+  return open;
 }
 
 function MessageView({

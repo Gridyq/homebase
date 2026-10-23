@@ -24,6 +24,9 @@ export default function RootLayout() {
         <Stack.Screen name="jellyfin" options={{ headerShown: false }} />
         <Stack.Screen name="server" options={{ headerShown: false }} />
         <Stack.Screen name="requests" options={{ headerShown: false }} />
+        <Stack.Screen name="drop" options={{ headerShown: false }} />
+        <Stack.Screen name="videos" options={{ headerShown: false }} />
+        <Stack.Screen name="assistant" options={{ headerShown: false }} />
         <Stack.Screen
           name="whats-new"
           options={{
