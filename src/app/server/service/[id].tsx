@@ -1,4 +1,4 @@
-import { Stack, useLocalSearchParams } from 'expo-router';
+import { router, Stack, useLocalSearchParams } from 'expo-router';
 import { useRef, useState } from 'react';
 import { Alert, ScrollView, StyleSheet, View } from 'react-native';
 
@@ -16,8 +16,10 @@ import {
   type ServiceAction,
 } from '@/miniapps/server/api';
 import {
+  Card,
   formatBytes,
   formatCpu,
+  NavRow,
   Section,
   Segmented,
   serviceColor,
@@ -160,6 +162,15 @@ export default function ServiceScreen() {
           ))}
         </View>
       ) : null}
+
+      <Card>
+        <NavRow
+          first
+          title="Logs"
+          caption="What it's been writing, live"
+          onPress={() => router.push({ pathname: '/server/logs/[id]', params: { id: service.id, name: service.name } })}
+        />
+      </Card>
 
       <Section title="History">
         <Segmented value={range} onChange={setRange} options={RANGES} />

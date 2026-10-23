@@ -283,3 +283,86 @@ export function fetchServiceHistory(conn: Connection, rangeSec: number, serviceI
     `/api/history?range=${rangeSec}&service=${encodeURIComponent(serviceId)}`,
   );
 }
+
+export type LogLine = {
+  at: number;
+  /** syslog priority: 3 and below are errors, 4 warnings. */
+  priority: number;
+  text: string;
+};
+
+export type LogReport = {
+  lines: LogLine[];
+  /** Pass back as `after` to get only what's written since. */
+  cursor?: string;
+  at: number;
+};
+
+/** A service's last few hundred lines, or with `after` only the new ones. `errors` keeps lines that mention a problem. */
+export function fetchServiceLogs(conn: Connection, id: string, { after, errors }: { after?: string; errors?: boolean } = {}) {
+  const query = [after && `after=${encodeURIComponent(after)}`, errors && 'errors=1'].filter(Boolean).join('&');
+  return request<LogReport>(conn, `/api/services/${encodeURIComponent(id)}/logs${query ? `?${query}` : ''}`, {
+    timeoutMs: 20_000,
+  });
+}
+
+export type TailscaleDevice = {
+  id: string;
+  name: string;
+  os: string;
+  ips: string[];
+  /** This server. */
+  self: boolean;
+  online: boolean;
+  /** Traffic in the last couple of minutes. */
+  active: boolean;
+  lastSeen?: number;
+  /** The address it's reached at directly; missing while traffic goes through a relay. */
+  direct?: string;
+  relay?: string;
+  /** Since Tailscale last started on the server. */
+  rxBytes: number;
+  txBytes: number;
+  keyExpiry?: number;
+  exitNode: boolean;
+  offersExitNode: boolean;
+};
+
+export type TailscaleReport = {
+  state: string;
+  version?: string;
+  tailnet?: string;
+  health: string[];
+  /** The server first. */
+  devices: TailscaleDevice[];
+  at: number;
+};
+
+export function fetchTailscale(conn: Connection) {
+  return request<TailscaleReport>(conn, '/api/tailscale');
+}
+
+export type StorageCategory = {
+  id: string;
+  label: string;
+  bytes: number;
+  /** The biggest folders in it. */
+  items: { name: string; bytes: number }[];
+  /** How many smaller ones were left out. */
+  more: number;
+};
+
+export type StorageReport = {
+  mount: string;
+  totalBytes: number;
+  usedBytes: number;
+  availableBytes: number;
+  categories: StorageCategory[];
+  /** Downloads hardlinked into the library, which take no extra room. */
+  sharedDownloadBytes: number;
+  at: number;
+};
+
+export function fetchStorage(conn: Connection) {
+  return request<StorageReport>(conn, '/api/storage', { timeoutMs: 130_000 });
+}

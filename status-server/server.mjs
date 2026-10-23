@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 /**
  * Status server for Homebase's Server mini-app: system stats, services and containers, and
- * start/stop/restart for them. Also watches for problems and reports them through ntfy, since
- * the app can't get push notifications. Stops the download stack while a game runs (game mode)
+ * start/stop/restart for them, with their logs, the Tailscale devices and what fills the media
+ * drive. Also watches for problems and reports them through ntfy, since the app can't get push
+ * notifications. Stops the download stack while a game runs (game mode)
  * and runs Seerr only while it's used. Passes the Requests mini-app's calls on to Seerr, Sonarr
  * and Radarr, and qBittorrent's speed limit and seeding. Takes files, text and links from the
  * Drop mini-app, and hands back the files in its folder. Saves web videos into Jellyfin with
@@ -934,6 +935,181 @@ async function performAction(id, action) {
     return;
   }
   await run('systemctl', ['--user', action, u.unit], { timeout: 120_000 });
+}
+
+// ---------------------------------------------------------------------------------------------
+// Logs
+
+const LOG_LINES = 300;
+const LOG_ERRORS = 'error|fatal|exception|fail|warn|crit|panic|traceback|denied';
+// Sonarr and Prowlarr put API keys in the URLs they log.
+const SECRET_IN_LOG = /((?:api[_-]?key|token|password|passkey|secret)["']?\s*[=:]\s*["']?)[^\s&"',;]+/gi;
+const BEARER_IN_LOG = /(Bearer\s+)[\w.~+/=-]+/gi;
+const ANSI = /\x1b\[[0-9;?]*[A-Za-z]/g;
+
+/** journalctl arguments that pick out one dashboard service's journal. */
+async function logSource(id) {
+  const [kind, name] = [id.slice(0, id.indexOf(':')), id.slice(id.indexOf(':') + 1)];
+  if (kind === 'container') {
+    const pod = (await containers()).find((p) => p.Names?.includes(name));
+    const unit = pod?.Labels?.PODMAN_SYSTEMD_UNIT ?? (await quadlets()).find((q) => q.name === name)?.unit;
+    if (unit) return ['--user', '-u', unit];
+    if (pod) return ['--user', `CONTAINER_NAME=${name}`];
+    throw new HttpError(404, `No container named ${name}`);
+  }
+  const u = UNITS.find((x) => x.id === name);
+  if (kind !== 'unit' || !u) throw new HttpError(404, `No service ${id}`);
+  return [...(u.system ? [] : ['--user']), '-u', u.runs ?? u.unit];
+}
+
+/**
+ * The last lines a service wrote, or with `after` (the cursor from an earlier call) only what
+ * came since. `errors` keeps lines that mention an error, failure or warning.
+ */
+async function serviceLogs(id, { after, errors }) {
+  const args = [...(await logSource(id)), '--no-pager', '-o', 'json', '--output-fields=MESSAGE,PRIORITY', '-n', String(LOG_LINES)];
+  if (after) args.push(`--after-cursor=${after}`);
+  if (errors) args.push(`--grep=${LOG_ERRORS}`, '--case-sensitive=false');
+  // journalctl exits 1 when --grep matches nothing.
+  const { stdout } = await run('journalctl', args, { maxBuffer: 32 * 1024 * 1024, timeout: 15_000 }).catch((e) => {
+    if (e.code === 1 && !e.stderr?.trim()) return { stdout: e.stdout ?? '' };
+    throw e;
+  });
+  const lines = [];
+  let cursor = after;
+  for (const row of stdout.split('\n')) {
+    if (!row) continue;
+    const entry = JSON.parse(row);
+    cursor = entry.__CURSOR;
+    // Messages that aren't valid UTF-8 come as arrays of bytes.
+    let text = Array.isArray(entry.MESSAGE) ? Buffer.from(entry.MESSAGE).toString('utf8') : String(entry.MESSAGE ?? '');
+    text = text.replace(ANSI, '').replace(SECRET_IN_LOG, '$1•••').replace(BEARER_IN_LOG, '$1•••').trimEnd();
+    if (!text) continue;
+    lines.push({ at: Math.round(Number(entry.__REALTIME_TIMESTAMP) / 1000), priority: Number(entry.PRIORITY ?? 6), text });
+  }
+  return { lines, cursor, at: Date.now() };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Tailscale
+
+/** Tailscale leaves times it doesn't know at year 1. */
+const tailscaleTime = (s) => (s && !s.startsWith('0001-') ? Date.parse(s) : undefined);
+
+function tailscaleDevice(p, self) {
+  return {
+    id: p.ID,
+    name: p.DNSName?.split('.')[0] || p.HostName,
+    os: p.OS,
+    ips: p.TailscaleIPs ?? [],
+    self,
+    online: !!p.Online,
+    // Traffic in the last couple of minutes.
+    active: !!p.Active,
+    lastSeen: tailscaleTime(p.LastSeen),
+    // A direct address once one is found; until then traffic goes through Tailscale's relay.
+    direct: p.CurAddr || undefined,
+    relay: p.Relay || undefined,
+    rxBytes: p.RxBytes ?? 0,
+    txBytes: p.TxBytes ?? 0,
+    keyExpiry: tailscaleTime(p.KeyExpiry),
+    exitNode: !!p.ExitNode,
+    offersExitNode: !!p.ExitNodeOption,
+  };
+}
+
+async function tailscale() {
+  const { stdout } = await run('tailscale', ['status', '--json'], { timeout: 10_000 });
+  const s = JSON.parse(stdout);
+  const peers = Object.values(s.Peer ?? {}).map((p) => tailscaleDevice(p, false));
+  peers.sort((a, b) => Number(b.online) - Number(a.online) || a.name.localeCompare(b.name));
+  return {
+    state: s.BackendState,
+    version: s.Version?.split('-')[0],
+    tailnet: s.CurrentTailnet?.Name,
+    health: s.Health ?? [],
+    devices: [tailscaleDevice(s.Self, true), ...peers],
+    at: Date.now(),
+  };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Storage
+
+const MEDIA_ROOT = process.env.MEDIA_ROOT ?? '/mnt/media';
+/**
+ * What the media drive holds, in this order: du counts a hardlinked file only the first time it
+ * sees it, so downloads that are also in the library count toward the library.
+ */
+const MEDIA_FOLDERS = [
+  { id: 'shows', dir: 'Shows', label: 'Shows' },
+  { id: 'movies', dir: 'Movies', label: 'Movies' },
+  { id: 'youtube', dir: 'YouTube', label: 'Videos' },
+  // tv/ and movies/ hold the torrents; list those rather than the two folders.
+  { id: 'downloads', dir: 'Downloads', label: 'Downloads', depth: 2 },
+  { id: 'conversions', dir: '.tdarr-cache', label: 'Conversion cache' },
+  { id: 'partial', dir: '.youtube-partial', label: 'Unfinished videos' },
+  { id: 'backups', dir: 'Backups', label: 'Backups' },
+  { id: 'trash', dir: '.Trash-1000', label: 'Trash' },
+];
+const STORAGE_ITEMS = 8;
+
+/** Parses `du -B1` output into sizes by path. */
+function duSizes(stdout) {
+  const sizes = new Map();
+  for (const line of stdout.split('\n')) {
+    const tab = line.indexOf('\t');
+    if (tab > 0) sizes.set(line.slice(tab + 1), Number(line.slice(0, tab)));
+  }
+  return sizes;
+}
+
+async function du(args) {
+  // du exits 1 when it can't read something (lost+found) but still prints the rest.
+  const { stdout } = await run('du', ['-B1', '-x', ...args], { cwd: MEDIA_ROOT, timeout: 120_000, maxBuffer: 8 * 1024 * 1024 }).catch(
+    (e) => {
+      if (e.stdout) return e;
+      throw e;
+    },
+  );
+  return duSizes(stdout);
+}
+
+async function storage() {
+  const present = [];
+  for (const f of MEDIA_FOLDERS) if (await stat(path.join(MEDIA_ROOT, f.dir)).catch(() => undefined)) present.push(f);
+  const [sizes, downloadsAlone, fs] = await Promise.all([
+    du(['-d', '2', ...present.map((f) => f.dir)]),
+    present.some((f) => f.id === 'downloads') ? du(['-s', 'Downloads']) : new Map(),
+    statfs(MEDIA_ROOT),
+  ]);
+  const categories = present.map((f) => {
+    const depth = f.depth ?? 1;
+    const items = [...sizes]
+      .filter(([p]) => p.startsWith(`${f.dir}/`) && p.split('/').length === depth + 1)
+      .map(([p, bytes]) => ({ name: p.split('/').pop(), bytes }))
+      .filter((i) => i.bytes > 0)
+      .sort((a, b) => b.bytes - a.bytes);
+    return {
+      id: f.id,
+      label: f.label,
+      bytes: sizes.get(f.dir) ?? 0,
+      items: items.slice(0, STORAGE_ITEMS),
+      more: Math.max(0, items.length - STORAGE_ITEMS),
+    };
+  });
+  const totalBytes = fs.blocks * fs.bsize;
+  const downloads = categories.find((c) => c.id === 'downloads');
+  return {
+    mount: MEDIA_ROOT,
+    totalBytes,
+    usedBytes: totalBytes - fs.bfree * fs.bsize,
+    availableBytes: fs.bavail * fs.bsize,
+    categories,
+    // Downloads that are hardlinked into the library and so take no extra room.
+    sharedDownloadBytes: downloads ? Math.max(0, (downloadsAlone.get('Downloads') ?? 0) - downloads.bytes) : 0,
+    at: Date.now(),
+  };
 }
 
 async function status() {
@@ -2470,6 +2646,15 @@ async function handle(req, res) {
       log(req, `game mode ${on}`);
       return sendJson(res, 200, await setGameMode(on));
     }
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/tailscale') return sendJson(res, 200, await tailscale());
+  if (req.method === 'GET' && url.pathname === '/api/storage') return sendJson(res, 200, await storage());
+  const logs = /^\/api\/services\/([^/]+)\/logs$/.exec(url.pathname);
+  if (req.method === 'GET' && logs) {
+    const after = url.searchParams.get('after') ?? undefined;
+    if (after && !/^[\w=;-]+$/.test(after)) throw new HttpError(400, 'Bad cursor');
+    return sendJson(res, 200, await serviceLogs(decodeURIComponent(logs[1]), { after, errors: url.searchParams.get('errors') === '1' }));
   }
 
   const match = /^\/api\/services\/([^/]+)\/(start|stop|restart|run)$/.exec(url.pathname);
