@@ -7,7 +7,10 @@
 //! need `Authorization: Bearer <token>`, read from the token file the Node server creates.
 
 mod cache;
+mod gpu;
 mod http;
+mod kernel;
+mod processes;
 mod proxy;
 mod usage;
 
@@ -36,6 +39,8 @@ async fn main() {
 
     let api = Router::new()
         .route("/api/usage", get(usage::handler))
+        .route("/api/processes", get(processes::handler))
+        .route("/api/gpu", get(gpu::handler))
         .route_layer(middleware::from_fn_with_state(state.clone(), http::require_token));
 
     let app = Router::new()

@@ -19,6 +19,8 @@ pub struct State {
     pub config: Arc<Config>,
     pub upstream: Upstream,
     pub usage: Arc<crate::usage::Usage>,
+    pub processes: Arc<crate::processes::Processes>,
+    pub gpu: Arc<crate::gpu::Gpu>,
 }
 
 impl State {
@@ -26,6 +28,8 @@ impl State {
         Self {
             upstream: Upstream::new(),
             usage: Arc::new(crate::usage::Usage::new()),
+            processes: Default::default(),
+            gpu: Default::default(),
             config,
         }
     }

@@ -416,7 +416,40 @@ pub struct UsageOut {
 }
 
 pub async fn handler(AxumState(state): AxumState<State>) -> Result<Json<UsageOut>, HttpError> {
-    let usage = &state.usage;
+    Ok(Json(state.usage.read().await?))
+}
+
+impl Usage {
+    /// Everything using memory, named after its service where there is one.
+    pub async fn read(&self) -> Result<UsageOut, HttpError> {
+        read(self).await
+    }
+
+    /// Each cgroup's name, by its path, for naming what a process belongs to.
+    pub async fn group_names(&self) -> Result<HashMap<String, String>, HttpError> {
+        Ok(self
+            .read()
+            .await?
+            .groups
+            .into_iter()
+            .filter_map(|g| Some((g.id, g.name?)))
+            .collect())
+    }
+}
+
+/// The named cgroup a process's cgroup sits in, such as a container's unit for its payload.
+pub fn service_of_group(group: &str, names: &HashMap<String, String>) -> Option<String> {
+    let mut dir = group;
+    while !dir.is_empty() && dir != "." {
+        if let Some(name) = names.get(dir).filter(|n| !n.is_empty()) {
+            return Some(name.clone());
+        }
+        dir = dir.rsplit_once('/').map_or("", |(parent, _)| parent);
+    }
+    None
+}
+
+async fn read(usage: &Usage) -> Result<UsageOut, HttpError> {
     let (groups, pods) = tokio::join!(usage.groups(), usage.pods.get());
     let groups = groups?;
     let pods = pods.unwrap_or_else(|e| {
@@ -463,12 +496,12 @@ pub async fn handler(AxumState(state): AxumState<State>) -> Result<Json<UsageOut
         .collect();
     out.sort_by_key(|g| std::cmp::Reverse(g.used_bytes));
 
-    Ok(Json(UsageOut {
+    Ok(UsageOut {
         memory: memory_breakdown(&meminfo()),
         pressure: pressure(),
         groups: out,
         at: now_ms(),
-    }))
+    })
 }
 
 pub fn now_ms() -> u64 {
@@ -488,6 +521,24 @@ mod tests {
         assert_eq!(group_label("app-flatpak-com.valvesoftware.Steam-12.scope"), "Steam");
         assert_eq!(group_label("dbus\\x2dbroker.service"), "dbus-broker");
         assert_eq!(group_label("pipewire.service"), "pipewire");
+    }
+
+    #[test]
+    fn service_of_a_nested_group() {
+        let names = HashMap::from([
+            (
+                "user.slice/u/user@1000.service/app.slice/jellyfin.service".to_owned(),
+                "jellyfin".to_owned(),
+            ),
+            ("init.scope".to_owned(), "init".to_owned()),
+        ]);
+        let of = |g| service_of_group(g, &names);
+        assert_eq!(
+            of("user.slice/u/user@1000.service/app.slice/jellyfin.service/libpod-payload-abc").as_deref(),
+            Some("jellyfin")
+        );
+        assert_eq!(of("init.scope").as_deref(), Some("init"));
+        assert_eq!(of("system.slice/sshd.service"), None);
     }
 
     #[test]
