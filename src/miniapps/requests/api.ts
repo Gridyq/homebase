@@ -679,14 +679,16 @@ export function setSeeding(conn: Connection, change: { seed?: boolean; stopWhenD
 }
 
 // ---------------------------------------------------------------------------------------------
-// Tdarr
+// Conversions (the status server converts the library to HEVC MP4s; Tdarr used to)
 
-/** A file in Tdarr's library, named without its folder or extension. */
+/** A converted file, named without its folder or extension. */
 export type ConvertedFile = { file: string; show: boolean; oldSize: number; newSize: number; at?: number };
 
 export type Conversions = {
-  /** The node finishes the file it's on, then waits. */
+  /** Pausing finishes the file it's on, then waits. */
   paused: boolean;
+  /** Game mode stops converting until it's over. */
+  gameMode?: boolean;
   workers: {
     file: string;
     show: boolean;
@@ -701,7 +703,8 @@ export type Conversions = {
   savedBytes: number;
   /** The latest conversions, newest first. */
   recent: ConvertedFile[];
-  errors: { file: string; show: boolean; at?: number }[];
+  /** Why each failed, newest first. */
+  errors: { file: string; show: boolean; at?: number; reason?: string }[];
 };
 
 export function conversions(conn: Connection) {
@@ -710,4 +713,9 @@ export function conversions(conn: Connection) {
 
 export function setConversionsPaused(conn: Connection, paused: boolean) {
   return request<Conversions>(conn, '/api/tdarr', { method: 'POST', body: JSON.stringify({ paused }) });
+}
+
+/** Has the failed files looked at again on the next scan, which starts right away. */
+export function retryConversions(conn: Connection) {
+  return request<Conversions>(conn, '/api/tdarr', { method: 'POST', body: JSON.stringify({ retry: true }) });
 }

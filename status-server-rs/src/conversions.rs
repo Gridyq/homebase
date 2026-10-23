@@ -816,9 +816,9 @@ fn summary(state: &State) -> Value {
             let fraction = if j.duration > 0.0 { (j.done / j.duration).clamp(0.0, 1.0) } else { 0.0 };
             let mut m = describe(&j.path);
             m.insert("percent".into(), json!(fraction * 100.0));
-            if j.speed > 0.0 {
-                m.insert("eta".into(), json!(eta((j.duration - j.done) / j.speed)));
-            }
+            // Always there: the app reads it as a string. 0:00:00 shows as no estimate.
+            let left = if j.speed > 0.0 { (j.duration - j.done) / j.speed } else { 0.0 };
+            m.insert("eta".into(), json!(eta(left)));
             m.insert("fps".into(), json!(j.fps));
             m.insert("startedAt".into(), json!(j.started_at));
             m.insert("oldSize".into(), json!(j.old_size));

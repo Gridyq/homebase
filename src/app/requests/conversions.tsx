@@ -7,7 +7,7 @@ import { Spacing } from '@/constants/theme';
 import { useGutter } from '@/hooks/use-gutter';
 import { useTheme } from '@/hooks/use-theme';
 import { Centered } from '@/miniapps/jellyfin/components';
-import { conversions, setConversionsPaused, type Conversions } from '@/miniapps/requests/api';
+import { conversions, retryConversions, setConversionsPaused, type Conversions } from '@/miniapps/requests/api';
 import { displayName, formatEta } from '@/miniapps/requests/components';
 import { Card, formatBytes, formatWhen, Meter, Section, StatTile, StatusColors } from '@/miniapps/server/components';
 import { useServerConnection } from '@/miniapps/server/connection';
@@ -15,7 +15,7 @@ import { usePolling } from '@/miniapps/server/use-polling';
 
 const POLL_MS = 5000;
 
-/** What Tdarr is converting to HEVC MP4s, what's done, and how much space it saved. */
+/** What the server is converting to HEVC MP4s, what's done, and how much space it saved. */
 export default function ConversionsScreen() {
   const { connection } = useServerConnection();
   const conn = connection!;
@@ -24,6 +24,7 @@ export default function ConversionsScreen() {
   const { data, error, refresh } = usePolling(() => conversions(conn), POLL_MS, conn.url);
   const [override, setOverride] = useState<Conversions>();
   const [busy, setBusy] = useState(false);
+  const [retrying, setRetrying] = useState(false);
   const [pulled, setPulled] = useState(false);
 
   // A pause answers with fresh numbers; keep them until the next poll replaces them.
@@ -50,7 +51,22 @@ export default function ConversionsScreen() {
     }
   };
 
-  const state = shown.paused
+  const retry = async () => {
+    setRetrying(true);
+    try {
+      const next = await retryConversions(conn);
+      await refresh();
+      setOverride(next);
+    } catch (e) {
+      Alert.alert('Couldn’t retry', e instanceof Error ? e.message : String(e));
+    } finally {
+      setRetrying(false);
+    }
+  };
+
+  const state = shown.gameMode
+    ? 'Waiting for game mode to end'
+    : shown.paused
     ? workers.length
       ? 'Pausing after the current file'
       : 'Paused'
@@ -103,7 +119,7 @@ export default function ConversionsScreen() {
         <View
           style={[
             styles.dot,
-            { backgroundColor: shown.paused ? StatusColors.warn : workers.length ? StatusColors.good : StatusColors.idle },
+            { backgroundColor: shown.paused || shown.gameMode ? StatusColors.warn : workers.length ? StatusColors.good : StatusColors.idle },
           ]}
         />
         <ThemedText type="smallBold" style={styles.flex}>
@@ -146,12 +162,23 @@ export default function ConversionsScreen() {
         <Section title="Failed">
           <Card>
             {shown.errors.map((f, i) => (
-              <FileRow key={f.file} first={i === 0} title={displayName(f.file)} caption={f.at ? formatWhen(f.at) : undefined} />
+              <FileRow
+                key={f.file}
+                first={i === 0}
+                title={displayName(f.file)}
+                caption={[f.reason, f.at ? formatWhen(f.at) : undefined].filter(Boolean).join(' · ') || undefined}
+              />
             ))}
           </Card>
           <ThemedText type="small" themeColor="textSecondary" style={styles.note}>
-            The originals are untouched. Retry them from Tdarr’s web page.
+            The originals are untouched.
           </ThemedText>
+          <Button
+            title={retrying ? 'Retrying…' : `Retry ${shown.errors.length === 1 ? 'it' : 'them'}`}
+            variant="secondary"
+            disabled={retrying}
+            onPress={retry}
+          />
         </Section>
       ) : null}
 
