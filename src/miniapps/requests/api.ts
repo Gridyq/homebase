@@ -136,6 +136,8 @@ type QueueRecord = {
   trackedDownloadState?: string;
   statusMessages?: { title: string; messages: string[] }[];
   errorMessage?: string | null;
+  /** When Sonarr or Radarr grabbed it, as an ISO date. */
+  added?: string;
   seasonNumber?: number;
   series?: { id: number; title: string; tmdbId?: number; images: ArrImage[] };
   episode?: { seasonNumber: number; episodeNumber: number };
@@ -166,6 +168,9 @@ export type Download = {
   /** `blocked`: finished, but Sonarr or Radarr won't import it without being told to. */
   state: 'downloading' | 'queued' | 'paused' | 'importing' | 'blocked' | 'stalled' | 'warning' | 'failed' | 'completed';
   problem?: string;
+  /** The first episode it covers, for listing a show's downloads in order. */
+  episodeNumber?: number;
+  added?: string;
 };
 
 const poster = (images: ArrImage[] | undefined) => images?.find((i) => i.coverType === 'poster')?.remoteUrl;
@@ -223,6 +228,8 @@ async function queueOf(conn: Connection, app: Arr) {
       timeLeft: r.timeleft,
       state: downloadState(r),
       problem: problemOf(r),
+      episodeNumber: episodes.length ? Math.min(...episodes.map((e) => e.episodeNumber)) : undefined,
+      added: r.added,
     };
   });
 }
@@ -231,7 +238,23 @@ async function queueOf(conn: Connection, app: Arr) {
 export async function downloads(conn: Connection) {
   const results = await Promise.allSettled([queueOf(conn, 'sonarr'), queueOf(conn, 'radarr')]);
   if (results.every((r) => r.status === 'rejected')) throw (results[0] as PromiseRejectedResult).reason;
-  return results.flatMap((r) => (r.status === 'fulfilled' ? r.value : []));
+  const all = results.flatMap((r) => (r.status === 'fulfilled' ? r.value : []));
+  // The order the server keeps qBittorrent's queue in: shows and movies in the order they were
+  // first grabbed, and a show's downloads by season and episode.
+  const group = (d: Download) => `${d.arr}:${d.arrId ?? d.key}`;
+  const first = new Map<string, string>();
+  for (const d of all) {
+    const added = d.added ?? '';
+    const seen = first.get(group(d));
+    if (seen === undefined || added < seen) first.set(group(d), added);
+  }
+  return [...all].sort(
+    (a, b) =>
+      first.get(group(a))!.localeCompare(first.get(group(b))!) ||
+      group(a).localeCompare(group(b)) ||
+      (a.seasonNumber ?? 0) - (b.seasonNumber ?? 0) ||
+      (a.episodeNumber ?? 0) - (b.episodeNumber ?? 0),
+  );
 }
 
 /**
