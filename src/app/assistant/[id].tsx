@@ -21,6 +21,7 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { Button } from '@/components/button';
 import { ThemedText } from '@/components/themed-text';
 import { Spacing } from '@/constants/theme';
 import { useGutter } from '@/hooks/use-gutter';
@@ -57,8 +58,23 @@ type Attachment = { key: string; uri: string; id?: string };
 export default function ChatScreen() {
   const { connection } = useServerConnection();
   const { id } = useLocalSearchParams<{ id: string }>();
-  if (!connection) return <Centered error={new Error('The assistant runs on the home server. Connect the Server app first.')} />;
+  if (!connection) return <NotConnected />;
   return <ChatView key={`${connection.url}|${id}`} conn={connection} id={id} />;
+}
+
+/** Reached from a link with no server set up; same as the Assistant home in that case. */
+function NotConnected() {
+  const theme = useTheme();
+  const gutter = useGutter();
+  return (
+    <View style={[styles.notConnected, gutter, { backgroundColor: theme.background }]}>
+      <ThemedText type="smallBold">Not connected</ThemedText>
+      <ThemedText type="small" themeColor="textSecondary" style={styles.center}>
+        The assistant runs on the home server. Connect the Server app first.
+      </ThemedText>
+      <Button title="Set up connection" onPress={() => router.push('/server/connect')} />
+    </View>
+  );
 }
 
 function ChatView({ conn, id }: { conn: Connection; id: string }) {
@@ -69,6 +85,7 @@ function ChatView({ conn, id }: { conn: Connection; id: string }) {
   const [chat, setChat] = useState<Chat>();
   const [loaded, setLoaded] = useState(false);
   const [models, setModels] = useState<AssistantModel[]>([]);
+  const [modelsError, setModelsError] = useState<Error>();
   const [modelId, setModelId] = useState<string>();
   const [think, setThink] = useState(false);
   const [text, setText] = useState('');
@@ -99,6 +116,16 @@ function ChatView({ conn, id }: { conn: Connection; id: string }) {
     return next;
   }, [conn, id]);
 
+  // Without the list the photo, thinking and model buttons have nothing to go on, so say so.
+  const loadModels = () =>
+    assistantState(conn).then(
+      (s) => {
+        setModels(s.models);
+        setModelsError(undefined);
+      },
+      (e: Error) => setModelsError(e),
+    );
+
   const open = useCallback(() => {
     getChat(conn, id).then(
       (c) => {
@@ -109,9 +136,8 @@ function ChatView({ conn, id }: { conn: Connection; id: string }) {
       // of history the screen isn't showing.
       (e: Error) => setOpenError(e),
     );
-    assistantState(conn)
-      .then((s) => setModels(s.models))
-      .catch(() => undefined);
+    loadModels();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [conn, id]);
   useEffect(open, [open]);
 
@@ -306,7 +332,7 @@ function ChatView({ conn, id }: { conn: Connection; id: string }) {
               conn={conn}
               message={m}
               status={i === messages.length - 1 ? status : undefined}
-              onLongPress={messageActions}
+              onActions={messageActions}
               onOpenPhoto={setViewing}
             />
           ))
@@ -314,6 +340,14 @@ function ChatView({ conn, id }: { conn: Connection; id: string }) {
           <ThemedText themeColor="textSecondary" style={styles.hint}>
             {model ? `${model.name} on the home PC.` : ''}
             {model?.state === 'stopped' ? ' It takes a few seconds to start on the first question.' : ''}
+            {modelsError && !models.length ? (
+              <>
+                {`Couldn’t load the models. ${modelsError.message} `}
+                <ThemedText style={{ color: theme.accent }} onPress={loadModels}>
+                  Try again
+                </ThemedText>
+              </>
+            ) : null}
           </ThemedText>
         )}
       </ScrollView>
@@ -404,13 +438,14 @@ const MessageView = memo(function MessageView({
   conn,
   message,
   status,
-  onLongPress,
+  onActions,
   onOpenPhoto,
 }: {
   conn: Connection;
   message: ChatMessage;
   status?: string;
-  onLongPress: (message: ChatMessage) => void;
+  /** Share or send a message to the PC. */
+  onActions: (message: ChatMessage) => void;
   onOpenPhoto: (id: string) => void;
 }) {
   const theme = useTheme();
@@ -433,7 +468,7 @@ const MessageView = memo(function MessageView({
           </View>
         ) : null}
         {message.content ? (
-          <Pressable onLongPress={() => onLongPress(message)} style={[styles.user, { backgroundColor: theme.backgroundSelected }]}>
+          <Pressable onLongPress={() => onActions(message)} style={[styles.user, { backgroundColor: theme.backgroundSelected }]}>
             <ThemedText style={styles.userText}>{message.content}</ThemedText>
           </Pressable>
         ) : null}
@@ -447,7 +482,9 @@ const MessageView = memo(function MessageView({
     message.cutOff ? 'Stopped at the length limit' : undefined,
   ].filter(Boolean);
   return (
-    <Pressable onLongPress={() => onLongPress(message)} style={styles.answer}>
+    // Not a long-press like questions: the answer's text is selectable, and a long press there
+    // starts a selection.
+    <View style={styles.answer}>
       {message.reasoning ? (
         <Pressable onPress={() => setShowThinking((s) => !s)} style={styles.thinkingRow}>
           <ThemedText type="small" themeColor="textSecondary" style={styles.caption}>
@@ -467,18 +504,34 @@ const MessageView = memo(function MessageView({
         <ThemedText themeColor="textSecondary">{status ?? '…'}</ThemedText>
       ) : null}
       {message.error ? <ThemedText style={{ color: theme.danger }}>{message.error}</ThemedText> : null}
-      {notes.length ? (
-        <ThemedText type="small" themeColor="textSecondary" style={styles.caption}>
-          {notes.join(' · ')}
-        </ThemedText>
+      {notes.length || (message.content && !message.pending) ? (
+        <View style={styles.answerFooter}>
+          <ThemedText type="small" themeColor="textSecondary" style={[styles.caption, styles.flex]}>
+            {notes.join(' · ')}
+          </ThemedText>
+          {message.content && !message.pending ? (
+            <Pressable onPress={() => onActions(message)} hitSlop={12} accessibilityLabel="Share answer">
+              <SymbolView name="square.and.arrow.up" size={17} tintColor={theme.textSecondary} />
+            </Pressable>
+          ) : null}
+        </View>
       ) : null}
-    </Pressable>
+    </View>
   );
 });
 
 const styles = StyleSheet.create({
   flex: {
     flex: 1,
+  },
+  center: {
+    textAlign: 'center',
+  },
+  notConnected: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: Spacing.three,
   },
   messages: {
     paddingVertical: Spacing.three,
@@ -543,6 +596,11 @@ const styles = StyleSheet.create({
     fontWeight: 400,
   },
   answer: {
+    gap: Spacing.two,
+  },
+  answerFooter: {
+    flexDirection: 'row',
+    alignItems: 'center',
     gap: Spacing.two,
   },
   thinkingRow: {
