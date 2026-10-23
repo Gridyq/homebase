@@ -10,6 +10,8 @@ import { serverActivity } from './server/activity';
  *   1. Put its screens in `src/app/<id>/` (with a `_layout.tsx`).
  *   2. Put its non-route code in `src/miniapps/<id>/`.
  *   3. Add an entry here.
+ *   4. Add it to `src/app/_layout.tsx` with `headerShown: false`, or the launcher's header shows
+ *      above the mini-app's own.
  */
 export type MiniApp = {
   id: string;
