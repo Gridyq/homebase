@@ -15,7 +15,9 @@ export default function WhatsNew() {
   const { update, notes, version } = Release;
 
   return (
-    <View style={[styles.sheet, { paddingBottom: insets.bottom + Spacing.three }]}>
+    // collapsable={false}: otherwise Fabric flattens this view, the ScrollView becomes a direct child of the
+    // sheet, and react-native-screens stretches it over the whole sheet from the top-left corner.
+    <View collapsable={false} style={[styles.sheet, { paddingBottom: insets.bottom + Spacing.three }]}>
       <View style={styles.heading}>
         <ThemedText type="subtitle">What&apos;s new</ThemedText>
         <ThemedText type="small" themeColor="textSecondary">
