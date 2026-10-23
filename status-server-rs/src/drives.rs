@@ -1,13 +1,12 @@
 //! Drives: model, health and temperature from udisks, which reads the drives' SMART data every
-//! ten minutes and lets any user see it. Each drive is kept as the JSON the app gets, the Node
+//! ten minutes and lets any user see it. Asked over D-Bus (see dbus.rs) whenever udisks says
+//! something changed, and every ten minutes besides. Each drive is kept as the JSON the app gets, the Node
 //! server's shape.
 
 use std::time::Duration;
 
 use serde_json::{Map, Value, json};
 
-use crate::args;
-use crate::command::run;
 use crate::history::num;
 
 pub const DRIVE_REFRESH_INTERVAL: Duration = Duration::from_secs(10 * 60);
@@ -32,14 +31,8 @@ pub struct Drive {
     pub json: Value,
 }
 
-async fn udisks_call(object: &str, iface: &str, method: &str, signature: Option<&str>) -> Result<Value, String> {
-    let mut a = args!["--json=short", "call", "org.freedesktop.UDisks2", object, iface, method].to_vec();
-    if let Some(sig) = signature {
-        a.extend(args![sig, "0"]);
-    }
-    let out = run("busctl", &a, Duration::from_secs(20)).await?;
-    let v: Value = serde_json::from_str(&out).map_err(|e| e.to_string())?;
-    Ok(v["data"].clone())
+async fn udisks_call(object: &str, iface: &str, method: &str, options: bool) -> Result<Value, String> {
+    crate::dbus::system_call("org.freedesktop.UDisks2", object, iface, method, options).await
 }
 
 /// D-Bus byte strings end in a NUL.
@@ -151,7 +144,7 @@ async fn read_drive(path: &str, o: &Value, blocks: &[(&String, &Value)]) -> Driv
     let f = |v: Option<&Value>| v.and_then(Value::as_f64);
 
     if nvme {
-        let attrs = udisks_call(path, "org.freedesktop.UDisks2.NVMe.Controller", "SmartGetAttributes", Some("a{sv}"))
+        let attrs = udisks_call(path, "org.freedesktop.UDisks2.NVMe.Controller", "SmartGetAttributes", true)
             .await
             .map(|d| d[0].clone())
             .unwrap_or_else(|_| json!({}));
@@ -200,7 +193,7 @@ async fn read_drive(path: &str, o: &Value, blocks: &[(&String, &Value)]) -> Driv
         }
         smart = Some(s);
     } else if ata && truthy(prop(o, "Drive.Ata", "SmartSupported")) {
-        let rows = udisks_call(path, "org.freedesktop.UDisks2.Drive.Ata", "SmartGetAttributes", Some("a{sv}"))
+        let rows = udisks_call(path, "org.freedesktop.UDisks2.Drive.Ata", "SmartGetAttributes", true)
             .await
             .map(|d| d[0].clone())
             .unwrap_or_else(|_| json!([]));
@@ -308,7 +301,7 @@ pub async fn read_drives() -> Result<Vec<Drive>, String> {
         "/org/freedesktop/UDisks2",
         "org.freedesktop.DBus.ObjectManager",
         "GetManagedObjects",
-        None,
+        false,
     )
     .await?;
     let objects = data[0].as_object().ok_or("udisks gave no objects")?;

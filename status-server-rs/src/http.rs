@@ -32,11 +32,16 @@ pub struct State {
     pub requests: Arc<crate::requests::Requests>,
     pub videos: Arc<crate::videos::Videos>,
     pub assistant: Arc<crate::assistant::Assistant>,
+    pub jellyfin: Arc<crate::jellyfin::Jellyfin>,
+    pub live: Arc<crate::live::Live>,
+    pub updates: Arc<crate::updates::Updates>,
 }
 
 impl State {
     pub fn new(config: Arc<Config>) -> Self {
         let upstream = Upstream::new();
+        let recorder = Arc::new(crate::recorder::Recorder::new(data_dir(&config)));
+        let live = crate::live::Live::new(recorder.events.lock().unwrap().feed.clone());
         Self {
             upstream: upstream.clone(),
             usage: Arc::new(crate::usage::Usage::new()),
@@ -44,7 +49,7 @@ impl State {
             gpu: Default::default(),
             services: Default::default(),
             sampler: Default::default(),
-            recorder: Arc::new(crate::recorder::Recorder::new(data_dir(&config))),
+            recorder,
             machine: Arc::new(crate::machine::Machine::new(data_dir(&config))),
             game_mode: Arc::new(crate::gamemode::GameMode::new(data_dir(&config))),
             media: Arc::new(crate::media::Media::new()),
@@ -53,6 +58,9 @@ impl State {
             requests: Arc::new(crate::requests::Requests::new(data_dir(&config))),
             videos: Arc::new(crate::videos::Videos::new(data_dir(&config))),
             assistant: Arc::new(crate::assistant::Assistant::new(data_dir(&config))),
+            jellyfin: Default::default(),
+            live: Arc::new(live),
+            updates: Arc::new(crate::updates::Updates::new()),
             config,
         }
     }

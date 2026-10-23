@@ -105,6 +105,8 @@ struct Settled {
 pub struct Events {
     path: PathBuf,
     pub list: Vec<Event>,
+    /// Each event as it's logged, for the app's live view.
+    pub feed: tokio::sync::broadcast::Sender<std::sync::Arc<str>>,
     /// Service id → when it was started or stopped from the app.
     intents: HashMap<String, i64>,
     /// Each service's last settled state, to compare the next reading with.
@@ -120,6 +122,7 @@ impl Events {
         Self {
             path: dir.join("events.jsonl"),
             list: Vec::new(),
+            feed: tokio::sync::broadcast::Sender::new(64),
             intents: HashMap::new(),
             last_states: None,
             journal_checked_at: now,
@@ -129,9 +132,12 @@ impl Events {
     }
 
     pub fn add(&mut self, e: Event) {
-        if let Err(err) = append_json_line(&self.path, &serde_json::to_value(&e).unwrap_or_default()) {
+        let line = serde_json::to_value(&e).unwrap_or_default();
+        if let Err(err) = append_json_line(&self.path, &line) {
             eprintln!("Couldn't save event: {err}");
         }
+        // Nobody listening is fine.
+        let _ = self.feed.send(line.to_string().into());
         self.list.push(e);
     }
 
@@ -484,9 +490,9 @@ pub async fn notify(upstream: &crate::client::Upstream, n: Notice) {
 pub fn reliability(events: &Events, history: &crate::history::History, names: &[(String, String)], range_sec: f64, end: i64) -> Value {
     let start = end - (range_sec * 1000.0) as i64;
     let in_range: Vec<&Event> = events.list.iter().filter(|e| e.t >= start).collect();
-    let entries = history.entries(start, end);
-    let readings = crate::history::reading_count(&entries);
-    let running = history.totals(&entries, |k| crate::history::between(k, "s:", ":mem"));
+    let range = history.range(start, end, end);
+    let readings = history.reading_count(&range);
+    let running = history.totals(&range, |k| crate::history::between(k, "s:", ":mem"));
 
     #[derive(Default)]
     struct Row {

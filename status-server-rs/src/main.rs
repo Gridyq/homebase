@@ -1,8 +1,9 @@
 //! Status server for Homebase's mini-apps: the Server app's stats, services, history, drives and
 //! logs; game mode; the Requests app's searches and requests, its Sonarr and Radarr calls, qBittorrent, clearing stuck downloads and converting the library;
-//! Drop; Videos; and the Assistant's chats with a local model. Replaced the Node server that was
-//! in `status-server/server.mjs`, and keeps its files in that folder: the token, history, events,
-//! chats and settings.
+//! Drop; Videos; the Assistant's chats with a local model; what Jellyfin is playing; and, on a port
+//! of its own, the app's over-the-air updates. Replaced the Node server that was in
+//! `status-server/server.mjs`, and keeps its files in that folder: the token, history, events,
+//! chats and settings. The app can keep `/api/live` open to hear of changes as they happen.
 //!
 //! It only answers loopback and Tailscale addresses, in case the firewall ever opens the port to
 //! the home network, and every request but `/health` and pairing needs
@@ -17,6 +18,7 @@ mod cleanup;
 mod client;
 mod command;
 mod conversions;
+mod dbus;
 mod drives;
 mod drop;
 mod encoding;
@@ -26,8 +28,10 @@ mod gamemode;
 mod gpu;
 mod history;
 mod http;
+mod jellyfin;
 mod js;
 mod kernel;
+mod live;
 mod localtime;
 mod machine;
 mod media;
@@ -37,6 +41,7 @@ mod recorder;
 mod requests;
 mod services;
 mod status;
+mod updates;
 mod usage;
 mod videos;
 
@@ -77,9 +82,15 @@ async fn main() {
     cleanup::start(state.clone());
     videos::start(state.clone());
     assistant::start(state.clone());
+    jellyfin::start(state.clone());
+    dbus::start(state.clone());
+    live::start(state.clone());
+    updates::start(state.clone());
 
     let api = Router::new()
         .route("/api/status", get(status::handler))
+        .route("/api/live", get(live::handler))
+        .route("/api/jellyfin/sessions", get(jellyfin::handler))
         .route("/api/crash", post(pairing::crash))
         .route("/api/history", get(recorder::history_handler))
         .route("/api/game-mode", get(gamemode::get).post(gamemode::set))

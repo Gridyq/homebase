@@ -204,8 +204,8 @@ const TOOL_SERVICE_SERIES: &[(&str, &str, Format)] = &[
 fn history_text(state: &State, from: i64, to: i64, service: Option<&(String, String)>) -> String {
     let names: std::collections::HashMap<String, String> = state.recorder.names.lock().unwrap().iter().cloned().collect();
     let history = state.recorder.history.lock().unwrap();
-    let entries: Vec<_> = history.entries(from, now_ms()).into_iter().filter(|e| e.t < to).collect();
-    if entries.is_empty() {
+    let entries = history.range(from, to, now_ms());
+    if history.reading_count(&entries) == 0.0 {
         return "No readings in that stretch; the server may have been off.".into();
     }
     let series: Vec<(&str, String, Format)> = match service {

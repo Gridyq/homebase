@@ -51,7 +51,6 @@
     "web": "expo start --web",
     "lint": "expo lint",
     "publish-update": "node scripts/publish-update.mjs",
-    "update-server": "cd update-server-rs && cargo run --release -q",
     "status-server": "cd status-server-rs && cargo run --release -q --"
   },
   "private": true

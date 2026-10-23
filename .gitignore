@@ -55,6 +55,7 @@ example
 /status-server/history.json.tmp
 /status-server/history.json.old
 /status-server/history-*.jsonl*
+/status-server/history.db*
 /status-server/events.jsonl*
 /status-server/power.json
 /status-server/game-mode.json

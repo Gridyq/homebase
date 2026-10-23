@@ -50,6 +50,8 @@ const SYSTEM_SERIES: &[(&str, &str)] = &[
     ("pressureMemory", "pmem"),
     ("pressureIo", "pio"),
     ("converting", "conv"),
+    ("streams", "play"),
+    ("transcodes", "tc"),
 ];
 
 /// When counters were last read, and their values (received, sent) by what they belong to.
@@ -92,6 +94,9 @@ pub struct Recorder {
     peers: Mutex<Peers>,
     /// Service id and name, as of the last reading.
     pub names: Mutex<Vec<(String, String)>>,
+    /// Held from reading the services to comparing them with the last reading, so an older
+    /// reading is never compared after a newer one.
+    services_check: tokio::sync::Mutex<()>,
 }
 
 impl Recorder {
@@ -103,6 +108,7 @@ impl Recorder {
             net: Mutex::default(),
             peers: Mutex::default(),
             names: Mutex::default(),
+            services_check: Default::default(),
         }
     }
 
@@ -186,7 +192,7 @@ async fn send(state: &State, notices: Vec<Notice>) {
     }
 }
 
-async fn refresh_drives(state: &State) {
+pub async fn refresh_drives(state: &State) {
     match read_drives().await {
         Ok(drives) => *state.recorder.drives.lock().unwrap() = (Arc::new(drives), None),
         Err(e) => {
@@ -201,6 +207,42 @@ async fn check_journal(state: &State) {
     let journal = read_memory_kills(since).await;
     let pods = state.usage.pods.get().await.unwrap_or_default();
     let notices = state.recorder.events.lock().unwrap().note_memory_kills(&journal, since, &pods);
+    send(state, notices).await;
+}
+
+/// Logs what changed among the services since the last look and returns what to say about it.
+fn note_services(state: &State, list: &[crate::services::Service], now: i64) -> Vec<Notice> {
+    let seen: Vec<Seen> = list
+        .iter()
+        .map(|s| Seen {
+            id: s.id.clone(),
+            name: s.name.clone(),
+            state: s.state.to_owned(),
+            since: s.since,
+            restarts: s.restarts.unwrap_or(0),
+            detail: s.detail.clone(),
+        })
+        .collect();
+    let game_mode = state.game_mode.state();
+    let notices = state.recorder.events.lock().unwrap().note_service_changes(&seen, now, &game_mode);
+    *state.recorder.names.lock().unwrap() = list.iter().map(|s| (s.id.clone(), s.name.clone())).collect();
+    notices
+}
+
+/// A service changed, says systemd: looks at them all again now rather than at the next reading.
+pub async fn check_services(state: &State) {
+    let check = state.recorder.services_check.lock().await;
+    state.services.expire(&state.usage);
+    let list = match crate::services::list(&state.services, &state.usage).await {
+        Ok(list) => list,
+        Err(e) => {
+            eprintln!("Checking the services failed: {}", e.1);
+            return;
+        }
+    };
+    let notices = note_services(state, &list, now_ms());
+    drop(check);
+    state.live.status_changed.notify_one();
     send(state, notices).await;
 }
 
@@ -376,10 +418,12 @@ async fn record(state: &State) -> Result<(), HttpError> {
             cpu_clocks(),
         )
     });
+    let check = state.recorder.services_check.lock().await;
     let (machine, list) = tokio::join!(machine, crate::services::list(&state.services, &state.usage));
-    let game_mode = state.game_mode.state();
     let (info, temps, gpu, gpu_sense, vram, press, clocks) = machine.map_err(|e| HttpError::internal(e.to_string()))?;
     let list = list?;
+    let notices = note_services(state, &list, now_ms());
+    drop(check);
     let pods = state.usage.pods.get().await.unwrap_or_default();
     let traffic = tokio::task::spawn_blocking(move || container_traffic(&pods))
         .await
@@ -388,19 +432,7 @@ async fn record(state: &State) -> Result<(), HttpError> {
     let conv = Some(state.conversions.converting());
 
     let now = now_ms();
-    let seen: Vec<Seen> = list
-        .iter()
-        .map(|s| Seen {
-            id: s.id.clone(),
-            name: s.name.clone(),
-            state: s.state.to_owned(),
-            since: s.since,
-            restarts: s.restarts.unwrap_or(0),
-            detail: s.detail.clone(),
-        })
-        .collect();
-    let notices = state.recorder.events.lock().unwrap().note_service_changes(&seen, now, &game_mode);
-    *state.recorder.names.lock().unwrap() = list.iter().map(|s| (s.id.clone(), s.name.clone())).collect();
+    let (streams, transcodes) = state.jellyfin.counts();
 
     let mut a: Vec<(String, f64)> = Vec::new();
     let mut put = |key: String, v: Option<f64>| {
@@ -445,6 +477,8 @@ async fn record(state: &State) -> Result<(), HttpError> {
             put(key.into(), press.get(name).and_then(Value::as_f64));
         }
         put("conv".into(), conv);
+        put("play".into(), Some(streams));
+        put("tc".into(), Some(transcodes));
         let drives = Arc::clone(&state.recorder.drives.lock().unwrap().0);
         for d in drives.iter() {
             if let Some(r) = d.device.as_ref().and_then(|dev| rates.disks.get(dev)) {
@@ -539,8 +573,8 @@ pub async fn history_handler(AxumState(state): AxumState<State>, Query(q): Query
         )
     };
     let history = state.recorder.history.lock().unwrap();
-    let entries = history.entries(start, end);
-    let summary = history.summarize(&entries, &series, start, end, HISTORY_POINTS);
+    let range = history.range(start, end, end);
+    let summary = tokio::task::block_in_place(|| history.summarize(&range, &series, start, end, HISTORY_POINTS));
     let events: Vec<Value> = state
         .recorder
         .events
@@ -567,7 +601,7 @@ pub async fn reliability_handler(AxumState(state): AxumState<State>, Query(q): Q
     let names = state.recorder.names.lock().unwrap().clone();
     let history = state.recorder.history.lock().unwrap();
     let events = state.recorder.events.lock().unwrap();
-    Ok(Json(reliability(&events, &history, &names, range, now_ms())))
+    Ok(Json(tokio::task::block_in_place(|| reliability(&events, &history, &names, range, now_ms()))))
 }
 
 /// Traffic over the range: the machine's, each service's and each Tailscale device's.
@@ -584,13 +618,17 @@ pub async fn network_handler(AxumState(state): AxumState<State>, Query(q): Query
     };
 
     let history = state.recorder.history.lock().unwrap();
-    let entries = history.entries(start, end);
-    let machine = history.summarize(&entries, &[("rx", "rx".into()), ("tx", "tx".into())], start, end, HISTORY_POINTS);
-    let rx = history.totals(&entries, |k| between(k, "s:", ":rx"));
-    let tx = history.totals(&entries, |k| between(k, "s:", ":tx"));
-    let peer_rx = history.totals(&entries, |k| between(k, "t:", ":rx"));
-    let peer_tx = history.totals(&entries, |k| between(k, "t:", ":tx"));
-    let oldest = history.oldest(end);
+    let (machine, rx, tx, peer_rx, peer_tx, oldest) = tokio::task::block_in_place(|| {
+        let range = history.range(start, end, end);
+        (
+            history.summarize(&range, &[("rx", "rx".into()), ("tx", "tx".into())], start, end, HISTORY_POINTS),
+            history.totals(&range, |k| between(k, "s:", ":rx")),
+            history.totals(&range, |k| between(k, "s:", ":tx")),
+            history.totals(&range, |k| between(k, "t:", ":rx")),
+            history.totals(&range, |k| between(k, "t:", ":tx")),
+            history.oldest(end),
+        )
+    });
     drop(history);
 
     let net = state.recorder.net.lock().unwrap();

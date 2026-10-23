@@ -394,6 +394,8 @@ pub struct StatusOut {
     disks: Vec<Disk>,
     services: Vec<Service>,
     game_mode: serde_json::Value,
+    /// What Jellyfin is playing, as `/api/jellyfin/sessions` lists it.
+    streams: Vec<serde_json::Value>,
     at: i64,
 }
 
@@ -467,6 +469,7 @@ pub async fn read(state: &State) -> Result<StatusOut, HttpError> {
         disks: machine.disks,
         services,
         game_mode,
+        streams: state.jellyfin.sessions().to_vec(),
         at: now_ms(),
     })
 }

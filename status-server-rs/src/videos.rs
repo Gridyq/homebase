@@ -19,6 +19,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 
 use crate::events::{Notice, notify};
 use crate::http::{HttpError, State};
+use crate::jellyfin::JELLYFIN_URL;
 use crate::usage::now_ms;
 
 const VIDEO_KEEP: usize = 50;
@@ -26,7 +27,6 @@ const VIDEO_QUALITIES: [i64; 3] = [1080, 720, 480];
 /// YouTube changes often enough that yt-dlp needs updating every few weeks to keep working.
 const YTDLP_UPDATE_EVERY: Duration = Duration::from_secs(24 * 3600);
 /// Jellyfin runs in a container that sees the media drive somewhere else.
-const JELLYFIN_URL: &str = "http://127.0.0.1:8096";
 const JELLYFIN_MEDIA: (&str, &str) = ("/mnt/media", "/media/drive");
 
 type Job = Map<String, Value>;
@@ -529,15 +529,7 @@ async fn finish(state: &State, id: &str, code: i32, failure: Option<String>) {
 /// Tells Jellyfin about new files rather than waiting for its folder watcher, which can take
 /// minutes. Borrows Seerr's API key for Jellyfin.
 async fn announce_to_jellyfin(state: &State, files: &[String]) {
-    let arr = std::env::var("ARR_DIR").map_or_else(
-        |_| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/share/arr"),
-        PathBuf::from,
-    );
-    let key = std::fs::read_to_string(arr.join("seerr/settings.json"))
-        .ok()
-        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
-        .and_then(|s| s["jellyfin"]["apiKey"].as_str().map(str::to_owned));
-    let Some(key) = key else {
+    let Some(key) = crate::jellyfin::api_key() else {
         eprintln!("Couldn't tell Jellyfin about new videos: no API key in Seerr settings");
         return;
     };

@@ -11,7 +11,7 @@ import { conversions, retryConversions, setConversionsPaused, type Conversions }
 import { displayName, formatEta } from '@/miniapps/requests/components';
 import { Card, formatBytes, formatWhen, Meter, Section, StatTile, StatusColors } from '@/miniapps/server/components';
 import { useServerConnection } from '@/miniapps/server/connection';
-import { usePolling } from '@/miniapps/server/use-polling';
+import { useLive } from '@/miniapps/server/use-live';
 
 const POLL_MS = 5000;
 
@@ -21,7 +21,7 @@ export default function ConversionsScreen() {
   const conn = connection!;
   const theme = useTheme();
   const gutter = useGutter();
-  const { data, error, refresh } = usePolling(() => conversions(conn), POLL_MS, conn.url);
+  const { data, error, refresh } = useLive(conn, 'conversions', () => conversions(conn), POLL_MS);
   const [override, setOverride] = useState<Conversions>();
   const [busy, setBusy] = useState(false);
   const [retrying, setRetrying] = useState(false);
@@ -66,6 +66,8 @@ export default function ConversionsScreen() {
 
   const state = shown.gameMode
     ? 'Waiting for game mode to end'
+    : shown.heldFor
+    ? `Waiting while Jellyfin transcodes for ${shown.heldFor}`
     : shown.paused
     ? workers.length
       ? 'Pausing after the current file'
@@ -119,7 +121,7 @@ export default function ConversionsScreen() {
         <View
           style={[
             styles.dot,
-            { backgroundColor: shown.paused || shown.gameMode ? StatusColors.warn : workers.length ? StatusColors.good : StatusColors.idle },
+            { backgroundColor: shown.paused || shown.gameMode || shown.heldFor ? StatusColors.warn : workers.length ? StatusColors.good : StatusColors.idle },
           ]}
         />
         <ThemedText type="smallBold" style={styles.flex}>
@@ -143,7 +145,11 @@ export default function ConversionsScreen() {
                 </ThemedText>
                 <Meter fraction={w.percent / 100} color={StatusColors.good} />
                 <ThemedText type="small" themeColor="textSecondary" style={styles.caption}>
-                  {[`${Math.round(w.percent)}%`, formatEta(w.eta), w.fps ? `${Math.round(w.fps)} fps` : undefined]
+                  {[
+                    `${Math.round(w.percent)}%`,
+                    w.heldFor ? 'Paused for Jellyfin' : formatEta(w.eta),
+                    !w.heldFor && w.fps ? `${Math.round(w.fps)} fps` : undefined,
+                  ]
                     .filter(Boolean)
                     .join(' · ')}
                 </ThemedText>

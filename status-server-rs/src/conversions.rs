@@ -10,10 +10,12 @@
 //!   playback starts before the whole file loads.
 //!
 //! The new file replaces the original, then Sonarr or Radarr rescans the show or movie. The
-//! libraries are scanned every 5 minutes; what's been decided is kept in `conversions.json` by
-//! path, with the size and time the file had, so a changed file is looked at again. ffmpeg runs in
-//! a scope of its own with a low CPU and disk weight. Game mode stops it, and the file starts over
-//! afterwards.
+//! libraries are watched (inotify), and scanned once a file has had time to settle after a change,
+//! and every half hour besides; what's been decided is kept in `conversions.json` by path, with
+//! the size and time the file had, so a changed file is looked at again. ffmpeg runs in a scope of
+//! its own with a low CPU and disk weight. Game mode stops it, and the file starts over
+//! afterwards. While Jellyfin transcodes video for someone, ffmpeg is paused (SIGSTOP) and no new
+//! file is started, so the stream gets the GPU.
 
 use std::collections::BTreeMap;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -42,7 +44,8 @@ const LIBRARIES: &[(&str, &str)] = &[("Shows", "sonarr"), ("Movies", "radarr")];
 const EXTENSIONS: &[&str] = &[
     "mkv", "mp4", "mov", "m4v", "mpg", "mpeg", "avi", "flv", "webm", "wmv", "vob", "evo", "m2ts", "ts",
 ];
-const SCAN_EVERY: Duration = Duration::from_secs(5 * 60);
+/// In case the watch missed something, as it would a drive mounted over the libraries.
+const SCAN_EVERY: Duration = Duration::from_secs(30 * 60);
 /// A file is left alone until it's gone this long without changing, in case it's still being written.
 const SETTLE_MS: i64 = 2 * 60 * 1000;
 const QP: &str = "24";
@@ -132,6 +135,8 @@ struct Job {
     fps: f64,
     speed: f64,
     written: u64,
+    /// Paused while Jellyfin transcodes for this user.
+    held_for: Option<String>,
 }
 
 pub struct Conversions {
@@ -142,6 +147,8 @@ pub struct Conversions {
     work: Notify,
     /// Asks for a scan before the next one is due.
     rescan: Notify,
+    /// Something in the libraries changed; a scan follows once it has settled.
+    changed: Notify,
 }
 
 impl Conversions {
@@ -161,6 +168,7 @@ impl Conversions {
             job: Mutex::default(),
             work: Notify::new(),
             rescan: Notify::new(),
+            changed: Notify::new(),
         }
     }
 
@@ -472,6 +480,9 @@ async fn run_ffmpeg(state: &State, args: Vec<String>) -> Result<(), RunError> {
     let (mut out_open, mut err_open) = (true, true);
     let mut errors: Vec<String> = Vec::new();
     let mut check = tokio::time::interval(GAME_CHECK);
+    // With --scope, systemd-run becomes ffmpeg, so this is ffmpeg's.
+    let pid = child.id().map(|p| p as libc::pid_t);
+    let mut held = false;
     while out_open || err_open {
         tokio::select! {
             l = out.next_line(), if out_open => match l.ok().flatten() {
@@ -488,9 +499,21 @@ async fn run_ffmpeg(state: &State, args: Vec<String>) -> Result<(), RunError> {
                 Some(_) => {}
                 None => err_open = false,
             },
-            _ = check.tick() => if state.game_mode.active() {
-                let _ = child.kill().await;
-                return Err(RunError::Stopped);
+            _ = check.tick() => {
+                if state.game_mode.active() {
+                    let _ = child.kill().await;
+                    return Err(RunError::Stopped);
+                }
+                let hold = state.jellyfin.transcoding_for();
+                if let Some(pid) = pid && hold.is_some() != held {
+                    held = hold.is_some();
+                    println!("{} converting while Jellyfin transcodes", if held { "Paused" } else { "Resumed" });
+                    // SAFETY: signals the child this owns, which kill_on_drop reaps.
+                    unsafe { libc::kill(pid, if held { libc::SIGSTOP } else { libc::SIGCONT }) };
+                    if let Some(job) = state.conversions.job.lock().unwrap().as_mut() {
+                        job.held_for = hold;
+                    }
+                }
             },
         }
     }
@@ -579,6 +602,7 @@ async fn convert(state: &State, path: &str) -> Outcome {
         fps: 0.0,
         speed: 0.0,
         written: 0,
+        held_for: None,
     });
     println!("Converting ({action:?}) {path}");
     let mut gpu_decode = gpu_decodes(&video);
@@ -687,9 +711,9 @@ async fn record(state: &State, path: &str, outcome: Outcome) {
     }
 }
 
-/// The next file to convert, unless it's paused or game mode is on.
+/// The next file to convert, unless it's paused, game mode is on or Jellyfin is transcoding.
 fn next(state: &State) -> Option<String> {
-    if state.game_mode.active() {
+    if state.game_mode.active() || state.jellyfin.transcoding_for().is_some() {
         return None;
     }
     let saved = state.conversions.saved.lock().unwrap();
@@ -699,7 +723,74 @@ fn next(state: &State) -> Option<String> {
     saved.files.iter().find(|(_, e)| e.verdict == Verdict::Queued).map(|(p, _)| p.clone())
 }
 
-/// Scans every 5 minutes, and converts what's queued one file at a time.
+/// Watches the libraries' folders for videos arriving, changing and going, on a thread of its own.
+fn watch_libraries(changed: impl Fn() + Send + 'static) {
+    use inotify::{Inotify, WatchMask};
+    let mask = WatchMask::CREATE | WatchMask::CLOSE_WRITE | WatchMask::MOVED_TO | WatchMask::MOVED_FROM | WatchMask::DELETE | WatchMask::ATTRIB;
+    std::thread::spawn(move || {
+        loop {
+            let result = (|| -> std::io::Result<()> {
+                let mut inotify = Inotify::init()?;
+                type Dirs = std::collections::HashMap<inotify::WatchDescriptor, PathBuf>;
+                let mut dirs = Dirs::default();
+                /// Watches `dir`, then the folders in it, so one made in between isn't missed.
+                fn add(inotify: &mut Inotify, dirs: &mut Dirs, dir: &Path, mask: WatchMask) {
+                    match inotify.watches().add(dir, mask) {
+                        Ok(wd) => {
+                            dirs.insert(wd, dir.to_owned());
+                        }
+                        Err(e) => {
+                            eprintln!("Couldn't watch {}: {e}", dir.display());
+                            return;
+                        }
+                    }
+                    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+                        if !entry.file_name().to_string_lossy().starts_with('.') && entry.file_type().is_ok_and(|t| t.is_dir()) {
+                            add(inotify, dirs, &entry.path(), mask);
+                        }
+                    }
+                }
+                for (library, _) in LIBRARIES {
+                    add(&mut inotify, &mut dirs, &media_root().join(library), mask);
+                }
+                println!("Watching the libraries ({} folders)", dirs.len());
+                let mut buffer = [0; 8192];
+                loop {
+                    let mut new_dirs = Vec::new();
+                    let mut relevant = false;
+                    for event in inotify.read_events_blocking(&mut buffer)? {
+                        let Some(name) = event.name.map(|n| n.to_string_lossy().into_owned()) else {
+                            continue;
+                        };
+                        if name.starts_with('.') {
+                            continue;
+                        }
+                        let is_dir = event.mask.contains(inotify::EventMask::ISDIR);
+                        if is_dir && event.mask.intersects(inotify::EventMask::CREATE | inotify::EventMask::MOVED_TO)
+                            && let Some(parent) = dirs.get(&event.wd)
+                        {
+                            new_dirs.push(parent.join(&name));
+                        }
+                        relevant |= is_dir || EXTENSIONS.contains(&extension(&name).as_str());
+                    }
+                    for d in new_dirs {
+                        add(&mut inotify, &mut dirs, &d, mask);
+                    }
+                    if relevant {
+                        changed();
+                    }
+                }
+            })();
+            if let Err(e) = result {
+                eprintln!("Watching the libraries failed: {e}");
+            }
+            std::thread::sleep(Duration::from_secs(5 * 60));
+        }
+    });
+}
+
+/// Scans when the libraries change and every half hour, and converts what's queued one file at a
+/// time.
 pub fn start(state: State) {
     tokio::spawn(async move {
         // A conversion left running by the last server is in its own scope, so it outlived it.
@@ -710,12 +801,22 @@ pub fn start(state: State) {
         }
         let _ = std::fs::remove_dir_all(cache_dir());
         let scanner = state.clone();
+        let watcher = state.clone();
+        watch_libraries(move || watcher.conversions.changed.notify_one());
         tokio::spawn(async move {
+            // A file is only looked at once it has gone this long unchanged.
+            let settle = Duration::from_millis(SETTLE_MS as u64) + Duration::from_secs(5);
             loop {
                 scan(&scanner).await;
-                tokio::select! {
-                    _ = tokio::time::sleep(SCAN_EVERY) => {}
-                    _ = scanner.conversions.rescan.notified() => {}
+                let mut due = tokio::time::Instant::now() + SCAN_EVERY;
+                loop {
+                    tokio::select! {
+                        _ = tokio::time::sleep_until(due) => break,
+                        _ = scanner.conversions.rescan.notified() => break,
+                        _ = scanner.conversions.changed.notified() => {
+                            due = due.min(tokio::time::Instant::now() + settle);
+                        }
+                    }
                 }
             }
         });
@@ -754,7 +855,7 @@ fn eta(seconds: f64) -> String {
     format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60)
 }
 
-fn summary(state: &State) -> Value {
+pub fn summary(state: &State) -> Value {
     let saved = state.conversions.saved.lock().unwrap();
     let (mut queued, mut done, mut skipped, mut failed) = (0, 0, 0, 0);
     let mut saved_bytes = 0.0;
@@ -826,12 +927,18 @@ fn summary(state: &State) -> Value {
             if fraction > 0.01 {
                 m.insert("estSize".into(), json!((j.written as f64 / fraction).round()));
             }
+            if let Some(user) = &j.held_for {
+                m.insert("heldFor".into(), json!(user));
+            }
             Value::Object(m)
         })
         .collect();
+    // Who Jellyfin is transcoding for, when that's holding the conversions up.
+    let held_for = state.jellyfin.transcoding_for().filter(|_| !saved.paused && (queued > 0 || !workers.is_empty()));
     json!({
         "paused": saved.paused,
         "gameMode": state.game_mode.active(),
+        "heldFor": held_for,
         "workers": workers,
         "counts": { "queued": queued, "done": done, "skipped": skipped, "failed": failed },
         "savedBytes": saved_bytes,

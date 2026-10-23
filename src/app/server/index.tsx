@@ -8,7 +8,7 @@ import { Spacing } from '@/constants/theme';
 import { useGutter } from '@/hooks/use-gutter';
 import { useTheme } from '@/hooks/use-theme';
 import { Centered } from '@/miniapps/jellyfin/components';
-import { fetchStatus, setGameMode, type Connection, type Status } from '@/miniapps/server/api';
+import { fetchStatus, setGameMode, type Connection, type Status, type Stream } from '@/miniapps/server/api';
 import {
   Card,
   diskName,
@@ -25,7 +25,7 @@ import {
   StatusColors,
 } from '@/miniapps/server/components';
 import { useServerConnection } from '@/miniapps/server/connection';
-import { usePolling } from '@/miniapps/server/use-polling';
+import { useLive } from '@/miniapps/server/use-live';
 
 const POLL_MS = 3000;
 const HOT_CELSIUS = 80;
@@ -72,7 +72,7 @@ function Dashboard() {
   const conn = connection!;
   const theme = useTheme();
   const gutter = useGutter();
-  const { data, error, stale, refresh } = usePolling(() => fetchStatus(conn), POLL_MS, conn.url);
+  const { data, error, stale, refresh } = useLive(conn, 'status', () => fetchStatus(conn), POLL_MS);
   const [pulled, setPulled] = useState(false);
 
   if (!data) {
@@ -160,6 +160,16 @@ function Dashboard() {
         </View>
       ) : null}
 
+      {data.streams?.length ? (
+        <Section title="Now playing">
+          <Card>
+            {data.streams.map((s, i) => (
+              <StreamRow key={s.id} stream={s} first={i === 0} />
+            ))}
+          </Card>
+        </Section>
+      ) : null}
+
       <GameModeCard conn={conn} status={data} onChanged={refresh} />
 
       <Section title="Analytics">
@@ -225,6 +235,48 @@ function Dashboard() {
   );
 }
 
+const METHOD_LABELS: Record<Stream['method'], string> = {
+  direct: 'Direct play',
+  stream: 'Direct stream',
+  transcode: 'Transcoding',
+};
+
+/** "Show S1E2 · Title" or "Movie (2019)". */
+function streamTitle(s: Stream) {
+  if (s.show) return `${s.show}${s.episode ? ` ${s.episode}` : ''} · ${s.title}`;
+  return s.year ? `${s.title} (${s.year})` : s.title;
+}
+
+function streamMethod(s: Stream) {
+  const t = s.transcode;
+  if (s.method !== 'transcode' || !t) return METHOD_LABELS[s.method];
+  const what = t.video ? `Transcoding to ${t.videoCodec ?? 'video'}${t.hardware ? ` (${t.hardware})` : ' on the CPU'}` : 'Transcoding audio';
+  return t.reasons.length ? `${what}: ${t.reasons.join(', ')}` : what;
+}
+
+function StreamRow({ stream: s, first }: { stream: Stream; first: boolean }) {
+  const theme = useTheme();
+  const progress = s.positionMs !== undefined && s.runtimeMs ? s.positionMs / s.runtimeMs : undefined;
+  const who = [s.user, s.device ?? s.client].filter(Boolean).join(' on ');
+  return (
+    <View
+      style={[
+        styles.stream,
+        !first && { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: theme.backgroundSelected },
+      ]}>
+      <ThemedText type="smallBold" numberOfLines={1}>
+        {streamTitle(s)}
+      </ThemedText>
+      <ThemedText type="small" themeColor="textSecondary" numberOfLines={2}>
+        {[who, s.paused ? 'Paused' : undefined, streamMethod(s)].filter(Boolean).join(' · ')}
+      </ThemedText>
+      {progress !== undefined ? (
+        <Meter fraction={progress} color={s.method === 'transcode' && s.transcode?.video ? StatusColors.warn : StatusColors.good} />
+      ) : null}
+    </View>
+  );
+}
+
 function GameModeCard({ conn, status, onChanged }: { conn: Connection; status: Status; onChanged: () => Promise<void> }) {
   const theme = useTheme();
   // The value being switched to while the server stops or starts everything.
@@ -232,7 +284,7 @@ function GameModeCard({ conn, status, onChanged }: { conn: Connection; status: S
   const { gameMode } = status;
   const on = pending ?? gameMode.on;
 
-  const toggle = async (next: boolean) => {
+  const change = async (next: boolean) => {
     setPending(next);
     try {
       await setGameMode(conn, next);
@@ -242,6 +294,22 @@ function GameModeCard({ conn, status, onChanged }: { conn: Connection; status: S
     } finally {
       setPending(undefined);
     }
+  };
+
+  // Jellyfin keeps running in game mode, so whoever's watching carries on, but a transcode shares
+  // the graphics card with the game.
+  const toggle = (next: boolean) => {
+    const watching = (status.streams ?? []).filter((s) => !s.paused);
+    if (!next || !watching.length) return change(next);
+    const transcoding = watching.filter((s) => s.transcode?.video);
+    const names = watching.map((s) => `${s.user} is watching ${streamTitle(s)}`).join('\n');
+    const note = transcoding.length
+      ? 'Jellyfin keeps transcoding during game mode, so the game shares the graphics card with it.'
+      : "They play directly, so the game won't notice them.";
+    Alert.alert('Someone is watching', `${names}\n\n${note}`, [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Turn on', onPress: () => change(true) },
+    ]);
   };
 
   let caption: string;
@@ -278,6 +346,10 @@ function GameModeCard({ conn, status, onChanged }: { conn: Connection; status: S
 }
 
 const styles = StyleSheet.create({
+  stream: {
+    gap: Spacing.one,
+    paddingVertical: Spacing.two + Spacing.one,
+  },
   gameRow: {
     flexDirection: 'row',
     alignItems: 'center',

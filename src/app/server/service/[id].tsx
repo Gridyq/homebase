@@ -32,6 +32,7 @@ import {
 import { useServerConnection } from '@/miniapps/server/connection';
 import { EventRow, useEventMarkers } from '@/miniapps/server/events';
 import { HistoryNote, RANGES, rangeName, TrendCard } from '@/miniapps/server/trends';
+import { useLive } from '@/miniapps/server/use-live';
 import { usePolling } from '@/miniapps/server/use-polling';
 
 const POLL_MS = 3000;
@@ -53,7 +54,7 @@ export default function ServiceScreen() {
   const theme = useTheme();
   const gutter = useGutter();
   const colors = useSeriesColors();
-  const status = usePolling(() => fetchStatus(conn), POLL_MS, conn.url);
+  const status = useLive(conn, 'status', () => fetchStatus(conn), POLL_MS);
   const [range, setRange] = useState(RANGES[0].value);
   const history = usePolling(
     () => fetchServiceHistory(conn, range, id),

@@ -33,14 +33,6 @@ pub struct Unit {
 
 pub const UNITS: &[Unit] = &[
     Unit {
-        id: "homebase-updates",
-        name: "Homebase updates",
-        unit: "homebase-updates.service",
-        runs: None,
-        system: false,
-        this_server: false,
-    },
-    Unit {
         id: "homebase-status",
         name: "Homebase status",
         unit: "homebase-status.service",

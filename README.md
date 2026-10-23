@@ -46,13 +46,9 @@ foreground, then shows "Update ready. Tap to restart" on the launcher.
 npm run publish-update
 ```
 
-- The server is a Rust program in `update-server-rs/` that serves `update-server/`. It runs as a
-  systemd user service, `systemctl --user status homebase-updates`, running
-  `~/.local/bin/homebase-updates`. To deploy a change: `cargo build --release` in
-  `update-server-rs/` (build output goes to `~/.cache/homebase-updates-rs`), copy
-  `release/homebase-updates` from there to `~/.local/bin/`, and
-  `systemctl --user restart homebase-updates`.
-  It listens on port 8787, and the app reaches it at `fedora.tail27f991.ts.net` (Tailscale).
+- The status server (below) serves `update-server/` on a port of its own, 8787, which is the
+  address built into the app (`fedora.tail27f991.ts.net`, over Tailscale). The code is
+  `status-server-rs/src/updates.rs`; until 2026-10-23 it was a server of its own.
   Without Tailscale the app keeps running the last update it downloaded.
 - Updates are signed with `update-server/keys/private-key.pem`, which is git-ignored. The app
   rejects anything not signed with it. Back that key up: if it's lost, you need a new build
@@ -70,11 +66,19 @@ npm run publish-update
 
 ## Server mini-app
 
-Shows CPU, memory, GPU, network, temperatures, disks, and the Podman containers and systemd units
-on the home server, and can start, stop and restart them. The data comes from the status server,
-a Rust program in `status-server-rs/` that keeps its files in `status-server/`. It also serves the
-Requests, Drop, Videos and Assistant mini-apps, and sends an ntfy message when a disk passes 90%, a sensor passes 90°C, a service fails,
-crashes or is killed for memory, or a drive's SMART health turns bad (and again when it recovers).
+Shows CPU, memory, GPU, network, temperatures, disks, what Jellyfin is playing (and whether it's
+transcoding, and why), and the Podman containers and systemd units on the home server, and can
+start, stop and restart them. The data comes from the status server, a Rust program in
+`status-server-rs/` that keeps its files in `status-server/`. It also serves the Requests, Drop,
+Videos and Assistant mini-apps and the over-the-air updates, and sends an ntfy message when a disk
+passes 90%, a sensor passes 90°C, a service fails, crashes or is killed for memory, or a drive's
+SMART health turns bad (and again when it recovers).
+
+The dashboard, service pages and Conversions screen keep a WebSocket open (`/api/live`) and update
+as things change, falling back to polling when it can't connect. Service changes come from
+systemd's D-Bus signals and drive changes from udisks', so they show within a couple of seconds;
+new files in the libraries are noticed through inotify. Conversions pause while Jellyfin transcodes
+video for someone, and the app warns before game mode while someone is watching.
 
 Analytics: Memory breaks RAM into programs, kernel and cache and lists every service and app by
 memory, CPU or disk traffic (from their cgroups, so cache is counted apart from what programs
@@ -90,9 +94,10 @@ service, with a timeline. Trends and each service, drive and device page chart u
 reboots, crashes and game mode marked.
 
 History is a reading every 15 seconds, kept a day, with averages kept longer: every 10 minutes for a
-week, hourly for a month and every 6 hours for a year. Each tier is `status-server/history-*.jsonl`
-and events are `status-server/events.jsonl` (all git-ignored), appended as they come and trimmed
-every few hours.
+week, hourly for a month and every 6 hours for a year. All of it is in `status-server/history.db`
+(SQLite, one row per series per entry), so a chart reads only the series and range it shows. Events
+are `status-server/events.jsonl` (all git-ignored), appended as they come and trimmed every few
+hours.
 
 - CPU power comes from the CPU's energy counter (RAPL), which only root can read. A udev rule
   lets the server's user read it, and only that user, since the counter is a known side channel

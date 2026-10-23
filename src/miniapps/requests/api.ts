@@ -679,6 +679,8 @@ export type Conversions = {
   paused: boolean;
   /** Game mode stops converting until it's over. */
   gameMode?: boolean;
+  /** Who Jellyfin is transcoding for, while that holds the conversions up. */
+  heldFor?: string | null;
   workers: {
     file: string;
     show: boolean;
@@ -688,6 +690,8 @@ export type Conversions = {
     fps: number;
     oldSize: number;
     estSize: number;
+    /** Paused while Jellyfin transcodes for this user. */
+    heldFor?: string;
   }[];
   counts: { queued: number; done: number; skipped: number; failed: number };
   savedBytes: number;

@@ -62,6 +62,43 @@ export type GameMode = {
   services: string[];
 };
 
+/** Something Jellyfin is playing, as the server reads it from Jellyfin's sessions. */
+export type Stream = {
+  id: string;
+  user: string;
+  /** The app, such as "Jellyfin Roku". */
+  client?: string;
+  device?: string;
+  /** The episode's or the movie's. */
+  title: string;
+  /** Jellyfin's item type: Episode, Movie… */
+  kind: string;
+  show?: string;
+  /** "S1E2". */
+  episode?: string;
+  year?: number;
+  paused: boolean;
+  positionMs?: number;
+  runtimeMs?: number;
+  /** Played as it is, repackaged, or re-encoded on the server. */
+  method: 'direct' | 'stream' | 'transcode';
+  transcode?: {
+    /** Whether the video (the expensive part) or just the audio is re-encoded. */
+    video: boolean;
+    audio: boolean;
+    videoCodec?: string;
+    audioCodec?: string;
+    container?: string;
+    /** "vaapi" when the graphics card does it. */
+    hardware?: string;
+    bitrate?: number;
+    fps?: number;
+    progress?: number;
+    /** Why, in words: "video codec not supported". */
+    reasons: string[];
+  };
+};
+
 export type Status = {
   host: { name: string; uptimeSec: number; kernel: string };
   /** Usage is 0–1, or missing for the first couple of seconds after the server starts. */
@@ -73,6 +110,8 @@ export type Status = {
   disks: Disk[];
   services: Service[];
   gameMode: GameMode;
+  /** Missing from servers older than 2026-10-23. */
+  streams?: Stream[];
   at: number;
 };
 

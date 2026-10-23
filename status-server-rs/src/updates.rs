@@ -1,22 +1,24 @@
-//! Self-hosted update server for Homebase, implementing the Expo Updates protocol v1 (iOS only).
-//! Replaced the Node server that was in `update-server/server.mjs`, and keeps serving that folder:
+//! The OTA update server, implementing the Expo Updates protocol v1 (iOS only). It was a server
+//! of its own (`update-server-rs/`, before that `update-server/server.mjs`) until 2026-10-23, and
+//! still answers on its own port, 8787, since that's the address built into the app. It serves
+//! `update-server/`:
 //!
 //!   keys/private-key.pem               signs manifests; the app only accepts updates signed with it
 //!   updates/<runtimeVersion>/<ms>/     one `expo export` output per update, newest wins
 //!
-//! Publish with `npm run publish-update` from the project root. Only loopback and Tailscale
-//! addresses are answered, in case the firewall ever opens the port to the home network.
+//! Publish with `npm run publish-update` from the project root. Like the rest of the server, only
+//! loopback and Tailscale addresses are answered, and nothing but GET.
 //!
 //! Spec: https://docs.expo.dev/technical-specs/expo-updates-1/
 
 use std::collections::HashMap;
 use std::io::Write;
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use axum::Router;
-use axum::extract::{ConnectInfo, Query, Request, State};
+use axum::extract::{ConnectInfo, Query, Request, State as AxumState};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -27,6 +29,8 @@ use md5::Digest;
 use ring::rand::SystemRandom;
 use ring::signature::{RSA_PKCS1_SHA256, RsaKeyPair};
 use serde_json::{Value, json};
+
+use crate::http::{State, allowed_peer};
 
 const KEY_ID: &str = "main";
 
@@ -47,7 +51,7 @@ const MIME: &[(&str, &str)] = &[
     ("mp4", "video/mp4"),
 ];
 
-struct Server {
+pub struct Updates {
     updates_dir: PathBuf,
     key_path: PathBuf,
     key: OnceLock<RsaKeyPair>,
@@ -62,50 +66,54 @@ struct CachedManifest {
     json: Arc<String>,
 }
 
-type Shared = Arc<Server>;
-
-#[tokio::main]
-async fn main() {
-    let port: u16 = std::env::var("PORT")
-        .unwrap_or_else(|_| "8787".into())
-        .parse()
-        .expect("PORT must be a port number");
-    // `update-server/` beside this crate, without a `..`: the service's sandbox only shows that folder.
-    let root = std::env::var_os("UPDATE_SERVER_DIR").map_or_else(
-        || {
-            Path::new(env!("CARGO_MANIFEST_DIR"))
-                .parent()
-                .expect("crate has a parent folder")
-                .join("update-server")
-        },
-        PathBuf::from,
-    );
-    if !root.join("updates").is_dir() {
-        eprintln!("No updates folder in {}", root.display());
+impl Updates {
+    pub fn new() -> Self {
+        // `update-server/` beside this crate.
+        let root = std::env::var_os("UPDATE_SERVER_DIR").map_or_else(
+            || {
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .expect("crate has a parent folder")
+                    .join("update-server")
+            },
+            PathBuf::from,
+        );
+        if !root.join("updates").is_dir() {
+            eprintln!("No updates folder in {}", root.display());
+        }
+        Self {
+            updates_dir: root.join("updates"),
+            key_path: root.join("keys").join("private-key.pem"),
+            key: OnceLock::new(),
+            manifest: Mutex::new(None),
+        }
     }
-    let server = Arc::new(Server {
-        updates_dir: root.join("updates"),
-        key_path: root.join("keys").join("private-key.pem"),
-        key: OnceLock::new(),
-        manifest: Mutex::new(None),
-    });
+}
 
+/// Listens on `UPDATES_PORT` (8787; empty for none) for the app's update checks.
+pub fn start(state: State) {
+    let port = std::env::var("UPDATES_PORT").unwrap_or_else(|_| "8787".into());
+    if port.is_empty() {
+        return;
+    }
+    let port: u16 = port.parse().expect("UPDATES_PORT must be a port number");
     let app = Router::new()
         .route("/api/manifest", get(manifest))
         .route("/api/assets", get(asset))
         .route("/health", get(|| async { text(StatusCode::OK, "ok") }))
         .fallback(|| async { text(StatusCode::NOT_FOUND, "Not found") })
         .layer(middleware::from_fn(require_allowed_peer))
-        .with_state(server);
-
-    // `::` also takes IPv4 connections.
-    let listener = tokio::net::TcpListener::bind((std::net::Ipv6Addr::UNSPECIFIED, port))
-        .await
-        .unwrap_or_else(|e| panic!("Couldn't listen on :{port}: {e}"));
-    println!("Homebase update server listening on :{port}");
-    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
-        .await
-        .expect("Server stopped");
+        .with_state(state);
+    tokio::spawn(async move {
+        // `::` also takes IPv4 connections.
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv6Addr::UNSPECIFIED, port))
+            .await
+            .unwrap_or_else(|e| panic!("Couldn't listen on :{port}: {e}"));
+        println!("Homebase updates listening on :{port}");
+        axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
+            .await
+            .expect("Update server stopped");
+    });
 }
 
 fn text(status: StatusCode, body: &'static str) -> Response {
@@ -127,20 +135,6 @@ fn protocol_headers() -> HeaderMap {
 
 fn header_str<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     headers.get(name).and_then(|v| v.to_str().ok())
-}
-
-/// Loopback, or Tailscale's 100.64.0.0/10 and fd7a:115c:a1e0::/48.
-fn allowed_peer(ip: IpAddr) -> bool {
-    match ip.to_canonical() {
-        IpAddr::V4(v4) => {
-            let [a, b, ..] = v4.octets();
-            v4.octets() == [127, 0, 0, 1] || (a == 100 && (64..=127).contains(&b))
-        }
-        IpAddr::V6(v6) => {
-            let s = v6.segments();
-            v6.is_loopback() || (s[0] == 0xfd7a && s[1] == 0x115c && s[2] == 0xa1e0)
-        }
-    }
 }
 
 async fn require_allowed_peer(ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request, next: Next) -> Response {
@@ -266,7 +260,7 @@ fn build_manifest(dir: &Path, update_id: &str, runtime_version: &str, base_url: 
     Ok(manifest.to_string())
 }
 
-impl Server {
+impl Updates {
     fn sign(&self, message: &[u8]) -> Result<String, String> {
         if self.key.get().is_none() {
             let pem = std::fs::read_to_string(&self.key_path).map_err(|e| format!("{}: {e}", self.key_path.display()))?;
@@ -321,7 +315,7 @@ fn multipart(parts: &[Part]) -> (String, String) {
     (format!("multipart/mixed; boundary={boundary}"), body)
 }
 
-async fn manifest(State(server): State<Shared>, ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap) -> Response {
+async fn manifest(AxumState(state): AxumState<State>, ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap) -> Response {
     if header_str(&headers, "expo-protocol-version") != Some("1") {
         return text(StatusCode::BAD_REQUEST, "Unsupported protocol version");
     }
@@ -337,6 +331,7 @@ async fn manifest(State(server): State<Shared>, ConnectInfo(peer): ConnectInfo<S
     let host = header_str(&headers, "host").unwrap_or("localhost").to_owned();
     let wants_signature = headers.contains_key("expo-expect-signature");
 
+    let server = Arc::clone(&state.updates);
     let result = tokio::task::spawn_blocking(move || {
         let Some((dir, update_id)) = latest_update(&server.updates_dir, &runtime_version) else {
             return Ok(None);
@@ -378,7 +373,8 @@ async fn manifest(State(server): State<Shared>, ConnectInfo(peer): ConnectInfo<S
     }
 }
 
-async fn asset(State(server): State<Shared>, Query(query): Query<HashMap<String, String>>, headers: HeaderMap) -> Response {
+async fn asset(AxumState(state): AxumState<State>, Query(query): Query<HashMap<String, String>>, headers: HeaderMap) -> Response {
+    let server = &state.updates;
     let get = |k: &str| query.get(k).map(String::as_str).unwrap_or_default();
     let (runtime, update, rel_path) = (get("runtime"), get("update"), get("path"));
     if !is_update_id(update) {
@@ -454,16 +450,6 @@ mod tests {
         assert_eq!(safe_join(base, "assets/abc"), Some(PathBuf::from("/u/assets/abc")));
         for bad in ["", "..", "../x", "a/../../x", "/etc/passwd", "./x"] {
             assert_eq!(safe_join(base, bad), None, "{bad}");
-        }
-    }
-
-    #[test]
-    fn peers() {
-        for ok in ["127.0.0.1", "::1", "::ffff:127.0.0.1", "100.64.0.1", "fd7a:115c:a1e0::1"] {
-            assert!(allowed_peer(ok.parse().unwrap()), "{ok}");
-        }
-        for no in ["127.0.0.2", "100.128.0.1", "192.168.1.5", "::ffff:192.168.1.5"] {
-            assert!(!allowed_peer(no.parse().unwrap()), "{no}");
         }
     }
 }
