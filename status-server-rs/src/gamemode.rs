@@ -21,7 +21,8 @@ use crate::kernel;
 use crate::usage::now_ms;
 
 /// In start order; systemd works out the rest from the units' own dependencies. The assistant's
-/// models hold several GB of video memory, so they stop too.
+/// models hold several GB of video memory, so they stop too. Conversions stop by themselves
+/// while game mode is on (see conversions.rs).
 pub const GAME_MODE_UNITS: &[&str] = &[
     "gluetun",
     "qbittorrent",
@@ -32,7 +33,6 @@ pub const GAME_MODE_UNITS: &[&str] = &[
     "recyclarr",
     "bazarr",
     "cleanuparr",
-    "tdarr",
     "seerr",
     "llama",
 ];

@@ -10,7 +10,7 @@
 //! that wasn't running. Keys:
 //!   cpu gpu (share busy), mem cache swap vram (bytes), rx tx (bytes/s), temp gtemp (°C),
 //!   cpow gpow (watts), clock (average core MHz), pcpu pmem pio (share of time stalled),
-//!   conv (files Tdarr is converting),
+//!   conv (files being converted to HEVC),
 //!   d:<drive>:r|w (bytes/s), d:<drive>:busy (share), d:<drive>:temp (°C),
 //!   s:<service>:mem (bytes), s:<service>:cpu (share), s:<service>:r|w|rx|tx (bytes/s),
 //!   t:<device>:rx|tx (bytes/s, as the server sees it: rx came from the device).

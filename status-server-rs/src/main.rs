@@ -1,5 +1,5 @@
 //! Status server for Homebase's mini-apps: the Server app's stats, services, history, drives and
-//! logs; game mode; the Requests app's Seerr, Sonarr and Radarr calls, qBittorrent and Tdarr;
+//! logs; game mode; the Requests app's Seerr, Sonarr and Radarr calls, qBittorrent, and converting the library;
 //! Drop; Videos; and the Assistant's chats with a local model. Replaced the Node server that was
 //! in `status-server/server.mjs`, and keeps its files in that folder: the token, history, events,
 //! chats and settings.
@@ -15,6 +15,7 @@ mod assistant_tools;
 mod cache;
 mod client;
 mod command;
+mod conversions;
 mod drives;
 mod drop;
 mod encoding;
@@ -70,6 +71,7 @@ async fn main() {
     recorder::start(state.clone());
     tokio::spawn(gamemode::start(state.clone()));
     media::start(state.clone());
+    conversions::start(state.clone());
     videos::start(state.clone());
     assistant::start(state.clone());
 
@@ -80,7 +82,9 @@ async fn main() {
         .route("/api/game-mode", get(gamemode::get).post(gamemode::set))
         .route("/api/qbittorrent/limit", get(media::speed_limit).post(media::set_speed_limit))
         .route("/api/qbittorrent/seeding", get(media::seeding).post(media::set_seeding))
-        .route("/api/tdarr", get(media::conversions).post(media::set_conversions_paused))
+        // /api/tdarr is what the app called it while Tdarr did the converting.
+        .route("/api/conversions", get(conversions::get).post(conversions::set))
+        .route("/api/tdarr", get(conversions::get).post(conversions::set))
         .route("/api/arr/{*rest}", any(media::arr))
         .route("/api/drop", get(drop::list))
         .route("/api/drop/text", post(drop::text))

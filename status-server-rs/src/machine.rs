@@ -235,7 +235,7 @@ const MEDIA_FOLDERS: &[(&str, &str, &str, usize)] = &[
     ("youtube", "YouTube", "Videos", 1),
     // tv/ and movies/ hold the torrents; list those rather than the two folders.
     ("downloads", "Downloads", "Downloads", 2),
-    ("conversions", ".tdarr-cache", "Conversion cache", 1),
+    ("conversions", ".conversions", "Conversion cache", 1),
     ("partial", ".youtube-partial", "Unfinished videos", 1),
     ("backups", "Backups", "Backups", 1),
     ("trash", ".Trash-1000", "Trash", 1),

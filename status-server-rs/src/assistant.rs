@@ -553,7 +553,7 @@ fn system_prompt(model: &Model) -> String {
     ];
     if model.tools {
         parts.extend([
-            "The PC is also the home server: Jellyfin, the Sonarr/Radarr/qBittorrent download stack, Tdarr and more, as Podman containers.".to_owned(),
+            "The PC is also the home server: Jellyfin, the Sonarr/Radarr/qBittorrent download stack and more; this server also converts the library to HEVC on the GPU, as Podman containers.".to_owned(),
             "For questions about it (slowness, crashes, what happened when, drives, what a service logged), look with the tools rather than guessing, then answer from what they show.".to_owned(),
             "Say what the data shows. When it doesn’t show why something happened, say so rather than guessing a cause.".to_owned(),
             format!("Times you pass to tools are the PC's local time, like {}. Don't use tools for questions that aren't about the server.", tool_time(now)),

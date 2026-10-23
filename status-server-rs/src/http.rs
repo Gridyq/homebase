@@ -27,6 +27,7 @@ pub struct State {
     pub machine: Arc<crate::machine::Machine>,
     pub game_mode: Arc<crate::gamemode::GameMode>,
     pub media: Arc<crate::media::Media>,
+    pub conversions: Arc<crate::conversions::Conversions>,
     pub videos: Arc<crate::videos::Videos>,
     pub assistant: Arc<crate::assistant::Assistant>,
 }
@@ -44,7 +45,8 @@ impl State {
             recorder: Arc::new(crate::recorder::Recorder::new(data_dir(&config))),
             machine: Arc::new(crate::machine::Machine::new(data_dir(&config))),
             game_mode: Arc::new(crate::gamemode::GameMode::new(data_dir(&config))),
-            media: Arc::new(crate::media::Media::new(upstream.clone())),
+            media: Arc::new(crate::media::Media::new()),
+            conversions: Arc::new(crate::conversions::Conversions::new(data_dir(&config))),
             videos: Arc::new(crate::videos::Videos::new(data_dir(&config))),
             assistant: Arc::new(crate::assistant::Assistant::new(data_dir(&config))),
             config,

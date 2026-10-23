@@ -190,7 +190,7 @@ const TOOL_SERIES: &[(&str, &str, Format)] = &[
     ("Upload", "tx", |v| mbits(Some(v))),
     ("CPU power", "cpow", watts),
     ("GPU power", "gpow", watts),
-    ("Files Tdarr is converting", "conv", |v| format!("{v:.1}")),
+    ("Files being converted to HEVC", "conv", |v| format!("{v:.1}")),
 ];
 const TOOL_SERVICE_SERIES: &[(&str, &str, Format)] = &[
     ("CPU (share of the whole machine)", "cpu", |v| pct(Some(v))),

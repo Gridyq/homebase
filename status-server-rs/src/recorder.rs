@@ -385,13 +385,7 @@ async fn record(state: &State) -> Result<(), HttpError> {
         .await
         .unwrap_or_default();
     sample_container_net(&mut state.recorder.net.lock().unwrap(), traffic);
-    // Nothing while Tdarr is stopped.
-    let tdarr_running = list.iter().any(|s| s.id == "container:tdarr" && s.state == "running");
-    let conv = if tdarr_running {
-        crate::media::converting(state).await
-    } else {
-        None
-    };
+    let conv = Some(state.conversions.converting());
 
     let now = now_ms();
     let seen: Vec<Seen> = list

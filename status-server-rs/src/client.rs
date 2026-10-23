@@ -1,4 +1,4 @@
-//! Calls to the services on this machine (Seerr, the *arrs, qBittorrent, Tdarr, ntfy, the model),
+//! Calls to the services on this machine (Seerr, the *arrs, qBittorrent, ntfy, the model),
 //! with a time limit, like Node's `fetch` with `AbortSignal.timeout`.
 
 use std::time::Duration;

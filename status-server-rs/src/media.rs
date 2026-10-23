@@ -1,12 +1,12 @@
 //! Media: the Requests mini-app talks to Seerr, Sonarr and Radarr through here, so their API keys
 //! stay on this machine. Keys are read from each app's own config on every call, so a rotated key
 //! just works. Only the calls the app makes are let through. Seerr only runs while it's used.
-//! qBittorrent's speed limit and seeding, and Tdarr's conversions, each have a small client of
-//! their own, since they log in rather than take a key.
+//! qBittorrent's speed limit and seeding have a small client of their own, since it logs in
+//! rather than taking a key.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::Json;
@@ -15,14 +15,12 @@ use axum::extract::{Request, State as AxumState};
 use axum::http::{HeaderValue, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use regex::Regex;
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 
 use crate::args;
-use crate::cache::Refreshed;
 use crate::client::Upstream;
 use crate::client::{Reply, call, form};
 use crate::command::run;
-use crate::history::num;
 use crate::http::{HttpError, State};
 use crate::machine::json_body;
 
@@ -32,7 +30,6 @@ const MAX_BODY: usize = 64 * 1024;
 const SEERR_UNIT: &str = "seerr.service";
 const SEERR_IDLE: Duration = Duration::from_secs(30 * 60);
 const SEERR_START_TIMEOUT: Duration = Duration::from_secs(90);
-const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
 
 fn arr_dir() -> PathBuf {
     std::env::var("ARR_DIR").map_or_else(
@@ -146,60 +143,14 @@ pub struct Media {
     seerr_last_used: Mutex<Instant>,
     seerr_starting: tokio::sync::Mutex<()>,
     qbit_cookie: Mutex<Option<String>>,
-    tdarr: Arc<Tdarr>,
-    /// Tdarr's file list carries every file's full probe and takes ~180 ms, so it's fetched at most
-    /// every 15 s, in the background while the last one is under 5 minutes old.
-    tdarr_files: Arc<TdarrFiles>,
 }
-
-/// What's kept of each file Tdarr knows; the rest of its entry is the file's full probe.
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct TdarrFile {
-    // Read as they come, so an odd entry doesn't spoil the list.
-    #[serde(default)]
-    file: Value,
-    #[serde(rename = "TranscodeDecisionMaker", default)]
-    decision: Value,
-    #[serde(default)]
-    old_size: Value,
-    #[serde(default)]
-    new_size: Value,
-    #[serde(default)]
-    last_transcode_date: Value,
-}
-
-type TakeFiles = Box<dyn Fn() -> std::pin::Pin<Box<dyn Future<Output = Result<Vec<TdarrFile>, String>> + Send>> + Send + Sync>;
-type TdarrFiles = Refreshed<Vec<TdarrFile>, TakeFiles>;
 
 impl Media {
-    pub fn new(upstream: Upstream) -> Self {
-        let tdarr = Arc::new(Tdarr {
-            upstream,
-            token: Mutex::new(None),
-        });
-        let for_files = Arc::clone(&tdarr);
-        let take: TakeFiles = Box::new(move || {
-            let t = Arc::clone(&for_files);
-            Box::pin(async move {
-                let reply = t
-                    .call_raw("cruddb", Some(json!({ "data": { "collection": "FileJSONDB", "mode": "getAll" } })))
-                    .await
-                    .map_err(|e| e.1)?;
-                // Read straight into what's kept: the whole list as JSON values is ~100 MB.
-                let files = serde_json::from_slice(&reply.body).map_err(|e| e.to_string());
-                drop(reply);
-                // SAFETY: malloc_trim only hands free memory back to the system.
-                unsafe { libc::malloc_trim(0) };
-                files
-            })
-        });
+    pub fn new() -> Self {
         Self {
             seerr_last_used: Mutex::new(Instant::now()),
             seerr_starting: Default::default(),
             qbit_cookie: Mutex::new(None),
-            tdarr,
-            tdarr_files: Refreshed::new("Listing Tdarr's files", Duration::from_secs(15), Duration::from_secs(5 * 60), take),
         }
     }
 }
@@ -618,212 +569,41 @@ async fn sort_tv_queue(state: &State) -> Result<(), HttpError> {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Tdarr converts the library to HEVC MP4s. It has its own login (the shared credentials) that
-// hands out a bearer token. The phone sees what's converting, what's done and what was saved,
-// and can pause the node; everything else stays in Tdarr's web UI.
+// After a conversion replaces a file, Sonarr or Radarr rescans its show or movie, so it knows the
+// new file rather than looking for the old one.
 
-struct Tdarr {
-    upstream: Upstream,
-    token: Mutex<Option<String>>,
-}
-
-fn tdarr_url() -> String {
-    std::env::var("TDARR_URL").unwrap_or_else(|_| "http://localhost:8265".into())
-}
-
-impl Tdarr {
-    async fn login(&self) -> Result<String, HttpError> {
-        let (Some(username), Some(password)) = (credential("username"), credential("password")) else {
-            return Err(status(503, "Tdarr's login isn't set up on the server"));
-        };
-        let body = json!({ "username": username, "password": password }).to_string();
-        let reply = call(
-            &self.upstream,
-            Method::POST,
-            &format!("{}/api/v2/public/auth/login", tdarr_url()),
-            &[("Content-Type", "application/json".to_owned())],
-            Some(body.into()),
-            Duration::from_secs(10),
-        )
-        .await
-        .map_err(|e| didnt_answer("Tdarr", &e))?;
-        let token = reply
-            .status
-            .is_success()
-            .then(|| serde_json::from_slice::<Value>(&reply.body).ok())
-            .flatten();
-        let token = token.and_then(|v| v["token"].as_str().map(str::to_owned)).filter(|t| !t.is_empty());
-        *self.token.lock().unwrap() = token.clone();
-        token.ok_or_else(|| status(502, "Tdarr didn't accept the login"))
-    }
-
-    async fn call(&self, api_path: &str, body: Option<Value>) -> Result<Value, HttpError> {
-        // Updates answer a plain "OK".
-        Ok(reply_value(&self.call_raw(api_path, body).await?))
-    }
-
-    async fn call_raw(&self, api_path: &str, body: Option<Value>) -> Result<Reply, HttpError> {
-        for attempt in 0..2 {
-            let saved = self.token.lock().unwrap().clone();
-            let token = match saved {
-                Some(t) => t,
-                None => self.login().await?,
-            };
-            let headers = [
-                ("Authorization", format!("Bearer {token}")),
-                ("Content-Type", "application/json".to_owned()),
-            ];
-            let method = if body.is_some() { Method::POST } else { Method::GET };
-            let reply = call(
-                &self.upstream,
-                method,
-                &format!("{}/api/v2/{api_path}", tdarr_url()),
-                &headers,
-                body.as_ref().map(|b| b.to_string().into()),
-                Duration::from_secs(30),
-            )
-            .await
-            .map_err(|e| didnt_answer("Tdarr", &e))?;
-            if matches!(reply.status.as_u16(), 401 | 403) && attempt == 0 {
-                *self.token.lock().unwrap() = None;
-                continue;
-            }
-            if !reply.status.is_success() {
-                return Err(status(502, format!("Tdarr answered {}", reply.status.as_u16())));
-            }
-            return Ok(reply);
-        }
-        unreachable!()
-    }
-}
-
-async fn tdarr(state: &State, api_path: &str, body: Option<Value>) -> Result<Value, HttpError> {
-    state.game_mode.error("Tdarr")?;
-    state.media.tdarr.call(api_path, body).await
-}
-
-/// "/data/Shows/X/Y.mkv" → its name without the extension, and whether it's a show.
-fn tdarr_file(file: &Value) -> Map<String, Value> {
-    let path = file.as_str().unwrap_or_default();
-    let base = path.rsplit('/').next().unwrap_or(path);
-    let stem = match base.rfind('.') {
-        Some(i) if i > 0 => &base[..i],
-        _ => base,
+/// `file` is the path as the app sees it, under /data.
+pub async fn rescan(state: &State, name: &str, file: &str) -> Result<(), String> {
+    let (name, app) = app(name).ok_or("No such app")?;
+    let key = api_key(name).ok_or_else(|| format!("{} isn't set up on the server", app.label))?;
+    let (list, command, id_field) = if name == "sonarr" {
+        ("series", "RescanSeries", "seriesId")
+    } else {
+        ("movie", "RescanMovie", "movieId")
     };
-    let mut m = Map::new();
-    m.insert("file".into(), json!(stem));
-    m.insert("show".into(), json!(path.starts_with("/data/Shows/")));
-    m
-}
-
-fn put(m: &mut Map<String, Value>, key: &str, v: &Value) {
-    if !v.is_null() {
-        m.insert(key.into(), v.clone());
+    let headers = [("X-Api-Key", key), ("Content-Type", "application/json".to_owned())];
+    let reply = call(&state.upstream, Method::GET, &format!("{}/{list}", app.base), &headers, None, Duration::from_secs(30)).await?;
+    if !reply.status.is_success() {
+        return Err(format!("{} answered {}", app.label, reply.status.as_u16()));
     }
-}
-
-/// The nodes, as a list.
-async fn tdarr_nodes(state: &State) -> Result<Vec<Value>, HttpError> {
-    let nodes = tdarr(state, "get-nodes", None).await?;
-    Ok(nodes.as_object().map(|o| o.values().cloned().collect()).unwrap_or_default())
-}
-
-/// Files Tdarr is converting right now.
-pub async fn converting(state: &State) -> Option<f64> {
-    let nodes = tdarr_nodes(state).await.ok()?;
-    Some(nodes.iter().map(|n| n["workers"].as_object().map_or(0, Map::len)).sum::<usize>() as f64)
-}
-
-async fn conversions_state(state: &State) -> Result<Value, HttpError> {
-    // First, so game mode and an unreachable Tdarr fail here rather than in the background.
-    let nodes = tdarr_nodes(state).await?;
-    let files = state.media.tdarr_files.get().await.map_err(|e| status(502, e))?;
-
-    let (mut queued, mut done_count, mut skipped, mut failed_count) = (0, 0, 0, 0);
-    let mut done: Vec<Map<String, Value>> = Vec::new();
-    let mut failed: Vec<Map<String, Value>> = Vec::new();
-    let mut saved = 0.0;
-    for f in files.iter() {
-        let (file, at) = (&f.file, &f.last_transcode_date);
-        match f.decision.as_str() {
-            Some("Queued") => queued += 1,
-            Some("Not required") => skipped += 1,
-            Some("Transcode success") => {
-                done_count += 1;
-                let size = |v: &Value| if v.is_null() { 0.0 } else { crate::js::number(v) };
-                let (old, new) = (size(&f.old_size) * GIB, size(&f.new_size) * GIB);
-                if old != 0.0 && new != 0.0 {
-                    saved += old - new;
-                }
-                let mut d = tdarr_file(file);
-                d.insert("oldSize".into(), num(old));
-                d.insert("newSize".into(), num(new));
-                put(&mut d, "at", at);
-                done.push(d);
-            }
-            Some("Transcode error") => {
-                failed_count += 1;
-                let mut d = tdarr_file(file);
-                put(&mut d, "at", at);
-                failed.push(d);
-            }
-            _ => {}
-        }
-    }
-    let at = |m: &Map<String, Value>| m.get("at").and_then(Value::as_f64).unwrap_or(0.0);
-    done.sort_by(|a, b| at(b).total_cmp(&at(a)));
-    failed.sort_by(|a, b| at(b).total_cmp(&at(a)));
-
-    let workers: Vec<Value> = nodes
-        .iter()
-        .flat_map(|n| {
-            n["workers"]
-                .as_object()
-                .map(|w| w.values().cloned().collect::<Vec<_>>())
-                .unwrap_or_default()
+    let items: Value = serde_json::from_slice(&reply.body).map_err(|e| e.to_string())?;
+    let id = items
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|i| {
+            i["path"]
+                .as_str()
+                .is_some_and(|p| file.starts_with(&format!("{}/", p.trim_end_matches('/'))))
         })
-        .map(|w| {
-            let mut m = tdarr_file(&w["file"]);
-            put(&mut m, "percent", &w["percentage"]);
-            put(&mut m, "eta", &w["ETA"]);
-            put(&mut m, "fps", &w["fps"]);
-            put(&mut m, "startedAt", &w["job"]["start"]);
-            m.insert("oldSize".into(), num(w["originalfileSizeInGbytes"].as_f64().unwrap_or(0.0) * GIB));
-            m.insert("estSize".into(), num(w["estSize"].as_f64().unwrap_or(0.0) * GIB));
-            Value::Object(m)
-        })
-        .collect();
-    Ok(json!({
-        "paused": !nodes.is_empty() && nodes.iter().all(|n| n["nodePaused"] == true),
-        "workers": workers,
-        "counts": { "queued": queued, "done": done_count, "skipped": skipped, "failed": failed_count },
-        "savedBytes": num(saved),
-        "recent": done.into_iter().take(30).collect::<Vec<_>>(),
-        "errors": failed.into_iter().take(30).collect::<Vec<_>>(),
-    }))
-}
-
-pub async fn conversions(AxumState(state): AxumState<State>) -> Result<Json<Value>, HttpError> {
-    Ok(Json(conversions_state(&state).await?))
-}
-
-/// A paused node finishes the file it's on, then waits.
-pub async fn set_conversions_paused(AxumState(state): AxumState<State>, body: Bytes) -> Result<Json<Value>, HttpError> {
-    let paused = json_body(&body)?.get("paused").cloned().unwrap_or(Value::Null);
-    println!("conversions paused {paused}");
-    let Some(paused) = paused.as_bool() else {
-        return Err(status(400, "Expected { paused: true | false }"));
-    };
-    let nodes = tdarr(&state, "get-nodes", None).await?;
-    for id in nodes.as_object().map(|o| o.keys().cloned().collect::<Vec<_>>()).unwrap_or_default() {
-        tdarr(
-            &state,
-            "update-node",
-            Some(json!({ "data": { "nodeID": id, "nodeUpdates": { "nodePaused": paused } } })),
-        )
-        .await?;
+        .and_then(|i| i["id"].as_i64())
+        .ok_or_else(|| format!("{} doesn't have a folder holding it", app.label))?;
+    let body = json!({ "name": command, id_field: id }).to_string();
+    let reply = call(&state.upstream, Method::POST, &format!("{}/command", app.base), &headers, Some(body.into()), Duration::from_secs(30)).await?;
+    if !reply.status.is_success() {
+        return Err(format!("{} answered {}", app.label, reply.status.as_u16()));
     }
-    Ok(Json(conversions_state(&state).await?))
+    Ok(())
 }
 
 /// Seerr's idle stop and the TV queue's order, every minute.
