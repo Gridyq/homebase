@@ -1132,7 +1132,7 @@ async function watch() {
 // game runs, it stays off until that game closes. Jellyfin keeps running so the TV still works.
 
 /** In start order; systemd works out the rest from the units' own dependencies. */
-const GAME_MODE_UNITS = ['gluetun', 'qbittorrent', 'flaresolverr', 'prowlarr', 'sonarr', 'radarr', 'recyclarr', 'seerr'];
+const GAME_MODE_UNITS = ['gluetun', 'qbittorrent', 'flaresolverr', 'prowlarr', 'sonarr', 'radarr', 'recyclarr', 'bazarr', 'cleanuparr', 'tdarr', 'seerr'];
 const GAME_MODE_PATH = path.join(ROOT, 'game-mode.json');
 const GAME_CHECK_INTERVAL = 10_000;
 /** How long after a game closes before the services come back, so restarting a game doesn't bounce them. */
