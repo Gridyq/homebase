@@ -277,7 +277,8 @@ pub async fn delete(req: Request) -> Result<Json<Value>, HttpError> {
 
 /// Runs a desktop program that might stay open, and returns once it has started or failed.
 /// Only the program itself is waited for, not its stderr: a browser xdg-open starts keeps that
-/// open until it closes.
+/// open until it closes. The pipe is drained for as long as anything holds it, since a program
+/// writing to a pipe nobody reads gets SIGPIPE; the start of it is kept for an error message.
 async fn start_desktop(program: &str, args: &[&str], input: Option<&str>) -> Result<(), HttpError> {
     let mut child = tokio::process::Command::new(program)
         .args(args)
@@ -289,7 +290,21 @@ async fn start_desktop(program: &str, args: &[&str], input: Option<&str>) -> Res
     if let (Some(text), Some(mut stdin)) = (input, child.stdin.take()) {
         let _ = stdin.write_all(text.as_bytes()).await;
     }
-    let mut stderr_pipe = child.stderr.take();
+    let said = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    if let Some(mut pipe) = child.stderr.take() {
+        let said = std::sync::Arc::clone(&said);
+        tokio::spawn(async move {
+            let mut buf = [0u8; 4096];
+            while let Ok(n) = pipe.read(&mut buf).await {
+                if n == 0 {
+                    break;
+                }
+                let mut kept = said.lock().unwrap();
+                let room = 4096usize.saturating_sub(kept.len());
+                kept.extend_from_slice(&buf[..n.min(room)]);
+            }
+        });
+    }
     let status = match tokio::time::timeout(Duration::from_secs(10), child.wait()).await {
         // Still running: it started.
         Err(_) => return Ok(()),
@@ -298,11 +313,9 @@ async fn start_desktop(program: &str, args: &[&str], input: Option<&str>) -> Res
     if status.success() {
         return Ok(());
     }
-    let mut stderr = Vec::new();
-    if let Some(pipe) = stderr_pipe.as_mut() {
-        let _ = tokio::time::timeout(Duration::from_secs(1), pipe.read_to_end(&mut stderr)).await;
-    }
-    let stderr = String::from_utf8_lossy(&stderr).trim().to_owned();
+    // What it said before exiting is in the pipe already; give the reader a moment to catch up.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let stderr = String::from_utf8_lossy(&said.lock().unwrap()).trim().to_owned();
     Err(HttpError::internal(if stderr.is_empty() {
         format!("{program} failed ({})", status.code().map_or("killed".into(), |c| c.to_string()))
     } else {

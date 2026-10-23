@@ -173,21 +173,17 @@ async fn update(state: &State) {
         state.services.expire(&state.usage);
         result
     };
-    let mut m = gm.mode.lock().unwrap();
-    match result {
-        Ok(()) => {
-            let mut e = Event::new(now_ms(), "game");
-            e.on = Some(want);
-            e.detail = game;
-            state.recorder.events.lock().unwrap().add(e);
-        }
-        Err(e) => {
-            // Back as it was, so the next check tries again rather than believing it's done.
-            eprintln!("Couldn't {} the game mode services: {e}", if want { "stop" } else { "start" });
-            m.active = !want;
-        }
+    // The change stands either way: systemctl stops or starts every unit it can, and one that
+    // failed shows as failed (and is alerted on) like any other. Going back would leave the rest
+    // stopped with game mode off, or game mode stuck on with no game.
+    if let Err(e) = result {
+        eprintln!("Couldn't {} all the game mode services: {e}", if want { "stop" } else { "start" });
     }
-    gm.save(&m);
+    let mut e = Event::new(now_ms(), "game");
+    e.on = Some(want);
+    e.detail = game;
+    state.recorder.events.lock().unwrap().add(e);
+    gm.save(&gm.mode.lock().unwrap());
 }
 
 fn steam_dir() -> PathBuf {

@@ -47,6 +47,22 @@ impl JsonFile {
     }
 }
 
+/// Temp files a crash left between writing and renaming, in `dir`. Only ones a minute old, in
+/// case another instance (a test copy) is writing there right now.
+pub fn sweep_temp(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let old = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .is_ok_and(|t| t.elapsed().is_ok_and(|age| age.as_secs() >= 60));
+        if name.starts_with('.') && name.ends_with(".tmp") && old {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
 /// Replaces `path` all at once: a crash mid-write leaves the old file, never a cut-short one.
 pub fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     static SEQ: AtomicU64 = AtomicU64::new(0);

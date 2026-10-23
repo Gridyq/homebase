@@ -805,16 +805,15 @@ fn next(state: &State) -> Option<String> {
     if state.game_mode.active() || state.jellyfin.transcoding_for().is_some() {
         return None;
     }
-    let saved = state.conversions.saved.lock().unwrap();
-    if saved.paused {
-        return None;
-    }
-    saved
-        .files
-        .iter()
-        .filter(|(_, e)| e.verdict == Verdict::Queued)
-        .find(|(p, _)| std::fs::metadata(p).map_or(true, |m| m.nlink() <= 1))
-        .map(|(p, _)| p.clone())
+    let queued: Vec<String> = {
+        let saved = state.conversions.saved.lock().unwrap();
+        if saved.paused {
+            return None;
+        }
+        saved.files.iter().filter(|(_, e)| e.verdict == Verdict::Queued).map(|(p, _)| p.clone()).collect()
+    };
+    // Looked at outside the lock, which the summary and the scan need meanwhile.
+    queued.into_iter().find(|p| std::fs::metadata(p).map_or(true, |m| m.nlink() <= 1))
 }
 
 /// Watches the libraries' folders for videos arriving, changing and going, on a thread of its own.

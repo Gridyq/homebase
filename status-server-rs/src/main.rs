@@ -73,6 +73,9 @@ async fn main() {
     }
     pairing::ensure_token(&config.token_path);
     drop::sweep_parts();
+    let data = http::data_dir(&config);
+    files::sweep_temp(data);
+    files::sweep_temp(&data.join("assistant"));
     let state = http::State::new(config);
     let sampler = Arc::clone(&state.sampler);
     tokio::spawn(async move { sampler.run().await });

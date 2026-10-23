@@ -193,7 +193,13 @@ function authHeader(deviceId: string, token?: string): string {
 const TIMEOUT_MS = 15_000;
 const TITLES_FRESH_MS = 10 * 60_000;
 
-type CallOptions = { method?: string; body?: unknown; timeoutMs?: number };
+type CallOptions = {
+  method?: string;
+  body?: unknown;
+  timeoutMs?: number;
+  /** A POST that only asks something, so it doesn't count as a change (see changes.ts). */
+  readOnly?: boolean;
+};
 
 async function request<T>(
   serverUrl: string,
@@ -281,7 +287,7 @@ export function createClient(session: Session, onUnauthorized?: () => void) {
     request<T>(serverUrl, path, deviceId, accessToken, init).then(
       (result) => {
         // Screens showing watched state, resume points or playlists reload when next shown.
-        if (init?.method && init.method !== 'GET') noteChange();
+        if (init?.method && init.method !== 'GET' && !init.readOnly) noteChange();
         return result;
       },
       (e: unknown) => {
@@ -494,9 +500,10 @@ export function createClient(session: Session, onUnauthorized?: () => void) {
 
     /** Runs a query on the Playback Reporting plugin's log of plays. Admins only. */
     playbackReport: (query: string) =>
-      post<{ results: string[][] }>('/user_usage_stats/submit_custom_query', {
-        CustomQueryString: query,
-        ReplaceUserId: false,
+      call<{ results: string[][] }>('/user_usage_stats/submit_custom_query', {
+        method: 'POST',
+        readOnly: true,
+        body: { CustomQueryString: query, ReplaceUserId: false },
       }).then((r) => r.results),
 
     search: (term: string) =>
@@ -549,6 +556,7 @@ export function createClient(session: Session, onUnauthorized?: () => void) {
       // The server may probe the file first, so this one gets longer.
       const info = await call<PlaybackInfoResponse>(`/Items/${itemId}/PlaybackInfo?userId=${userId}`, {
         method: 'POST',
+        readOnly: true,
         timeoutMs: 45_000,
         body: {
           DeviceProfile: { ...iosDeviceProfile, MaxStreamingBitrate: maxBitrate, MaxStaticBitrate: maxBitrate },

@@ -737,9 +737,12 @@ pub async fn ask(AxumState(state): AxumState<State>, UrlPath(id): UrlPath<String
 }
 
 const ABORTED: &str = "This operation was aborted";
-/// A model that sends nothing for this long is stuck; without a limit its generation would never
-/// end, and the model would never be stopped for being idle.
+/// A model that sends nothing for this long once it's answering is stuck; without a limit its
+/// generation would never end, and the model would never be stopped for being idle.
 const LLAMA_SILENCE: Duration = Duration::from_secs(120);
+/// Before its first word it's reading the prompt, which for a long chat with tool results can
+/// take minutes, and llama-server sends nothing meanwhile.
+const LLAMA_FIRST_WORD: Duration = Duration::from_secs(600);
 
 /// Writes the answer to the chat's last question, sending each piece, and saves the chat. A model
 /// with tools may look at the server first, a few rounds at most.
@@ -849,7 +852,7 @@ async fn write_answer(
             .header("content-type", "application/json")
             .body(Body::from(Value::Object(body).to_string()))
             .map_err(|e| e.to_string())?;
-        let res = tokio::time::timeout(LLAMA_SILENCE, state.upstream.0.request(req))
+        let res = tokio::time::timeout(LLAMA_FIRST_WORD, state.upstream.0.request(req))
             .await
             .map_err(|_| format!("{} stopped responding", model.name))?
             .map_err(|e| e.to_string())?;
@@ -874,10 +877,12 @@ async fn write_answer(
         let mut said = String::new();
         // Tool calls come in pieces, by index: the id and name first, then the arguments bit by bit.
         let mut calls: Vec<(String, String, String)> = Vec::new();
-        while let Some(frame) = tokio::time::timeout(LLAMA_SILENCE, body.frame())
+        let mut heard = false;
+        while let Some(frame) = tokio::time::timeout(if heard { LLAMA_SILENCE } else { LLAMA_FIRST_WORD }, body.frame())
             .await
             .map_err(|_| format!("{} stopped responding", model.name))?
         {
+            heard = true;
             if cancel.is_cancelled() {
                 return Err(ABORTED.into());
             }

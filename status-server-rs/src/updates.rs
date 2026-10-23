@@ -438,18 +438,18 @@ async fn asset(AxumState(state): AxumState<State>, Query(query): Query<HashMap<S
 /// bundle.
 fn gzipped(file: &Path, data: &[u8]) -> Result<axum::body::Bytes, String> {
     static CACHE: Mutex<Vec<(PathBuf, axum::body::Bytes)>> = Mutex::new(Vec::new());
-    /// The latest update's files, more or less.
-    const KEPT: usize = 64;
+    /// Room for the latest update or two; the oldest go first.
+    const KEPT_BYTES: usize = 48 * 1024 * 1024;
     if let Some((_, hit)) = CACHE.lock().unwrap().iter().find(|(p, _)| p == file) {
         return Ok(hit.clone());
     }
     let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
     let zipped = axum::body::Bytes::from(encoder.write_all(data).and_then(|_| encoder.finish()).map_err(|e| e.to_string())?);
     let mut cache = CACHE.lock().unwrap();
-    if cache.len() >= KEPT {
+    cache.push((file.to_owned(), zipped.clone()));
+    while cache.len() > 1 && cache.iter().map(|(_, b)| b.len()).sum::<usize>() > KEPT_BYTES {
         cache.remove(0);
     }
-    cache.push((file.to_owned(), zipped.clone()));
     Ok(zipped)
 }
 

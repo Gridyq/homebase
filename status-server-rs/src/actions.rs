@@ -157,6 +157,7 @@ async fn start_container_unit(name: &str, restart: bool) -> Result<String, Strin
 // Logs
 
 const LOG_LINES: u32 = 300;
+const AFTER_CURSOR_LINES: u32 = 2000;
 const LOG_ERRORS: &str = "error|fatal|exception|fail|warn|crit|panic|traceback|denied";
 // Sonarr and Prowlarr put API keys in the URLs they log.
 static SECRET_IN_LOG: LazyLock<Regex> =
@@ -277,10 +278,10 @@ pub async fn read_logs(state: &State, id: &str, window: LogWindow) -> Result<Log
         "json",
         "--output-fields=MESSAGE,PRIORITY"
     ]);
-    // After a cursor, everything since: with -n too, journalctl gives only the last lines of a
-    // burst and the ones before them are never seen.
+    // After a cursor, -n keeps only the last lines of what came since, so it's set well above
+    // what a poll a few seconds later can bring, yet still bounded for a cursor from long ago.
     match &after {
-        Some(after) => args.push(format!("--after-cursor={after}")),
+        Some(after) => args.extend(args![format!("--after-cursor={after}"), "-n", AFTER_CURSOR_LINES.to_string()]),
         None => args.extend(args!["-n", count.to_string()]),
     }
     if let Some(since) = since {

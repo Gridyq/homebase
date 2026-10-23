@@ -82,10 +82,13 @@ impl Videos {
 
     fn kill_running(&self, id: &str) -> bool {
         match &*self.running.lock().unwrap() {
-            // 0 while yt-dlp is still starting, and kill(0) would signal this whole process group.
-            Some((running, pid)) if running == id && *pid > 0 => {
-                // SAFETY: sends SIGTERM to the yt-dlp this server started.
-                unsafe { libc::kill(*pid as i32, libc::SIGTERM) };
+            Some((running, pid)) if running == id => {
+                // 0 while yt-dlp is still starting, and kill(0) would signal this whole process
+                // group; download() sees the job cancelled once it has started and stops it.
+                if *pid > 0 {
+                    // SAFETY: sends SIGTERM to the yt-dlp this server started.
+                    unsafe { libc::kill(*pid as i32, libc::SIGTERM) };
+                }
                 true
             }
             _ => false,
@@ -393,11 +396,24 @@ async fn download(state: State, job: Job) {
     args.push("--".into());
     args.push(job["url"].as_str().unwrap_or_default().to_owned());
 
-    with_job(&state, &id, |j| {
-        j.insert("state".into(), json!("downloading"));
-        j.insert("startedAt".into(), json!(now_ms()));
-        j.remove("error");
-    });
+    // Cancelled or removed between being picked and getting here.
+    let still_queued = {
+        let mut jobs = state.videos.jobs.lock().unwrap();
+        match jobs.iter_mut().find(|j| id_of(j) == id).filter(|j| state_of(j) == "queued") {
+            Some(j) => {
+                j.insert("state".into(), json!("downloading"));
+                j.insert("startedAt".into(), json!(now_ms()));
+                j.remove("error");
+                true
+            }
+            None => false,
+        }
+    };
+    if !still_queued {
+        *state.videos.running.lock().unwrap() = None;
+        next_video(&state);
+        return;
+    }
     println!("Saving video {}", job["url"].as_str().unwrap_or_default());
     // The service's umask keeps files private, but Jellyfin's container reads them as another user.
     let child = tokio::process::Command::new("sh")
@@ -422,6 +438,10 @@ async fn download(state: State, job: Job) {
             *state.videos.running.lock().unwrap() = Some((id.clone(), child.id().unwrap_or(0)));
             {
                 let mut jobs = state.videos.jobs.lock().unwrap();
+                // Cancelled while yt-dlp was starting, when there was no pid to signal yet.
+                if jobs.iter().find(|j| id_of(j) == id).is_none_or(|j| state_of(j) == "cancelled") {
+                    let _ = child.start_kill();
+                }
                 state.videos.save(&mut jobs);
             }
             let mut errors = Vec::new();
