@@ -126,7 +126,7 @@ export default function TrendsScreen() {
       ) : null}
       {series.converting?.peak ? (
         <TrendCard
-          title="Tdarr conversions"
+          title="Conversions"
           series={series.converting}
           history={data}
           format={formatCount}

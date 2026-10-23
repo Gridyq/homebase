@@ -3,7 +3,7 @@
 //! and the dashboard show it; conversions hold off while Jellyfin transcodes video, and the app
 //! warns before game mode while someone is watching.
 //!
-//! Borrows Seerr's API key for Jellyfin. Jellyfin 12 only takes it in a `MediaBrowser` header.
+//! Uses the server's Jellyfin API key. Jellyfin 12 only takes it in a `MediaBrowser` header.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;

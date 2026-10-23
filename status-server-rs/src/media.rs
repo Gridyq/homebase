@@ -1,7 +1,6 @@
 //! Media: the Requests mini-app talks to Sonarr and Radarr through here, so their API keys stay
 //! on this machine. Keys are read from each app's own config on every call, so a rotated key just
-//! works. Only the calls the app makes are let through. Calls to Seerr, which this server took
-//! over, go to requests.rs.
+//! works. Only the calls the app makes are let through. Search and requests are requests.rs.
 //! qBittorrent's speed limit and seeding have a small client of their own, since it logs in
 //! rather than taking a key.
 
@@ -159,14 +158,11 @@ fn json_reply(body: Bytes) -> Response {
     res
 }
 
-/// `/api/requests/{path}`, and Seerr's old `/api/arr/seerr/{path}`: see requests.rs.
+/// `/api/requests/{path}`: see requests.rs.
 pub async fn requests(AxumState(state): AxumState<State>, req: Request) -> Result<Response, HttpError> {
     let (parts, body) = req.into_parts();
     let path = parts.uri.path();
-    let path = path
-        .strip_prefix("/api/requests/")
-        .or_else(|| path.strip_prefix("/api/arr/seerr/"))
-        .unwrap_or_default();
+    let path = path.strip_prefix("/api/requests/").unwrap_or_default();
     let body = axum::body::to_bytes(body, MAX_BODY)
         .await
         .map_err(|_| status(413, "Request body too large"))?;
@@ -183,9 +179,6 @@ pub async fn arr(AxumState(state): AxumState<State>, req: Request) -> Result<Res
     let not_found = || status(404, "Not found");
     if api_path.is_empty() || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
         return Err(not_found());
-    }
-    if name == "seerr" {
-        return requests(AxumState(state), Request::from_parts(parts, body)).await;
     }
     let (name, app) = app(name).ok_or_else(not_found)?;
     let method = parts.method.as_str();

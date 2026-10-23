@@ -30,7 +30,7 @@ export function formatTimeLeft(timeleft: string | undefined) {
 const QUALITY = / (WEBDL|WEBRip|Bluray|HDTV|DVD|Remux|SDTV|Raw-HD)[-\w ]*$/i;
 export const displayName = (file: string) => file.replace(QUALITY, '');
 
-/** "0:01:12" → "1m 12s left"; Tdarr says "0:00:00" until it has an estimate. */
+/** "0:01:12" → "1m 12s left"; the server says "0:00:00" until it has an estimate. */
 export function formatEta(eta: string) {
   const [h = 0, m = 0, s = 0] = eta.split(':').map(Number);
   if (!(h || m || s)) return undefined;
@@ -245,7 +245,7 @@ export function SeedingRow({ seeding, first, onPress }: { seeding: Seeding; firs
   );
 }
 
-/** A file Tdarr is converting right now. */
+/** A file the server is converting right now. */
 export function ConvertingRow({ worker, first }: { worker: Conversions['workers'][number]; first: boolean }) {
   const theme = useTheme();
   const line = [`${Math.round(worker.percent)}%`, formatEta(worker.eta)]

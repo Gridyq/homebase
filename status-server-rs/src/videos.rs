@@ -527,10 +527,10 @@ async fn finish(state: &State, id: &str, code: i32, failure: Option<String>) {
 }
 
 /// Tells Jellyfin about new files rather than waiting for its folder watcher, which can take
-/// minutes. Borrows Seerr's API key for Jellyfin.
+/// minutes.
 async fn announce_to_jellyfin(state: &State, files: &[String]) {
     let Some(key) = crate::jellyfin::api_key() else {
-        eprintln!("Couldn't tell Jellyfin about new videos: no API key in Seerr settings");
+        eprintln!("Couldn't tell Jellyfin about new videos: no jellyfin_api_key in the credentials file");
         return;
     };
     let updates: Vec<Value> = files

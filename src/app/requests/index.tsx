@@ -38,7 +38,7 @@ import { useServerConnection } from '@/miniapps/server/connection';
 import { usePolling } from '@/miniapps/server/use-polling';
 
 const QUEUE_POLL_MS = 5000;
-/** Tdarr's file list is cached on the server for 15 s, so there's no point asking more often. */
+/** Conversions move slowly; the Conversions screen itself updates live. */
 const CONVERSIONS_POLL_MS = 10_000;
 /** Download limits to pick from, in megabits per second to match the Server app. 0 is no limit. */
 const SPEED_LIMITS_MBPS = [0, 10, 25, 50, 100, 200];
@@ -83,6 +83,9 @@ function Home({ conn }: { conn: Connection }) {
         icon="arrow.triangle.2.circlepath"
         onPress={() => router.push('/requests/conversions')}>
         Conversions
+      </Stack.Toolbar.Button>
+      <Stack.Toolbar.Button icon="checkmark.shield" onPress={() => router.push('/requests/cleanup')}>
+        Download cleanup
       </Stack.Toolbar.Button>
     </Stack.Toolbar>
   );
@@ -335,7 +338,7 @@ function Overview({ conn, data }: { conn: Connection; data: ReturnType<typeof us
     !active.length && !comingUp?.length && !recent?.length && !queue.error && !coming.error && !requested.error;
   const speed = limit.data;
   const seeds = seed.data;
-  // Tdarr may be stopped or not set up; then the section just doesn't show.
+  // If the server can't answer about conversions, the section just doesn't show.
   const converting = convert.error ? undefined : convert.data;
 
   return (

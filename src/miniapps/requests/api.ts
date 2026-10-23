@@ -669,7 +669,7 @@ export function setSeeding(conn: Connection, change: { seed?: boolean; stopWhenD
 }
 
 // ---------------------------------------------------------------------------------------------
-// Conversions (the status server converts the library to HEVC MP4s; Tdarr used to)
+// Conversions (the status server converts the library to HEVC MP4s)
 
 /** A converted file, named without its folder or extension. */
 export type ConvertedFile = { file: string; show: boolean; oldSize: number; newSize: number; at?: number };
@@ -702,14 +702,46 @@ export type Conversions = {
 };
 
 export function conversions(conn: Connection) {
-  return request<Conversions>(conn, '/api/tdarr');
+  return request<Conversions>(conn, '/api/conversions');
 }
 
 export function setConversionsPaused(conn: Connection, paused: boolean) {
-  return request<Conversions>(conn, '/api/tdarr', { method: 'POST', body: JSON.stringify({ paused }) });
+  return request<Conversions>(conn, '/api/conversions', { method: 'POST', body: JSON.stringify({ paused }) });
 }
 
 /** Has the failed files looked at again on the next scan, which starts right away. */
 export function retryConversions(conn: Connection) {
-  return request<Conversions>(conn, '/api/tdarr', { method: 'POST', body: JSON.stringify({ retry: true }) });
+  return request<Conversions>(conn, '/api/conversions', { method: 'POST', body: JSON.stringify({ retry: true }) });
+}
+
+// ---------------------------------------------------------------------------------------------
+// Download cleanup (the status server clears downloads that won't finish, and blocks malware files)
+
+/** A download in Sonarr's or Radarr's queue with strikes against it. */
+export type Strikes = {
+  title: string;
+  stalled: number;
+  metadata: number;
+  failedImport: number;
+  lastStrike: number;
+};
+
+export type Cleanup = {
+  /** Only says what it would do. */
+  dryRun: boolean;
+  /** How many patterns are on the malware blocklist. */
+  blocklist: number;
+  /** Strikes that remove a download, by kind. */
+  limits: { stalled: number; metadata: number; failedImport: number };
+  /** Strikes lapse after this long without a new one. */
+  lapseHours: number;
+  /** The queue check has been failing since then. */
+  failing: { since: number; reason: string } | null;
+  strikes: Strikes[];
+  /** Newest first. */
+  removed: { at: number; app: 'sonarr' | 'radarr'; title: string; reason: string }[];
+};
+
+export function cleanup(conn: Connection) {
+  return request<Cleanup>(conn, '/api/cleanup');
 }

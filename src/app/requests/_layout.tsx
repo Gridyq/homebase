@@ -25,6 +25,7 @@ function RequestsStack() {
       <Stack.Screen name="releases" options={{ title: 'Releases' }} />
       <Stack.Screen name="library" options={{ title: 'Library' }} />
       <Stack.Screen name="conversions" options={{ title: 'Conversions' }} />
+      <Stack.Screen name="cleanup" options={{ title: 'Download cleanup' }} />
     </Stack>
   );
 }

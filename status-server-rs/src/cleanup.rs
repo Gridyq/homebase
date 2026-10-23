@@ -451,10 +451,14 @@ pub fn start(state: State) {
 
 /// Downloads with strikes against them, and what's been removed lately.
 pub async fn get(AxumState(state): AxumState<State>) -> Json<Value> {
+    let failing = state.cleanup.failing.lock().unwrap().clone();
     let saved = state.cleanup.saved.lock().unwrap();
     Json(json!({
         "dryRun": state.cleanup.dry_run,
         "blocklist": state.cleanup.blocklist.lock().unwrap().len(),
+        "limits": { "stalled": STALLED_STRIKES, "metadata": METADATA_STRIKES, "failedImport": FAILED_IMPORT_STRIKES },
+        "lapseHours": STRIKES_LAPSE_MS / 3_600_000,
+        "failing": failing.map(|(since, why)| json!({ "since": since, "reason": why })),
         "strikes": saved.strikes.values().collect::<Vec<_>>(),
         "removed": saved.removed.iter().rev().collect::<Vec<_>>(),
     }))

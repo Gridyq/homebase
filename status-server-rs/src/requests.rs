@@ -125,7 +125,7 @@ fn not_found() -> HttpError {
     HttpError(axum::http::StatusCode::NOT_FOUND, "Not found".into())
 }
 
-/// `/api/requests/{path}`, and Seerr's old `/api/arr/seerr/{path}`.
+/// `/api/requests/{path}`.
 pub async fn handle(state: &State, method: &Method, path: &str, query: &str, body: &[u8]) -> Result<Value, HttpError> {
     let param = |name: &str| {
         url::form_urlencoded::parse(query.as_bytes())

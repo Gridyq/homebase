@@ -10,7 +10,7 @@ const TROUBLE: Download['state'][] = ['failed', 'warning', 'stalled', 'blocked']
 export async function requestsActivity(): Promise<Activity[]> {
   const conn = await loadConnection();
   if (!conn) return [];
-  // Either can be off (game mode, Tdarr stopped); show whatever answers.
+  // Either can be off (game mode, conversions paused); show whatever answers.
   const [queue, converting] = await Promise.allSettled([downloads(conn), conversions(conn)]);
   const items: Activity[] = [];
 
