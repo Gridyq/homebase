@@ -129,6 +129,22 @@ export function formatTime(ms: number) {
   return new Date(ms).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
 }
 
+/** A point on a chart spanning `span` ms: the time for a day or less, the date and hour for a few weeks, the date beyond. */
+export function formatChartTime(ms: number, span: number) {
+  const date = new Date(ms);
+  if (span <= 36 * 3600_000) return formatTime(ms);
+  if (span <= 45 * 86_400_000) {
+    return `${date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}, ${date.toLocaleTimeString(undefined, { hour: 'numeric' })}`;
+  }
+  return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
+
+/** "350 Wh", "12.4 kWh", from joules. */
+export function formatEnergy(joules: number) {
+  const wh = joules / 3600;
+  return wh >= 1000 ? `${(wh / 1000).toFixed(wh >= 100_000 ? 0 : 1)} kWh` : `${Math.round(wh)} Wh`;
+}
+
 function startOfDay(date: Date) {
   return new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
 }
@@ -304,11 +320,14 @@ export function LegendItem({ color, label, value }: { color?: string; label: str
   );
 }
 
+/** A moment marked on a chart, such as a crash or a reboot. */
+export type ChartMarker = { t: number; color: string; label: string };
+
 /**
  * Values over time, drawn as thin columns with a line along their tops. Touching the chart shows
- * the reading under the finger. `max` fixes the top of the scale, such as 1 for a percentage;
- * otherwise it fits the highest value. `label` names a column when it isn't a span of clock time,
- * with `startLabel` and `endLabel` under the ends.
+ * the reading under the finger, and what's marked in that column. `max` fixes the top of the
+ * scale, such as 1 for a percentage; otherwise it fits the highest value. `label` names a column
+ * when it isn't a span of clock time, with `startLabel` and `endLabel` under the ends.
  */
 export function TimeChart({
   values,
@@ -321,6 +340,7 @@ export function TimeChart({
   label,
   startLabel,
   endLabel = 'Now',
+  markers,
 }: {
   values: (number | null)[];
   start: number;
@@ -332,6 +352,7 @@ export function TimeChart({
   label?: (index: number) => string;
   startLabel?: string;
   endLabel?: string;
+  markers?: ChartMarker[];
 }) {
   const theme = useTheme();
   const [width, setWidth] = useState(0);
@@ -346,6 +367,10 @@ export function TimeChart({
     setTouched(Math.min(values.length - 1, Math.max(0, i)));
   };
   const touchedValue = touched !== undefined ? values[touched] : undefined;
+  const span = end - start;
+  const marked = markers?.filter((m) => m.t >= start && m.t <= end) ?? [];
+  const touchedMarks =
+    touched !== undefined ? marked.filter((m) => Math.min(values.length - 1, Math.floor((m.t - start) / step)) === touched) : [];
 
   return (
     <View style={styles.chart}>
@@ -354,7 +379,7 @@ export function TimeChart({
           {touched !== undefined
             ? label
               ? label(touched)
-              : `${formatTime(start + step * touched)}–${formatTime(start + step * (touched + 1))}`
+              : `${formatChartTime(start + step * touched, span)}–${formatChartTime(start + step * (touched + 1), span)}`
             : `Scale ${format(top)}`}
         </ThemedText>
         {touched !== undefined ? (
@@ -372,6 +397,13 @@ export function TimeChart({
         onResponderRelease={() => setTouched(undefined)}
         onResponderTerminate={() => setTouched(undefined)}>
         <View style={[styles.gridLine, { top: '50%', backgroundColor: theme.backgroundSelected }]} />
+        {marked.map((m, i) => (
+          <View
+            key={`m${i}`}
+            pointerEvents="none"
+            style={[styles.marker, { left: `${((m.t - start) / span) * 100}%`, backgroundColor: m.color }]}
+          />
+        ))}
         {values.map((v, i) => {
           const fraction = v == null ? 0 : Math.min(1, Math.max(0, v / top));
           const active = touched === i;
@@ -392,9 +424,14 @@ export function TimeChart({
           );
         })}
       </View>
+      {touchedMarks.length ? (
+        <ThemedText type="small" style={[styles.caption, { color: touchedMarks[0].color }]} numberOfLines={2}>
+          {touchedMarks.map((m) => m.label).join(' · ')}
+        </ThemedText>
+      ) : null}
       <View style={styles.chartLabels}>
         <ThemedText type="small" themeColor="textSecondary" style={[styles.caption, styles.flex]}>
-          {startLabel ?? formatTime(start)}
+          {startLabel ?? formatChartTime(start, span)}
         </ThemedText>
         <ThemedText type="small" themeColor="textSecondary" style={styles.caption}>
           {endLabel}
@@ -552,6 +589,13 @@ const styles = StyleSheet.create({
     left: 0,
     right: 0,
     height: StyleSheet.hairlineWidth,
+  },
+  marker: {
+    position: 'absolute',
+    top: 0,
+    bottom: 0,
+    width: 1.5,
+    opacity: 0.7,
   },
   column: {
     flex: 1,

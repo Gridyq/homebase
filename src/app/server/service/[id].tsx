@@ -19,6 +19,7 @@ import {
   Card,
   formatBytes,
   formatCpu,
+  formatRate,
   NavRow,
   Section,
   Segmented,
@@ -29,11 +30,14 @@ import {
   useSeriesColors,
 } from '@/miniapps/server/components';
 import { useServerConnection } from '@/miniapps/server/connection';
-import { HistoryNote, RANGES, TrendCard } from '@/miniapps/server/trends';
+import { EventRow, useEventMarkers } from '@/miniapps/server/events';
+import { HistoryNote, RANGES, rangeName, TrendCard } from '@/miniapps/server/trends';
 import { usePolling } from '@/miniapps/server/use-polling';
 
 const POLL_MS = 3000;
 const HISTORY_POLL_MS = 30_000;
+const EVENTS_SHOWN = 15;
+const formatSpeed = (bytesPerSec: number) => `${formatBytes(bytesPerSec)}/s`;
 
 const ACTION_LABELS: Record<ServiceAction, string> = {
   start: 'Start',
@@ -58,6 +62,7 @@ export default function ServiceScreen() {
     { keepPrevious: true },
   );
   const refreshControl = usePullToRefresh(status.refresh, history.refresh);
+  const markers = useEventMarkers(history.data?.events, { all: true });
   const [busy, setBusy] = useState<ServiceAction>();
   // State only updates on the next render, so a quick second tap could still get through.
   const acting = useRef(false);
@@ -112,6 +117,8 @@ export default function ServiceScreen() {
 
   const { usage } = service;
   const disk = usage && (usage.readPerSec ?? 0) + (usage.writePerSec ?? 0);
+  const series = history.data?.series;
+  const serviceEvents = [...(history.data?.events ?? [])].filter((e) => e.kind !== 'boot').reverse().slice(0, EVENTS_SHOWN);
 
   return (
     <ScrollView
@@ -183,6 +190,7 @@ export default function ServiceScreen() {
               history={history.data}
               format={formatBytes}
               color={colors[0]}
+              markers={markers}
             />
             <TrendCard
               title="CPU"
@@ -190,12 +198,67 @@ export default function ServiceScreen() {
               history={history.data}
               format={formatCpu}
               color={colors[1]}
+              markers={markers}
             />
+            {series && (series.read.average !== undefined || series.write.average !== undefined) ? (
+              <>
+                <TrendCard
+                  title="Disk reads"
+                  series={series.read}
+                  history={history.data}
+                  format={formatSpeed}
+                  color={colors[0]}
+                  markers={markers}
+                  note={`${formatBytes(series.read.total)} in ${rangeName(range)}`}
+                />
+                <TrendCard
+                  title="Disk writes"
+                  series={series.write}
+                  history={history.data}
+                  format={formatSpeed}
+                  color={colors[1]}
+                  markers={markers}
+                  note={`${formatBytes(series.write.total)} in ${rangeName(range)}`}
+                />
+              </>
+            ) : null}
+            {series && series.rx.average !== undefined ? (
+              <>
+                <TrendCard
+                  title="Network in"
+                  series={series.rx}
+                  history={history.data}
+                  format={formatRate}
+                  color={colors[0]}
+                  markers={markers}
+                  note={`${formatBytes(series.rx.total)} in ${rangeName(range)}`}
+                />
+                <TrendCard
+                  title="Network out"
+                  series={series.tx}
+                  history={history.data}
+                  format={formatRate}
+                  color={colors[1]}
+                  markers={markers}
+                  note={`${formatBytes(series.tx.total)} in ${rangeName(range)}`}
+                />
+              </>
+            ) : null}
           </View>
         ) : (
           <Centered loading={!history.error} error={history.error} onRetry={history.refresh} />
         )}
       </Section>
+
+      {serviceEvents.length ? (
+        <Section title="What happened">
+          <Card>
+            {serviceEvents.map((e, i) => (
+              <EventRow key={`${e.t}-${i}`} event={e} first={i === 0} withName={false} />
+            ))}
+          </Card>
+        </Section>
+      ) : null}
     </ScrollView>
   );
 }

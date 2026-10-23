@@ -10,8 +10,10 @@
  * yt-dlp for the Videos mini-app. Runs the Assistant mini-app's chats on a local model, starting it
  * when asked. No dependencies beyond Node.js (and yt-dlp for videos).
  *
- * It also keeps a day of history (CPU, memory, network, and each service's memory and CPU) in
- * `history.json`, and can list the processes and cgroups using the most memory and CPU.
+ * It also keeps a year of history (CPU, memory, network, power, drives, and each service's memory,
+ * CPU, disk and network use) at finer detail the more recent it is, a log of what happened to the
+ * services (crashes, restarts, memory kills, reboots), the drives' health, and can list the
+ * processes and cgroups using the most memory and CPU.
  *
  * Every request needs `Authorization: Bearer <token>`. The token lives in `token` next to this
  * file and is created on first start. `node server.mjs pair` sends a link to the phone through
@@ -24,7 +26,7 @@
 import { execFile, spawn } from 'node:child_process';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { constants, createWriteStream } from 'node:fs';
-import { link, mkdir, open, readdir, readFile, readlink, realpath, rename, rm, stat, statfs, unlink, writeFile } from 'node:fs/promises';
+import { appendFile, link, mkdir, open, readdir, readFile, readlink, realpath, rename, rm, stat, statfs, unlink, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
@@ -62,6 +64,7 @@ const REAL_FILESYSTEMS = new Set(['ext4', 'ext3', 'btrfs', 'xfs', 'f2fs', 'zfs',
 const DISK_WARN = 0.9;
 const TEMP_WARN = 90;
 const WATCH_INTERVAL = 5 * 60_000;
+const DAY_MS = 24 * 3600_000;
 
 // ---------------------------------------------------------------------------------------------
 // Token
@@ -98,14 +101,61 @@ function allowedPeer(address = '') {
 // Rates: CPU, GPU and network are sampled in the background so a request gets a current figure
 // without waiting.
 
-const rates = { cpu: undefined, rxPerSec: undefined, txPerSec: undefined };
+const rates = { cpu: undefined, rxPerSec: undefined, txPerSec: undefined, cores: [], cpuWatts: undefined };
+/** Read and write speed and share of time busy, by kernel name (sda). */
+let diskRates = new Map();
 let lastCpu;
 let lastNet;
+let lastEnergy;
+let lastDiskStats;
+/** Why the CPU's power draw can't be read, when it can't. */
+let cpuPowerError;
 
-async function readCpu() {
-  const line = (await readFile('/proc/stat', 'utf8')).split('\n')[0];
+function cpuTimes(line) {
   const [user, nice, system, idle, iowait, irq, softirq, steal] = line.split(/\s+/).slice(1).map(Number);
   return { idle: idle + iowait, total: user + nice + system + idle + iowait + irq + softirq + steal };
+}
+
+/** The whole CPU and each core. */
+async function readCpu() {
+  const lines = (await readFile('/proc/stat', 'utf8')).split('\n');
+  return { ...cpuTimes(lines[0]), cores: lines.filter((l) => /^cpu\d+ /.test(l)).map(cpuTimes) };
+}
+
+const busyBetween = (a, b) => (b.total > a.total ? 1 - (b.idle - a.idle) / (b.total - a.total) : undefined);
+
+// The CPU package's energy counter (RAPL), which AMD chips offer under Intel's name too. Only root
+// can read it unless a udev rule lets this user read it (see README.md).
+const RAPL = '/sys/class/powercap/intel-rapl:0';
+
+async function readEnergy() {
+  try {
+    const uj = Number((await readFile(`${RAPL}/energy_uj`, 'utf8')).trim());
+    cpuPowerError = undefined;
+    return { uj, at: Date.now() };
+  } catch (e) {
+    cpuPowerError = e.code === 'EACCES' ? 'permission' : 'missing';
+    return undefined;
+  }
+}
+
+/** Whole drives: NVMe and SATA disks have a `device` link; zram, loop and dm devices don't. */
+async function physicalDisks() {
+  const names = await readdir('/sys/block').catch(() => []);
+  const checks = await Promise.all(names.map((n) => readdir(`/sys/block/${n}/device`).then(() => n, () => undefined)));
+  return new Set(checks.filter(Boolean));
+}
+
+/** Bytes read and written and milliseconds busy, per drive, from /proc/diskstats (in 512-byte sectors). */
+async function readDiskStats() {
+  const disks = await physicalDisks();
+  const out = new Map();
+  for (const line of (await readFile('/proc/diskstats', 'utf8')).split('\n')) {
+    const f = line.trim().split(/\s+/);
+    if (f.length < 14 || !disks.has(f[2])) continue;
+    out.set(f[2], { read: Number(f[5]) * 512, written: Number(f[9]) * 512, busyMs: Number(f[12]) });
+  }
+  return { at: Date.now(), disks: out };
 }
 
 /** Physical interfaces only: lo, tailscale0 and container bridges have no `device` link. */
@@ -135,9 +185,41 @@ async function sample() {
   try {
     const cpu = await readCpu();
     if (lastCpu && cpu.total > lastCpu.total) {
-      rates.cpu = 1 - (cpu.idle - lastCpu.idle) / (cpu.total - lastCpu.total);
+      rates.cpu = busyBetween(lastCpu, cpu);
+      rates.cores = cpu.cores.map((c, i) => (lastCpu.cores[i] ? busyBetween(lastCpu.cores[i], c) : undefined));
     }
     lastCpu = cpu;
+
+    const energy = await readEnergy();
+    if (energy && lastEnergy && energy.at > lastEnergy.at) {
+      let used = energy.uj - lastEnergy.uj;
+      // The counter wraps around.
+      if (used < 0) used += (await readNumber(`${RAPL}/max_energy_range_uj`)) ?? 0;
+      rates.cpuWatts = used >= 0 ? used / 1e6 / ((energy.at - lastEnergy.at) / 1000) : undefined;
+    } else if (!energy) rates.cpuWatts = undefined;
+    lastEnergy = energy;
+
+    const disk = await readDiskStats();
+    if (lastDiskStats && disk.at > lastDiskStats.at) {
+      const ms = disk.at - lastDiskStats.at;
+      diskRates = new Map(
+        [...disk.disks].flatMap(([name, d]) => {
+          const p = lastDiskStats.disks.get(name);
+          if (!p) return [];
+          return [
+            [
+              name,
+              {
+                readPerSec: Math.max(0, ((d.read - p.read) * 1000) / ms),
+                writePerSec: Math.max(0, ((d.written - p.written) * 1000) / ms),
+                busy: Math.min(1, Math.max(0, (d.busyMs - p.busyMs) / ms)),
+              },
+            ],
+          ];
+        }),
+      );
+    }
+    lastDiskStats = disk;
 
     const net = await readNet();
     if (lastNet && net.at > lastNet.at) {
@@ -262,13 +344,16 @@ function memoryBreakdown(info) {
   };
 }
 
-/** Share of the last minute that something was stalled waiting on CPU, memory or disk. */
-async function pressure() {
+/**
+ * Share of the last minute (or `window` seconds: 10, 60 or 300) that something was stalled
+ * waiting on CPU, memory or disk.
+ */
+async function pressure(window = 60) {
   const out = {};
   for (const kind of ['cpu', 'memory', 'io']) {
     const text = await readFile(`/proc/pressure/${kind}`, 'utf8').catch(() => '');
-    const avg60 = Number(/^some .*avg60=([\d.]+)/m.exec(text)?.[1]);
-    if (!Number.isNaN(avg60)) out[kind] = avg60 / 100;
+    const avg = Number(new RegExp(`^some .*avg${window}=([\\d.]+)`, 'm').exec(text)?.[1]);
+    if (!Number.isNaN(avg)) out[kind] = avg / 100;
   }
   return out;
 }
@@ -318,9 +403,12 @@ async function readGroup(dir) {
   const cpu = statFields(cpuStat);
   let read = 0;
   let written = 0;
-  for (const m of ioStat.matchAll(/rbytes=(\d+) wbytes=(\d+)/g)) {
-    read += Number(m[1]);
-    written += Number(m[2]);
+  // Per drive, by "major:minor".
+  const devices = {};
+  for (const m of ioStat.matchAll(/^(\d+:\d+) rbytes=(\d+) wbytes=(\d+)/gm)) {
+    read += Number(m[2]);
+    written += Number(m[3]);
+    devices[m[1]] = [Number(m[2]), Number(m[3])];
   }
   // File pages are cache the kernel can take back, except shared memory, which counts as file.
   const cache = Math.max(0, (mem.file ?? 0) - (mem.shmem ?? 0));
@@ -331,6 +419,7 @@ async function readGroup(dir) {
     cpuUsec: cpu.usage_usec ?? 0,
     readBytes: read,
     writtenBytes: written,
+    devices,
   };
 }
 
@@ -381,6 +470,12 @@ async function groupUsage() {
                 cpu: Math.max(0, (g.cpuUsec - p.cpuUsec) / 1e6 / secs / cores),
                 readPerSec: Math.max(0, (g.readBytes - p.readBytes) / secs),
                 writePerSec: Math.max(0, (g.writtenBytes - p.writtenBytes) / secs),
+                deviceRates: Object.fromEntries(
+                  Object.entries(g.devices).map(([dev, [r, w]]) => {
+                    const [pr, pw] = p.devices[dev] ?? [r, w];
+                    return [dev, [Math.max(0, (r - pr) / secs), Math.max(0, (w - pw) / secs)]];
+                  }),
+                ),
               },
             ],
           ];
@@ -727,7 +822,7 @@ async function gpu() {
 // ---------------------------------------------------------------------------------------------
 // Services
 
-const UNIT_PROPS = ['ActiveState', 'SubState', 'Result', 'ActiveEnterTimestamp', 'LastTriggerUSec', 'NextElapseUSecRealtime'];
+const UNIT_PROPS = ['ActiveState', 'SubState', 'Result', 'ActiveEnterTimestamp', 'LastTriggerUSec', 'NextElapseUSecRealtime', 'NRestarts'];
 
 async function showUnits(units, system) {
   if (!units.length) return {};
@@ -777,9 +872,13 @@ async function quadlets() {
   );
 }
 
+/** The last list, for readings that need a container's process without asking Podman again. */
+let lastPods = [];
+
 async function containers() {
   const { stdout } = await run('podman', ['ps', '--all', '--format', 'json']);
-  return JSON.parse(stdout || '[]');
+  lastPods = JSON.parse(stdout || '[]');
+  return lastPods;
 }
 
 /** Everything the dashboard lists, with what each one can do. */
@@ -821,6 +920,7 @@ async function services() {
       state: props ? unitState(props) : running ? 'running' : p.State === 'created' || p.State === 'exited' ? 'stopped' : 'changing',
       health,
       since: running ? p.StartedAt * 1000 : p.ExitedAt ? p.ExitedAt * 1000 : undefined,
+      restarts: Number(props?.NRestarts) || 0,
       actions: running ? ['restart', 'stop'] : ['start'],
     };
   });
@@ -862,6 +962,7 @@ async function services() {
       detail: state === 'failed' && props.Result ? `Failed: ${props.Result}` : undefined,
       state,
       since: unixTimestamp(props.ActiveEnterTimestamp),
+      restarts: Number(props.NRestarts) || 0,
       actions: u.system ? [] : u.self ? ['restart'] : state === 'running' ? ['restart', 'stop'] : ['start'],
     });
   }
@@ -899,6 +1000,7 @@ async function startContainerUnit(name, restart) {
 }
 
 async function performAction(id, action) {
+  intents.set(id, { by: 'you', at: Date.now() });
   const [kind, name] = [id.slice(0, id.indexOf(':')), id.slice(id.indexOf(':') + 1)];
   if (kind === 'container') {
     if (!['start', 'stop', 'restart'].includes(action)) throw new HttpError(400, `Can't ${action} a container`);
@@ -1139,121 +1241,918 @@ async function status() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// History: a reading every 15 seconds for the last day, kept in memory and saved to
-// `history.json` every few minutes so a restart doesn't lose it.
+// History: a reading every 15 seconds, kept for a day, and averages of them kept longer: every
+// 10 minutes for a week, every hour for a month and every 6 hours for a year. Each tier is a file
+// with one JSON line per entry, appended as it's made and rewritten without the entries too old
+// to keep every few hours, so the disk isn't rewritten all the time.
+//
+// An entry is { t, n, a, m }: when it starts, how many readings it stands for (1 for a reading,
+// left out), the average of each key over them, and the peak of each machine-wide key (left out
+// for a reading, whose peak is its value). A key that's missing had no reading, like a service
+// that wasn't running. Keys:
+//   cpu gpu (share busy), mem cache swap vram (bytes), rx tx (bytes/s), temp gtemp (°C),
+//   cpow gpow (watts), clock (average core MHz), pcpu pmem pio (share of time stalled),
+//   conv (files Tdarr is converting),
+//   d:<drive>:r|w (bytes/s), d:<drive>:busy (share), d:<drive>:temp (°C),
+//   s:<service>:mem (bytes), s:<service>:cpu (share), s:<service>:r|w|rx|tx (bytes/s),
+//   t:<device>:rx|tx (bytes/s, as the server sees it: rx came from the device).
 
-const HISTORY_PATH = path.join(ROOT, 'history.json');
 const HISTORY_INTERVAL = 15_000;
-const HISTORY_KEEP_MS = 24 * 3600_000;
-const HISTORY_SAVE_INTERVAL = 5 * 60_000;
+const HISTORY_COMPACT_INTERVAL = 6 * 3600_000;
 const HISTORY_POINTS = 120;
+const HISTORY_MAX_MS = 366 * DAY_MS;
+/** Before the tiers, the last day was kept in one file, rewritten every few minutes. */
+const OLD_HISTORY_PATH = path.join(ROOT, 'history.json');
 
-/** { t, cpu, gpu, mem, cache, swap, rx, tx, temp, gtemp, gpow, vram, s: { serviceId: [usedBytes, cpu] } } */
-let history = [];
+const TIERS = [
+  { name: 'raw', step: HISTORY_INTERVAL, keep: DAY_MS },
+  { name: '10m', step: 10 * 60_000, keep: 7 * DAY_MS },
+  { name: '1h', step: 3600_000, keep: 31 * DAY_MS },
+  { name: '6h', step: 6 * 3600_000, keep: HISTORY_MAX_MS },
+].map((t) => ({ ...t, path: path.join(ROOT, `history-${t.name}.jsonl`), entries: [], pending: undefined }));
 
-async function loadHistory() {
-  try {
-    const saved = JSON.parse(await readFile(HISTORY_PATH, 'utf8'));
-    if (Array.isArray(saved)) history = saved.filter((h) => h.t > Date.now() - HISTORY_KEEP_MS);
-  } catch {}
+/** Peaks are kept for these, not for every service, drive and device, to keep the files small. */
+const isMachineKey = (key) => !key.includes(':');
+
+/** Whole numbers from 100 up, three decimals below. */
+const trim = (v) => (Math.abs(v) >= 100 ? Math.round(v) : Math.round(v * 1000) / 1000);
+
+async function readJsonLines(file) {
+  const text = await readFile(file, 'utf8').catch(() => '');
+  return text
+    .split('\n')
+    .filter(Boolean)
+    .flatMap((l) => {
+      try {
+        return [JSON.parse(l)];
+      } catch {
+        return []; // A line cut short when the server stopped.
+      }
+    });
 }
 
-async function saveHistory() {
-  try {
-    await writeFile(`${HISTORY_PATH}.tmp`, JSON.stringify(history));
-    await rename(`${HISTORY_PATH}.tmp`, HISTORY_PATH);
-  } catch (e) {
-    console.error("Couldn't save history:", e.message);
+async function writeJsonLines(file, entries) {
+  await writeFile(`${file}.tmp`, entries.map((e) => JSON.stringify(e) + '\n').join(''), { mode: 0o600 });
+  await rename(`${file}.tmp`, file);
+}
+
+function appendEntry(tier, entry) {
+  tier.entries.push(entry);
+  appendFile(tier.path, JSON.stringify(entry) + '\n', { mode: 0o600 }).catch((e) => console.error(`Couldn't save ${tier.name} history:`, e.message));
+}
+
+/**
+ * Adds an entry of the tier below to tier `i`'s average in the making. When the entry belongs to
+ * a later step, the finished average is saved and, with `cascade`, passed up a tier in turn.
+ */
+function feedTier(i, entry, cascade = true) {
+  const tier = TIERS[i];
+  const start = Math.floor(entry.t / tier.step) * tier.step;
+  if (tier.pending && tier.pending.t !== start) {
+    const done = finishPending(tier.pending);
+    tier.pending = undefined;
+    appendEntry(tier, done);
+    if (cascade && TIERS[i + 1]) feedTier(i + 1, done);
   }
+  tier.pending ??= { t: start, n: 0, sum: {}, weight: {}, peak: {} };
+  const p = tier.pending;
+  const n = entry.n ?? 1;
+  p.n += n;
+  for (const [k, v] of Object.entries(entry.a)) {
+    p.sum[k] = (p.sum[k] ?? 0) + v * n;
+    p.weight[k] = (p.weight[k] ?? 0) + n;
+    if (isMachineKey(k)) {
+      const peak = entry.m?.[k] ?? v;
+      if (!(p.peak[k] >= peak)) p.peak[k] = peak;
+    }
+  }
+}
+
+function finishPending(p) {
+  const a = {};
+  for (const k of Object.keys(p.sum)) a[k] = trim(p.sum[k] / p.weight[k]);
+  const m = {};
+  for (const [k, v] of Object.entries(p.peak)) m[k] = trim(v);
+  return { t: p.t, n: p.n, a, m };
+}
+
+/** An entry from the single file kept before the tiers. */
+function fromOldEntry(h) {
+  const a = {};
+  for (const k of ['cpu', 'gpu', 'mem', 'cache', 'swap', 'rx', 'tx', 'temp', 'gtemp', 'gpow', 'vram']) {
+    if (typeof h[k] === 'number') a[k] = h[k];
+  }
+  for (const [id, [mem, cpu]] of Object.entries(h.s ?? {})) {
+    a[`s:${id}:mem`] = mem;
+    if (typeof cpu === 'number') a[`s:${id}:cpu`] = cpu;
+  }
+  return { t: h.t, a };
+}
+
+async function loadHistory() {
+  const now = Date.now();
+  for (const tier of TIERS) {
+    const all = await readJsonLines(tier.path);
+    tier.entries = all.filter((e) => e.t > now - tier.keep);
+    if (tier.entries.length < all.length) await writeJsonLines(tier.path, tier.entries);
+  }
+  const raw = TIERS[0];
+  const old = await readFile(OLD_HISTORY_PATH, 'utf8').then(JSON.parse, () => undefined);
+  if (Array.isArray(old)) {
+    const first = raw.entries[0]?.t ?? Infinity;
+    raw.entries = [...old.filter((h) => h.t > now - raw.keep && h.t < first).map(fromOldEntry), ...raw.entries];
+    await writeJsonLines(raw.path, raw.entries);
+    await rename(OLD_HISTORY_PATH, `${OLD_HISTORY_PATH}.old`);
+  }
+  // The averages being made when the server last stopped, from the readings since the last one saved.
+  for (let i = 1; i < TIERS.length; i++) {
+    const last = TIERS[i].entries.at(-1);
+    const after = last ? last.t + TIERS[i].step : 0;
+    for (const e of TIERS[i - 1].entries) if (e.t >= after) feedTier(i, e, false);
+  }
+}
+
+async function compactHistory() {
+  const now = Date.now();
+  for (const tier of TIERS) {
+    const keep = tier.entries.filter((e) => e.t > now - tier.keep);
+    if (keep.length === tier.entries.length) continue;
+    tier.entries = keep;
+    await writeJsonLines(tier.path, keep).catch((e) => console.error(`Couldn't compact ${tier.name} history:`, e.message));
+  }
+  events = events.filter((e) => e.t > now - HISTORY_MAX_MS);
+  await writeJsonLines(EVENTS_PATH, events).catch((e) => console.error("Couldn't compact events:", e.message));
 }
 
 async function recordHistory() {
   try {
     const card = await gpuCard();
-    const [info, temps, gpu, list, gpuSense, vram] = await Promise.all([
+    const [info, temps, gpu, list, gpuSense, vram, press, clocks] = await Promise.all([
       meminfo(),
       temperatures(),
       gpuBusy(),
       services(),
       card ? gpuSensors(card) : undefined,
       card ? readNumber(`${card}/mem_info_vram_used`) : undefined,
+      pressure(10),
+      cpuClocks(),
     ]);
+    const nets = await sampleContainerNet(lastPods);
+    // Files Tdarr is converting; nothing while it's stopped.
+    const tdarrRunning = list.some((x) => x.id === 'container:tdarr' && x.state === 'running');
+    const converting = tdarrRunning
+      ? await tdarr('get-nodes').then((nodes) => Object.values(nodes ?? {}).reduce((n, node) => n + Object.keys(node.workers ?? {}).length, 0), () => undefined)
+      : undefined;
+    noteServiceChanges(list);
+    lastServices = list;
+
     const mem = memoryBreakdown(info);
-    const round = (n) => (n === undefined ? undefined : Math.round(n * 1000) / 1000);
-    history.push({
-      t: Date.now(),
-      cpu: round(rates.cpu),
-      gpu: round(gpu),
-      mem: mem.totalBytes - mem.availableBytes,
-      cache: mem.cacheBytes,
-      swap: mem.swapUsedBytes,
-      rx: rates.rxPerSec === undefined ? undefined : Math.round(rates.rxPerSec),
-      tx: rates.txPerSec === undefined ? undefined : Math.round(rates.txPerSec),
-      temp: temps.find((t) => t.label === 'CPU')?.celsius,
-      gtemp: gpuSense?.temperatures.find((t) => t.label === 'Hotspot')?.celsius ?? gpuSense?.temperatures[0]?.celsius,
-      gpow: gpuSense?.power && Math.round(gpuSense.power.watts * 10) / 10,
-      vram,
-      s: Object.fromEntries(list.filter((x) => x.usage).map((x) => [x.id, [x.usage.usedBytes, round(x.usage.cpu)]])),
-    });
-    const cutoff = Date.now() - HISTORY_KEEP_MS;
-    while (history.length && history[0].t < cutoff) history.shift();
+    const a = {};
+    const put = (key, v) => {
+      if (typeof v === 'number' && Number.isFinite(v)) a[key] = trim(v);
+    };
+    put('cpu', rates.cpu);
+    put('gpu', gpu);
+    put('mem', mem.totalBytes - mem.availableBytes);
+    put('cache', mem.cacheBytes);
+    put('swap', mem.swapUsedBytes);
+    put('rx', rates.rxPerSec);
+    put('tx', rates.txPerSec);
+    put('temp', temps.find((t) => t.label === 'CPU')?.celsius);
+    put('gtemp', gpuSense?.temperatures.find((t) => t.label === 'Hotspot')?.celsius ?? gpuSense?.temperatures[0]?.celsius);
+    put('gpow', gpuSense?.power?.watts);
+    put('vram', vram);
+    put('cpow', rates.cpuWatts);
+    put('clock', clocks.length ? clocks.reduce((sum, c) => sum + c, 0) / clocks.length / 1000 : undefined);
+    put('pcpu', press.cpu);
+    put('pmem', press.memory);
+    put('pio', press.io);
+    put('conv', converting);
+    for (const d of driveInfo) {
+      const r = d.device && diskRates.get(d.device);
+      if (r) {
+        put(`d:${d.id}:r`, r.readPerSec);
+        put(`d:${d.id}:w`, r.writePerSec);
+        put(`d:${d.id}:busy`, r.busy);
+      }
+      put(`d:${d.id}:temp`, d.temperature);
+    }
+    for (const s of list) {
+      if (!s.usage) continue;
+      put(`s:${s.id}:mem`, s.usage.usedBytes);
+      put(`s:${s.id}:cpu`, s.usage.cpu);
+      put(`s:${s.id}:r`, s.usage.readPerSec);
+      put(`s:${s.id}:w`, s.usage.writePerSec);
+      const net = nets.get(s.id);
+      if (net) {
+        put(`s:${s.id}:rx`, net.rxPerSec);
+        put(`s:${s.id}:tx`, net.txPerSec);
+      }
+    }
+    for (const [name, r] of peerRates) {
+      put(`t:${name}:rx`, r.rxPerSec);
+      put(`t:${name}:tx`, r.txPerSec);
+    }
+
+    const entry = { t: Date.now(), a };
+    const raw = TIERS[0];
+    appendEntry(raw, entry);
+    feedTier(1, entry);
+    while (raw.entries.length && raw.entries[0].t < entry.t - raw.keep) raw.entries.shift();
   } catch (e) {
     console.error('Recording history failed:', e);
   }
 }
 
-const SERIES = {
-  cpu: (h) => h.cpu,
-  gpu: (h) => h.gpu,
-  memory: (h) => h.mem,
-  cache: (h) => h.cache,
-  swap: (h) => h.swap,
-  rx: (h) => h.rx,
-  tx: (h) => h.tx,
-  temp: (h) => h.temp,
-  gpuTemp: (h) => h.gtemp,
-  gpuPower: (h) => h.gpow,
-  vram: (h) => h.vram,
-};
+/**
+ * The entries covering `start` until now: from the finest tier that reaches back that far, then
+ * the readings newer than its last average.
+ */
+function historyEntries(start) {
+  const tier = TIERS.find((t) => t.keep >= Date.now() - start) ?? TIERS.at(-1);
+  const raw = TIERS[0];
+  if (tier === raw) return raw.entries.filter((e) => e.t >= start);
+  const last = tier.entries.at(-1);
+  const after = Math.max(start, last ? last.t + tier.step : 0);
+  return [...tier.entries.filter((e) => e.t >= start), ...raw.entries.filter((e) => e.t >= after)];
+}
 
 /**
- * The last `rangeSec` seconds, averaged into evenly spaced buckets so the app gets the same
- * number of points for an hour or a day. A bucket with no readings (the server was off) is null.
- * Each series also gets its average and peak over the raw readings, which averaging would hide.
+ * Each of `keys` (name → key) over the entries, averaged into `HISTORY_POINTS` evenly spaced
+ * buckets so the app gets as many points for an hour as for a year. A bucket without readings is
+ * null. Each also gets its average and peak over the whole range, and its total (value ×
+ * seconds), which makes bytes of a rate and joules of watts.
  */
-function historyFor(rangeSec, serviceId) {
+function summarize(entries, keys, start, end) {
+  const step = (end - start) / HISTORY_POINTS;
+  const acc = Object.entries(keys).map(([name, key]) => ({
+    name,
+    key,
+    sums: new Array(HISTORY_POINTS).fill(0),
+    weights: new Array(HISTORY_POINTS).fill(0),
+    sum: 0,
+    weight: 0,
+    peak: undefined,
+  }));
+  for (const e of entries) {
+    const n = e.n ?? 1;
+    const i = Math.min(HISTORY_POINTS - 1, Math.max(0, Math.floor((e.t - start) / step)));
+    for (const s of acc) {
+      const v = e.a[s.key];
+      if (typeof v !== 'number') continue;
+      s.sums[i] += v * n;
+      s.weights[i] += n;
+      s.sum += v * n;
+      s.weight += n;
+      const peak = e.m?.[s.key] ?? v;
+      if (s.peak === undefined || peak > s.peak) s.peak = peak;
+    }
+  }
+  return Object.fromEntries(
+    acc.map((s) => [
+      s.name,
+      {
+        values: s.sums.map((sum, i) => (s.weights[i] ? sum / s.weights[i] : null)),
+        average: s.weight ? s.sum / s.weight : undefined,
+        peak: s.peak,
+        total: (s.sum * HISTORY_INTERVAL) / 1000,
+      },
+    ]),
+  );
+}
+
+/** Totals and averages of every key matching `pattern` (its first group names it), without buckets. */
+function totals(entries, pattern) {
+  const out = new Map();
+  for (const e of entries) {
+    const n = e.n ?? 1;
+    for (const [k, v] of Object.entries(e.a)) {
+      const name = pattern.exec(k)?.[1];
+      if (name === undefined) continue;
+      const t = out.get(name) ?? { sum: 0, weight: 0 };
+      t.sum += v * n;
+      t.weight += n;
+      out.set(name, t);
+    }
+  }
+  return new Map([...out].map(([k, t]) => [k, { total: (t.sum * HISTORY_INTERVAL) / 1000, average: t.sum / t.weight, readings: t.weight }]));
+}
+
+/** How many readings the entries stand for, which `totals` readings can be compared with. */
+const readingCount = (entries) => entries.reduce((sum, e) => sum + (e.n ?? 1), 0);
+
+const SYSTEM_SERIES = {
+  cpu: 'cpu',
+  gpu: 'gpu',
+  memory: 'mem',
+  cache: 'cache',
+  swap: 'swap',
+  rx: 'rx',
+  tx: 'tx',
+  temp: 'temp',
+  gpuTemp: 'gtemp',
+  gpuPower: 'gpow',
+  vram: 'vram',
+  cpuPower: 'cpow',
+  cpuClock: 'clock',
+  pressureCpu: 'pcpu',
+  pressureMemory: 'pmem',
+  pressureIo: 'pio',
+  converting: 'conv',
+};
+
+/** The series for the whole machine, a service, a drive or a Tailscale device, with what happened meanwhile. */
+function historyFor(rangeSec, { service, drive, device } = {}) {
   const end = Date.now();
   const start = end - rangeSec * 1000;
-  const step = (rangeSec * 1000) / HISTORY_POINTS;
-  const series = serviceId
-    ? { memory: (h) => h.s?.[serviceId]?.[0], cpu: (h) => h.s?.[serviceId]?.[1] }
-    : SERIES;
-
-  const out = {};
-  for (const [name, pick] of Object.entries(series)) {
-    const sums = new Array(HISTORY_POINTS).fill(0);
-    const counts = new Array(HISTORY_POINTS).fill(0);
-    let total = 0;
-    let n = 0;
-    let peak;
-    for (const h of history) {
-      if (h.t < start) continue;
-      const v = pick(h);
-      if (typeof v !== 'number') continue;
-      const i = Math.min(HISTORY_POINTS - 1, Math.floor((h.t - start) / step));
-      sums[i] += v;
-      counts[i]++;
-      total += v;
-      n++;
-      if (peak === undefined || v > peak) peak = v;
-    }
-    out[name] = {
-      values: sums.map((sum, i) => (counts[i] ? sum / counts[i] : null)),
-      average: n ? total / n : undefined,
-      peak,
-    };
+  let keys = SYSTEM_SERIES;
+  let related = (e) => e.kind !== 'problem' && e.kind !== 'resolved';
+  if (service) {
+    keys = { memory: 'mem', cpu: 'cpu', read: 'r', write: 'w', rx: 'rx', tx: 'tx' };
+    keys = Object.fromEntries(Object.entries(keys).map(([name, k]) => [name, `s:${service}:${k}`]));
+    related = (e) => e.id === service || e.kind === 'boot';
+  } else if (drive) {
+    keys = { read: `d:${drive}:r`, write: `d:${drive}:w`, busy: `d:${drive}:busy`, temp: `d:${drive}:temp` };
+    related = (e) => e.kind === 'boot' || e.drive === drive;
+  } else if (device) {
+    keys = { rx: `t:${device}:rx`, tx: `t:${device}:tx` };
+    related = () => false;
   }
-  return { start, end, step, series: out, oldest: history[0]?.t, memoryTotalBytes: os.totalmem() };
+  const entries = historyEntries(start);
+  return {
+    start,
+    end,
+    step: (end - start) / HISTORY_POINTS,
+    series: summarize(entries, keys, start, end),
+    events: events.filter((e) => e.t >= start && related(e)),
+    oldest: TIERS.map((t) => t.entries[0]?.t).filter(Boolean).reduce((a, b) => Math.min(a, b), end),
+    memoryTotalBytes: os.totalmem(),
+  };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Events: what happened to the services and the machine, kept a year in `events.jsonl`. Starts,
+// stops and restarts are noticed by comparing each reading's services with the last; who caused
+// them is worked out from what this server itself did around then.
+
+const EVENTS_PATH = path.join(ROOT, 'events.jsonl');
+/** How long after an action its effects are put down to it. */
+const INTENT_MS = 3 * 60_000;
+
+/** { t, kind, id?, name?, by?, detail?, drive? }, oldest first. */
+let events = [];
+/** Service id → { by, at } for actions taken from the app. */
+const intents = new Map();
+/** Each service's last settled state, to compare the next reading with. */
+let lastStates;
+/** The services as of the last reading, for their names. */
+let lastServices;
+
+function addEvent(kind, fields = {}, t = Date.now()) {
+  const e = { t, kind, ...fields };
+  events.push(e);
+  appendFile(EVENTS_PATH, JSON.stringify(e) + '\n', { mode: 0o600 }).catch((err) => console.error("Couldn't save event:", err.message));
+  return e;
+}
+
+async function loadEvents() {
+  const now = Date.now();
+  events = (await readJsonLines(EVENTS_PATH)).filter((e) => e.t > now - HISTORY_MAX_MS);
+  // Boots the journal remembers, and this one. The boot time worked out from the uptime moves by
+  // a second or so between starts, and the journal's first entry comes a little after it.
+  const { stdout } = await run('journalctl', ['--list-boots', '-o', 'json', '--no-pager']).catch((e) => e);
+  let boots = [];
+  try {
+    boots = JSON.parse(stdout || '[]').map((b) => Math.round(b.first_entry / 1000));
+  } catch {}
+  boots.push(Math.round(now - os.uptime() * 1000));
+  for (const boot of boots) {
+    if (boot > now - HISTORY_MAX_MS && !events.some((e) => e.kind === 'boot' && Math.abs(e.t - boot) < 5 * 60_000)) {
+      addEvent('boot', {}, boot);
+    }
+  }
+  events.sort((a, b) => a.t - b.t);
+  // Memory kills since the last one logged, including any while this server was down.
+  const lastOom = events.findLast((e) => e.kind === 'oom')?.t ?? 0;
+  journalCheckedAt = Math.max(lastOom + 1, now - 31 * DAY_MS);
+}
+
+/** Why a service started or stopped just now, when this server knows. */
+function causeOf(s, now) {
+  const intent = intents.get(s.id);
+  if (intent && now - intent.at < INTENT_MS) return intent.by;
+  const name = s.id.slice(s.id.indexOf(':') + 1);
+  if (gameMode.since && now - gameMode.since < INTENT_MS && GAME_MODE_UNITS.includes(name)) return 'game mode';
+  if (onDemandUnit(`${name}.service`)) return 'on demand';
+  return undefined;
+}
+
+function noteServiceChanges(list) {
+  const now = Date.now();
+  const next = new Map(lastStates);
+  for (const s of list) {
+    // Mid-change states settle by the next reading or two; compare settled ones.
+    if (s.state === 'changing') continue;
+    next.set(s.id, { state: s.state, since: s.since, restarts: s.restarts ?? 0 });
+    const prev = lastStates?.get(s.id);
+    if (!prev) continue;
+    const base = { id: s.id, name: s.name };
+    if (s.restarts > prev.restarts) {
+      addEvent('crashed', { ...base, detail: 'Restarted by systemd' });
+      notify(`${s.name} crashed`, 'It stopped unexpectedly and systemd restarted it.', 'boom', `homebase://server/service/${encodeURIComponent(s.id)}`);
+    } else if (s.state === 'failed' && prev.state !== 'failed') {
+      addEvent('failed', { ...base, detail: s.detail });
+    } else if (s.state === 'stopped' && prev.state === 'running') {
+      addEvent('stopped', { ...base, by: causeOf(s, now) });
+    } else if (s.state === 'running' && prev.state !== 'running') {
+      addEvent('started', { ...base, by: causeOf(s, now) });
+    } else if (s.state === 'running' && s.since && prev.since && s.since !== prev.since) {
+      addEvent('restarted', { ...base, by: causeOf(s, now) });
+    }
+  }
+  lastStates = next;
+}
+
+// Memory kills: the kernel's OOM killer when memory runs out, and systemd-oomd, which kills a
+// cgroup earlier when memory pressure stays high. Both are read from the journal.
+
+const OOM_PATTERN = 'oom-kill:|^Killed .* due to memory';
+let journalCheckedAt = Date.now();
+/** Kills found looking back on the first start are logged without a notification. */
+const startedAt = Date.now();
+
+/** The service a cgroup path belongs to, or a readable name for it. */
+function serviceOfCgroup(cgroup) {
+  const units = new Map();
+  for (const p of lastPods) {
+    const name = p.Names?.[0];
+    if (!name) continue;
+    if (p.Labels?.PODMAN_SYSTEMD_UNIT) units.set(p.Labels.PODMAN_SYSTEMD_UNIT, { id: `container:${name}`, name });
+    units.set(`libpod-${p.Id}.scope`, { id: `container:${name}`, name });
+  }
+  for (const u of UNITS) units.set(u.runs ?? u.unit, { id: `unit:${u.id}`, name: u.name });
+  const parts = cgroup.split('/').filter(Boolean);
+  for (let i = parts.length - 1; i >= 0; i--) {
+    const found = units.get(parts[i]);
+    if (found) return found;
+  }
+  // The outermost unit, so a terminal's tab counts as the terminal.
+  const unit = parts.find((p) => /\.(service|scope)$/.test(p) && !p.startsWith('user@'));
+  return { name: unit ? groupLabel(unit) : cgroup };
+}
+
+async function checkJournal() {
+  const since = journalCheckedAt;
+  journalCheckedAt = Date.now();
+  const args = ['-o', 'json', '--no-pager', '-q', '--since', `@${Math.floor(since / 1000)}`, '-g', OOM_PATTERN];
+  // Exits with 1 when nothing matches.
+  const { stdout } = await run('journalctl', [...args, '_TRANSPORT=kernel', '+', '_SYSTEMD_UNIT=systemd-oomd.service'], {
+    timeout: 30_000,
+    maxBuffer: 16 * 1024 * 1024,
+  }).catch((e) => e);
+  for (const line of (stdout ?? '').split('\n').filter(Boolean)) {
+    let entry;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const t = Math.round(Number(entry.__REALTIME_TIMESTAMP) / 1000);
+    if (t < since || events.some((e) => e.kind === 'oom' && e.t === t)) continue;
+    const message = String(entry.MESSAGE ?? '');
+    const kernel = /task_memcg=([^,\s]+),task=([^,\s]+)/.exec(message);
+    const oomd = /^Killed (\S+) due to memory (\w+)/.exec(message);
+    if (!kernel && !oomd) continue;
+    const owner = serviceOfCgroup(kernel ? kernel[1] : oomd[1]);
+    const detail = kernel ? `Ran out of memory; the kernel killed ${kernel[2]}` : 'Killed by systemd-oomd under memory pressure';
+    addEvent('oom', { id: owner.id, name: owner.name, detail }, t);
+    if (t < startedAt - 5 * 60_000) continue;
+    notify(`${owner.name} was killed for memory`, detail, 'skull', owner.id ? `homebase://server/service/${encodeURIComponent(owner.id)}` : undefined);
+  }
+}
+
+/** Crashes, restarts and memory kills per service, running time, and the events, over the range. */
+function reliability(rangeSec) {
+  const end = Date.now();
+  const start = end - rangeSec * 1000;
+  const inRange = events.filter((e) => e.t >= start);
+  const entries = historyEntries(start);
+  const readings = readingCount(entries);
+  const running = totals(entries, /^s:(.+):mem$/);
+  const byId = new Map();
+  const names = new Map((lastServices ?? []).map((s) => [s.id, s.name]));
+  const row = (id, name) => {
+    if (!byId.has(id)) byId.set(id, { id, name: names.get(id) ?? name ?? id, crashes: 0, failures: 0, oomKills: 0, restarts: 0, stops: 0 });
+    return byId.get(id);
+  };
+  for (const s of lastServices ?? []) row(s.id, s.name);
+  for (const e of inRange) {
+    if (!e.id) continue;
+    const r = row(e.id, e.name);
+    if (e.kind === 'crashed') r.crashes++;
+    else if (e.kind === 'failed') r.failures++;
+    else if (e.kind === 'oom') r.oomKills++;
+    else if (e.kind === 'restarted') r.restarts++;
+    else if (e.kind === 'stopped' && !e.by) r.stops++;
+  }
+  for (const r of byId.values()) {
+    // Share of the readings it was running for, of those the server took in the range.
+    r.running = readings ? Math.min(1, (running.get(r.id)?.readings ?? 0) / readings) : undefined;
+    r.lastTrouble = inRange.findLast((e) => e.id === r.id && ['crashed', 'failed', 'oom'].includes(e.kind))?.t;
+  }
+  return {
+    start,
+    end,
+    oldest: TIERS.map((t) => t.entries[0]?.t).filter(Boolean).reduce((a, b) => Math.min(a, b), end),
+    boots: inRange.filter((e) => e.kind === 'boot').map((e) => e.t),
+    services: [...byId.values()].sort((a, b) => b.crashes + b.failures + b.oomKills - (a.crashes + a.failures + a.oomKills) || a.name.localeCompare(b.name)),
+    events: inRange.slice(-300).reverse(),
+    at: end,
+  };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Drives: model, health and temperature from udisks, which reads the drives' SMART data every
+// ten minutes and lets any user see it, and traffic from /proc/diskstats.
+
+const DRIVE_REFRESH_INTERVAL = 10 * 60_000;
+const DRIVE_HOT = { hdd: 55, ssd: 70, nvme: 75 };
+/** Normalized SMART values for an SSD's remaining life, by attribute id. */
+const LIFE_ATTRIBUTES = [177, 231, 202, 233];
+
+/** [{ id, model, kind, sizeBytes, device, mounts, temperature, smart, health, issues }] */
+let driveInfo = [];
+let driveError;
+
+async function udisksCall(objectPath, iface, method, signature, ...args) {
+  const { stdout } = await run(
+    'busctl',
+    ['--json=short', 'call', 'org.freedesktop.UDisks2', objectPath, iface, method, ...(signature ? [signature, ...args] : [])],
+    { timeout: 20_000, maxBuffer: 16 * 1024 * 1024 },
+  );
+  return JSON.parse(stdout).data;
+}
+
+/** D-Bus byte strings end in a NUL. */
+const byteString = (bytes = []) => Buffer.from(bytes.filter(Boolean)).toString();
+
+function ataAttributes(rows) {
+  // [id, name, flags, value, worst, threshold, pretty, prettyUnit, expansion]
+  return new Map(rows.map(([id, name, , value, worst, threshold, pretty, unit]) => [id, { name, value, worst, threshold, pretty, unit }]));
+}
+
+async function readDrive(objectPath, o, blocks) {
+  const prop = (obj, iface, name) => obj[`org.freedesktop.UDisks2.${iface}`]?.[name]?.data;
+  const mine = blocks.filter(([, b]) => prop(b, 'Block', 'Drive') === objectPath);
+  // Encrypted volumes sit on a partition of the drive rather than on the drive itself.
+  const backed = blocks.filter(([, b]) => mine.some(([p]) => p === prop(b, 'Block', 'CryptoBackingDevice')));
+  const whole = mine.find(([, b]) => !b['org.freedesktop.UDisks2.Partition']);
+  const mounts = [...mine, ...backed].flatMap(([, b]) => (prop(b, 'Filesystem', 'MountPoints') ?? []).map(byteString));
+  const rotation = prop(o, 'Drive', 'RotationRate');
+  const nvme = o['org.freedesktop.UDisks2.NVMe.Controller'];
+  const ata = o['org.freedesktop.UDisks2.Drive.Ata'];
+  const drive = {
+    id: prop(o, 'Drive', 'Serial') || path.basename(objectPath),
+    model: prop(o, 'Drive', 'Model') || 'Drive',
+    kind: nvme ? 'nvme' : rotation === 0 ? 'ssd' : 'hdd',
+    rpm: rotation > 0 ? rotation : undefined,
+    sizeBytes: prop(o, 'Drive', 'Size'),
+    device: whole ? path.basename(byteString(prop(whole[1], 'Block', 'Device'))) : undefined,
+    mounts: [...new Set(mounts)].sort(),
+    smart: undefined,
+    issues: [],
+  };
+  const kelvin = (k) => (k > 0 ? Math.round((k - 273.15) * 10) / 10 : undefined);
+
+  if (nvme) {
+    const [attrs] = await udisksCall(objectPath, 'org.freedesktop.UDisks2.NVMe.Controller', 'SmartGetAttributes', 'a{sv}', '0').catch(() => [{}]);
+    const a = (k) => attrs[k]?.data;
+    const warnings = prop(o, 'NVMe.Controller', 'SmartCriticalWarning') ?? [];
+    drive.temperature = kelvin(prop(o, 'NVMe.Controller', 'SmartTemperature'));
+    drive.smart = {
+      updated: (prop(o, 'NVMe.Controller', 'SmartUpdated') ?? 0) * 1000 || undefined,
+      powerOnHours: prop(o, 'NVMe.Controller', 'SmartPowerOnHours'),
+      lifeLeft: a('percent_used') !== undefined ? Math.max(0, 1 - a('percent_used') / 100) : undefined,
+      spare: a('avail_spare') !== undefined ? a('avail_spare') / 100 : undefined,
+      spareThreshold: a('spare_thresh') !== undefined ? a('spare_thresh') / 100 : undefined,
+      readBytes: a('total_data_read'),
+      writtenBytes: a('total_data_written'),
+      powerCycles: a('power_cycles'),
+      unsafeShutdowns: a('unsafe_shutdowns'),
+      mediaErrors: a('media_errors'),
+      hotMinutes: (a('warning_temp_time') ?? 0) + (a('critical_temp_time') ?? 0),
+      selfTest: prop(o, 'NVMe.Controller', 'SmartSelftestStatus') || undefined,
+      warnings,
+    };
+    for (const w of warnings) drive.issues.push({ level: 'failing', text: `The drive reports a critical warning: ${w.replace(/_/g, ' ')}` });
+    const s = drive.smart;
+    if (s.spare !== undefined && s.spareThreshold !== undefined && s.spare <= s.spareThreshold) {
+      drive.issues.push({ level: 'failing', text: 'Spare blocks are used up' });
+    }
+    if (s.mediaErrors) drive.issues.push({ level: 'warning', text: `${s.mediaErrors} data errors` });
+  } else if (ata && prop(o, 'Drive.Ata', 'SmartSupported')) {
+    const rows = await udisksCall(objectPath, 'org.freedesktop.UDisks2.Drive.Ata', 'SmartGetAttributes', 'a{sv}', '0').catch(() => [[]]);
+    const attrs = ataAttributes(rows[0] ?? []);
+    const raw = (id) => attrs.get(id)?.pretty;
+    const life = LIFE_ATTRIBUTES.map((id) => attrs.get(id)).find((x) => x && x.value > 0 && x.value <= 100);
+    const written = attrs.get(241);
+    drive.temperature = kelvin(prop(o, 'Drive.Ata', 'SmartTemperature'));
+    drive.smart = {
+      updated: (prop(o, 'Drive.Ata', 'SmartUpdated') ?? 0) * 1000 || undefined,
+      powerOnHours: Math.round((prop(o, 'Drive.Ata', 'SmartPowerOnSeconds') ?? 0) / 3600) || undefined,
+      failing: !!prop(o, 'Drive.Ata', 'SmartFailing'),
+      failingAttributes: prop(o, 'Drive.Ata', 'SmartNumAttributesFailing') ?? 0,
+      failedInPast: prop(o, 'Drive.Ata', 'SmartNumAttributesFailedInThePast') ?? 0,
+      badSectors: prop(o, 'Drive.Ata', 'SmartNumBadSectors') ?? 0,
+      reallocated: raw(5),
+      pending: raw(197),
+      uncorrectable: raw(198),
+      cableErrors: raw(199),
+      powerCycles: raw(12),
+      loadCycles: drive.kind === 'hdd' ? raw(193) : undefined,
+      lifeLeft: drive.kind === 'ssd' && life ? life.value / 100 : undefined,
+      // Total LBAs written counts 512-byte sectors on most drives.
+      writtenBytes: written && (written.unit === 1 || written.unit === 3) ? written.pretty * 512 : undefined,
+      selfTest: prop(o, 'Drive.Ata', 'SmartSelftestStatus') || undefined,
+    };
+    const s = drive.smart;
+    if (s.failing) drive.issues.push({ level: 'failing', text: 'The drive says it is about to fail' });
+    else if (s.failingAttributes) drive.issues.push({ level: 'failing', text: `${s.failingAttributes} health checks are failing` });
+    if (s.badSectors) drive.issues.push({ level: 'warning', text: `${s.badSectors} bad sectors` });
+    if (s.pending) drive.issues.push({ level: 'warning', text: `${s.pending} sectors waiting to be remapped` });
+  }
+  const s = drive.smart;
+  if (s?.lifeLeft !== undefined && s.lifeLeft <= 0.1) drive.issues.push({ level: 'warning', text: `${Math.round(s.lifeLeft * 100)}% of its life left` });
+  if (s?.selfTest && /^(fatal|error)/.test(s.selfTest)) drive.issues.push({ level: 'warning', text: 'The last self-test failed' });
+  if (drive.temperature >= DRIVE_HOT[drive.kind]) drive.issues.push({ level: 'warning', text: `Running hot at ${Math.round(drive.temperature)}°C` });
+  drive.health = drive.issues.some((i) => i.level === 'failing') ? 'failing' : drive.issues.length ? 'warning' : s ? 'good' : 'unknown';
+  return drive;
+}
+
+async function refreshDrives() {
+  try {
+    const [objects] = await udisksCall('/org/freedesktop/UDisks2', 'org.freedesktop.DBus.ObjectManager', 'GetManagedObjects');
+    const list = Object.entries(objects);
+    const blocks = list.filter(([, o]) => o['org.freedesktop.UDisks2.Block']);
+    const drives = await Promise.all(list.filter(([, o]) => o['org.freedesktop.UDisks2.Drive']).map(([p, o]) => readDrive(p, o, blocks)));
+    // The system drive first, then by where they're mounted.
+    const rank = (d) => (d.mounts.includes('/') ? 0 : d.mounts.length ? 1 : 2);
+    driveInfo = drives.sort((a, b) => rank(a) - rank(b) || (a.mounts[0] ?? a.model).localeCompare(b.mounts[0] ?? b.model));
+    driveError = undefined;
+  } catch (e) {
+    driveError = e.stderr?.trim() || e.message;
+    console.error("Couldn't read the drives:", driveError);
+  }
+}
+
+/** Each drive with its health, what it's doing now and which services are using it most. */
+async function drives() {
+  const groups = await groupUsage();
+  const pods = lastPods.length ? lastPods : await containers().catch(() => []);
+  const services = serviceGroups(groups, pods);
+  const names = new Map(pods.map((p) => [`container:${p.Names?.[0]}`, p.Names?.[0]]));
+  for (const u of UNITS) names.set(`unit:${u.id}`, u.name);
+  const serviceByDir = new Map([...services].map(([id, g]) => [g.dir, id]));
+  const devNumbers = new Map(
+    await Promise.all(driveInfo.filter((d) => d.device).map(async (d) => [d.device, await readText(`/sys/block/${d.device}/dev`)])),
+  );
+  return {
+    drives: driveInfo.map((d) => {
+      const dev = devNumbers.get(d.device);
+      const users = groups
+        .map((g) => {
+          const [r, w] = g.deviceRates?.[dev] ?? [0, 0];
+          const id = serviceByDir.get(g.dir);
+          return { id, name: id ? names.get(id) : groupLabel(path.basename(g.dir)), readPerSec: r, writePerSec: w };
+        })
+        .filter((u) => u.readPerSec + u.writePerSec > 0)
+        .sort((a, b) => b.readPerSec + b.writePerSec - (a.readPerSec + a.writePerSec))
+        .slice(0, 6);
+      return { ...d, activity: diskRates.get(d.device), users };
+    }),
+    error: driveError,
+    at: Date.now(),
+  };
+}
+
+// ---------------------------------------------------------------------------------------------
+// CPU: each core's load and clock speed, and the package's power draw.
+
+let cpuModel;
+
+async function cpuClocks() {
+  const cpus = (await readdir('/sys/devices/system/cpu').catch(() => [])).filter((c) => /^cpu\d+$/.test(c));
+  cpus.sort((a, b) => Number(a.slice(3)) - Number(b.slice(3)));
+  const khz = await Promise.all(cpus.map((c) => readNumber(`/sys/devices/system/cpu/${c}/cpufreq/scaling_cur_freq`)));
+  return khz.filter((k) => k !== undefined);
+}
+
+async function cpu() {
+  cpuModel ??= /^model name\s*:\s*(.+)$/m.exec(await readFile('/proc/cpuinfo', 'utf8'))?.[1]?.trim();
+  const [clocks, temps, press, maxKhz, governor, preference] = await Promise.all([
+    cpuClocks(),
+    temperatures(),
+    pressure(10),
+    readNumber('/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq'),
+    readText('/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor'),
+    readText('/sys/devices/system/cpu/cpu0/cpufreq/energy_performance_preference'),
+  ]);
+  return {
+    model: cpuModel,
+    usage: rates.cpu,
+    load: os.loadavg(),
+    cores: rates.cores.map((usage, i) => ({ usage, mhz: clocks[i] !== undefined ? Math.round(clocks[i] / 1000) : undefined })),
+    maxMhz: maxKhz && Math.round(maxKhz / 1000),
+    temperature: temps.find((t) => t.label === 'CPU')?.celsius,
+    watts: rates.cpuWatts,
+    powerError: cpuPowerError,
+    pressure: press,
+    governor,
+    preference,
+    at: Date.now(),
+  };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Power: the CPU package's and graphics card's measured draw, and what that costs. The rest of the
+// PC (drives, board, fans, the power supply's losses) isn't measured, so it's an estimate set in
+// the app, added on top.
+
+const POWER_PATH = path.join(ROOT, 'power.json');
+let powerSettings = { pricePerKwh: undefined, currency: '$', otherWatts: 0 };
+
+async function loadPowerSettings() {
+  const saved = await readFile(POWER_PATH, 'utf8').then(JSON.parse, () => undefined);
+  if (saved) powerSettings = { ...powerSettings, ...saved };
+}
+
+async function setPowerSettings(body) {
+  const next = { ...powerSettings };
+  if ('pricePerKwh' in body) {
+    const price = body.pricePerKwh === null ? undefined : Number(body.pricePerKwh);
+    if (price !== undefined && !(price >= 0 && price < 100)) throw new HttpError(400, 'Price must be a number per kWh');
+    next.pricePerKwh = price;
+  }
+  if ('currency' in body) {
+    if (typeof body.currency !== 'string' || body.currency.length > 4) throw new HttpError(400, 'Currency must be a short symbol');
+    next.currency = body.currency;
+  }
+  if ('otherWatts' in body) {
+    const watts = Number(body.otherWatts);
+    if (!(watts >= 0 && watts <= 1000)) throw new HttpError(400, 'Other watts must be 0 to 1000');
+    next.otherWatts = watts;
+  }
+  powerSettings = next;
+  await writeFile(POWER_PATH, JSON.stringify(next), { mode: 0o600 });
+  return powerState();
+}
+
+function powerState() {
+  return { ...powerSettings, cpuWatts: rates.cpuWatts, cpuPowerError };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Network per service and per device. A container with a network of its own has its own traffic
+// counters, read from inside its network namespace through one of its processes. Containers that
+// share one (qBittorrent goes through gluetun's VPN) are counted together. Tailscale counts the
+// bytes to and from each device.
+
+let lastContainerNet;
+/** Service id → { rxPerSec, txPerSec }. */
+let containerNetRates = new Map();
+/** Groups of containers sharing a network, as service ids, from the last reading. */
+let netGroups = [];
+
+async function sampleContainerNet(pods) {
+  const now = Date.now();
+  const host = await readlink('/proc/self/ns/net').catch(() => undefined);
+  const byNs = new Map();
+  for (const p of pods) {
+    if (p.State !== 'running' || !p.Pid) continue;
+    const ns = await readlink(`/proc/${p.Pid}/ns/net`).catch(() => undefined);
+    // Host networking is the machine's own traffic, already counted.
+    if (!ns || ns === host) continue;
+    const id = `container:${p.Names?.[0] ?? p.Id.slice(0, 12)}`;
+    const known = byNs.get(ns);
+    if (known) {
+      known.ids.push(id);
+      continue;
+    }
+    const lines = (await readFile(`/proc/${p.Pid}/net/dev`, 'utf8').catch(() => '')).split('\n').slice(2);
+    const ifaces = lines.map((l) => l.trim().split(':')).filter(([name, data]) => data && name !== 'lo');
+    // A VPN's tunnel carries the real traffic; the same data also crosses eth0, encrypted.
+    const tunnel = ifaces.filter(([name]) => /^(tun|wg)/.test(name));
+    let rx = 0;
+    let tx = 0;
+    for (const [, data] of tunnel.length ? tunnel : ifaces) {
+      const f = data.trim().split(/\s+/).map(Number);
+      rx += f[0];
+      tx += f[8];
+    }
+    byNs.set(ns, { ids: [id], rx, tx });
+  }
+  const next = new Map();
+  if (lastContainerNet) {
+    const secs = (now - lastContainerNet.at) / 1000;
+    for (const [ns, g] of byNs) {
+      const p = lastContainerNet.byNs.get(ns);
+      if (!p || secs <= 0) continue;
+      const r = { rxPerSec: Math.max(0, (g.rx - p.rx) / secs), txPerSec: Math.max(0, (g.tx - p.tx) / secs) };
+      for (const id of g.ids) next.set(id, r);
+    }
+  }
+  lastContainerNet = { at: now, byNs };
+  containerNetRates = next;
+  netGroups = [...byNs.values()].map((g) => g.ids);
+  return next;
+}
+
+const PEER_INTERVAL = 60_000;
+let lastPeers;
+/** Device name → { rxPerSec, txPerSec, os, online }. */
+let peerRates = new Map();
+
+async function samplePeers() {
+  try {
+    const { devices } = await tailscale();
+    const now = Date.now();
+    const peers = new Map(devices.filter((d) => !d.self).map((d) => [d.name, d]));
+    const next = new Map();
+    for (const [name, d] of peers) {
+      const p = lastPeers?.peers.get(name);
+      const secs = lastPeers ? (now - lastPeers.at) / 1000 : 0;
+      // The counters start over when tailscaled restarts.
+      const rate = (a, b) => (p && secs > 0 && a >= b ? (a - b) / secs : undefined);
+      next.set(name, { rxPerSec: rate(d.rxBytes, p?.rxBytes), txPerSec: rate(d.txBytes, p?.txBytes), os: d.os, online: d.online });
+    }
+    lastPeers = { at: now, peers };
+    peerRates = next;
+  } catch (e) {
+    console.error("Couldn't read Tailscale's traffic:", e.message);
+  }
+}
+
+/** Traffic over the range: the machine's, each service's and each Tailscale device's. */
+function network(rangeSec) {
+  const end = Date.now();
+  const start = end - rangeSec * 1000;
+  const entries = historyEntries(start);
+  const machine = summarize(entries, { rx: 'rx', tx: 'tx' }, start, end);
+  const rx = totals(entries, /^s:(.+):rx$/);
+  const tx = totals(entries, /^s:(.+):tx$/);
+  const names = new Map((lastServices ?? []).map((s) => [s.id, s.name]));
+  const nameOf = (id) => names.get(id) ?? id.slice(id.indexOf(':') + 1);
+
+  // Containers sharing a network have the same numbers; show them once.
+  const seen = new Set();
+  const services = [];
+  for (const ids of [...netGroups, ...[...rx.keys()].map((id) => [id])]) {
+    if (ids.some((id) => seen.has(id))) continue;
+    ids.forEach((id) => seen.add(id));
+    const id = ids.find((x) => rx.has(x)) ?? ids[0];
+    const live = containerNetRates.get(id);
+    services.push({
+      id,
+      ids,
+      name: ids.map(nameOf).join(' + '),
+      rxPerSec: live?.rxPerSec,
+      txPerSec: live?.txPerSec,
+      rxBytes: rx.get(id)?.total ?? 0,
+      txBytes: tx.get(id)?.total ?? 0,
+    });
+  }
+  services.sort((a, b) => b.rxBytes + b.txBytes - (a.rxBytes + a.txBytes));
+
+  const peerRx = totals(entries, /^t:(.+):rx$/);
+  const peerTx = totals(entries, /^t:(.+):tx$/);
+  const deviceNames = new Set([...peerRates.keys(), ...peerRx.keys()]);
+  const devices = [...deviceNames]
+    .map((name) => {
+      const live = peerRates.get(name);
+      return {
+        name,
+        os: live?.os,
+        online: !!live?.online,
+        rxPerSec: live?.rxPerSec,
+        txPerSec: live?.txPerSec,
+        rxBytes: peerRx.get(name)?.total ?? 0,
+        txBytes: peerTx.get(name)?.total ?? 0,
+      };
+    })
+    .sort((a, b) => b.rxBytes + b.txBytes - (a.rxBytes + a.txBytes) || a.name.localeCompare(b.name));
+
+  return {
+    start,
+    end,
+    oldest: TIERS.map((t) => t.entries[0]?.t).filter(Boolean).reduce((a, b) => Math.min(a, b), end),
+    rxPerSec: rates.rxPerSec,
+    txPerSec: rates.txPerSec,
+    rxBytes: machine.rx.total,
+    txBytes: machine.tx.total,
+    services,
+    devices,
+    at: end,
+  };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1285,6 +2184,13 @@ function problems(s) {
     if (svc.state === 'failed') out.set(`svc:${svc.id}`, `${svc.name} has failed${svc.detail ? ` (${svc.detail})` : ''}`);
     if (svc.health === 'unhealthy') out.set(`health:${svc.id}`, `${svc.name} is unhealthy`);
   }
+  for (const d of driveInfo) {
+    for (const issue of d.issues) {
+      // The temperature is in the text, so key hot drives on the fact rather than the reading.
+      const key = issue.text.startsWith('Running hot') ? 'hot' : issue.text;
+      out.set(`drive:${d.id}:${key}`, `${d.model}: ${issue.text}`);
+    }
+  }
   return out;
 }
 
@@ -1294,6 +2200,11 @@ async function watch() {
     const current = problems(await status());
     const started = [...current].filter(([k]) => !known.has(k)).map(([, v]) => v);
     const cleared = [...known].filter(([k]) => !current.has(k)).map(([, v]) => v);
+    // Logged once per problem, though a restart of this server forgets what it already knew.
+    const driveOf = (k) => /^drive:([^:]+):/.exec(k)?.[1];
+    const open = (v) => events.findLast((e) => (e.kind === 'problem' || e.kind === 'resolved') && e.detail === v)?.kind === 'problem';
+    for (const [k, v] of current) if (!known.has(k) && !open(v)) addEvent('problem', { detail: v, drive: driveOf(k) });
+    for (const [k, v] of known) if (!current.has(k) && open(v)) addEvent('resolved', { detail: v, drive: driveOf(k) });
     if (started.length) await notify('Server problem', started.join('\n'), 'warning');
     if (cleared.length) await notify('Server back to normal', cleared.map((m) => `Resolved: ${m}`).join('\n'), 'white_check_mark');
     known = current;
@@ -1372,6 +2283,7 @@ function updateGameMode() {
     console.log(`Game mode ${want ? 'on' : 'off'}${gameMode.game ? ` (${gameMode.game})` : ''}`);
     gameMode.active = want;
     gameMode.since = Date.now();
+    addEvent('game', { on: want, detail: gameMode.game });
     await saveGameMode();
     await (want ? stopGameModeUnits() : run('systemctl', ['--user', 'start', ...GAME_MODE_UNIT_FILES.filter((u) => !onDemandUnit(u))], { timeout: 180_000 })).catch(
       (e) => console.error(`Couldn't ${want ? 'stop' : 'start'} the game mode services:`, e.stderr?.trim() || e.message),
@@ -2628,10 +3540,28 @@ async function handle(req, res) {
   if (req.method === 'GET' && url.pathname === '/api/usage') return sendJson(res, 200, await usage());
   if (req.method === 'GET' && url.pathname === '/api/processes') return sendJson(res, 200, await processes());
   if (req.method === 'GET' && url.pathname === '/api/gpu') return sendJson(res, 200, await gpu());
-  if (req.method === 'GET' && url.pathname === '/api/history') {
+  if (req.method === 'GET' && /^\/api\/(history|network|reliability)$/.test(url.pathname)) {
     const range = Number(url.searchParams.get('range') ?? 3600);
-    if (!(range >= 60 && range <= HISTORY_KEEP_MS / 1000)) throw new HttpError(400, 'Range must be 60 seconds to a day');
-    return sendJson(res, 200, historyFor(range, url.searchParams.get('service') ?? undefined));
+    if (!(range >= 60 && range <= HISTORY_MAX_MS / 1000)) throw new HttpError(400, 'Range must be 60 seconds to a year');
+    if (url.pathname === '/api/network') return sendJson(res, 200, network(range));
+    if (url.pathname === '/api/reliability') return sendJson(res, 200, reliability(range));
+    const [service, drive, device] = ['service', 'drive', 'device'].map((k) => url.searchParams.get(k) ?? undefined);
+    return sendJson(res, 200, historyFor(range, { service, drive, device }));
+  }
+  if (req.method === 'GET' && url.pathname === '/api/drives') return sendJson(res, 200, await drives());
+  if (req.method === 'GET' && url.pathname === '/api/cpu') return sendJson(res, 200, await cpu());
+  if (url.pathname === '/api/power') {
+    if (req.method === 'GET') return sendJson(res, 200, powerState());
+    if (req.method === 'POST') {
+      let body;
+      try {
+        body = JSON.parse((await readBody(req))?.toString() ?? '{}');
+      } catch {
+        throw new HttpError(400, 'Expected JSON');
+      }
+      log(req, `power settings ${JSON.stringify(body)}`);
+      return sendJson(res, 200, await setPowerSettings(body ?? {}));
+    }
   }
 
   if (url.pathname === '/api/game-mode') {
@@ -2834,15 +3764,16 @@ if (process.argv[2] === 'pair') {
   await getToken();
   await sample();
   setInterval(sample, 2000).unref();
+  await loadEvents();
   await loadHistory();
+  await loadPowerSettings();
+  await refreshDrives();
+  setInterval(refreshDrives, DRIVE_REFRESH_INTERVAL).unref();
+  await samplePeers();
+  setInterval(samplePeers, PEER_INTERVAL).unref();
   setInterval(recordHistory, HISTORY_INTERVAL).unref();
-  setInterval(saveHistory, HISTORY_SAVE_INTERVAL).unref();
-  for (const signal of ['SIGTERM', 'SIGINT']) {
-    process.once(signal, async () => {
-      await saveHistory();
-      process.exit(0);
-    });
-  }
+  setInterval(compactHistory, HISTORY_COMPACT_INTERVAL).unref();
+  setInterval(() => checkJournal().catch((e) => console.error('Checking the journal failed:', e.message)), 60_000).unref();
   await loadGameMode();
   await checkGame();
   setInterval(checkGame, GAME_CHECK_INTERVAL).unref();

@@ -117,7 +117,7 @@ function Dashboard() {
           value={formatPercent(cpu.usage)}
           fraction={cpu.usage}
           caption={`Load ${cpu.load.map((l) => l.toFixed(2)).join(' ')}`}
-          onPress={() => router.push('/server/processes')}
+          onPress={() => router.push('/server/cpu')}
         />
         <StatTile
           label="Memory"
@@ -139,7 +139,7 @@ function Dashboard() {
           label="Network"
           value={`↓ ${formatRate(network.rxPerSec)}`}
           caption={`↑ ${formatRate(network.txPerSec)}`}
-          onPress={() => router.push('/server/trends')}
+          onPress={() => router.push('/server/network')}
         />
       </View>
 
@@ -164,12 +164,17 @@ function Dashboard() {
 
       <Section title="Analytics">
         <Card>
-          <NavRow first title="Memory" caption="What's using it, by service" onPress={() => router.push('/server/memory')} />
+          <NavRow first title="Trends" caption="CPU, memory, network, heat and power, up to a year back" onPress={() => router.push('/server/trends')} />
+          <NavRow title="Reliability" caption="Crashes, memory kills and reboots, per service" onPress={() => router.push('/server/reliability')} />
+          <NavRow title="Memory" caption="What's using it, by service" onPress={() => router.push('/server/memory')} />
+          <NavRow title="CPU" caption="Each core's load and clock, and what's waiting" onPress={() => router.push('/server/cpu')} />
           <NavRow title="Processes" caption="Top programs by memory and CPU" onPress={() => router.push('/server/processes')} />
           {gpu.usage !== undefined ? (
             <NavRow title="Graphics card" caption="Engines, memory, heat, power and programs" onPress={() => router.push('/server/gpu')} />
           ) : null}
-          <NavRow title="Trends" caption="CPU, memory, network and heat over the last day" onPress={() => router.push('/server/trends')} />
+          <NavRow title="Drives" caption="Health, temperature and who's using each drive" onPress={() => router.push('/server/drives')} />
+          <NavRow title="Network" caption="Traffic by service and by device" onPress={() => router.push('/server/network')} />
+          <NavRow title="Power" caption="What the server draws and what it costs" onPress={() => router.push('/server/power')} />
           <NavRow title="Media drive" caption="What's taking up space, by show and download" onPress={() => router.push('/server/storage')} />
           <NavRow title="Tailscale" caption="Devices on the tailnet and how they connect" onPress={() => router.push('/server/tailscale')} />
         </Card>

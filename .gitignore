@@ -53,6 +53,10 @@ example
 /status-server/pairing
 /status-server/history.json
 /status-server/history.json.tmp
+/status-server/history.json.old
+/status-server/history-*.jsonl*
+/status-server/events.jsonl*
+/status-server/power.json
 /status-server/game-mode.json
 /status-server/videos.json
 /status-server/assistant/

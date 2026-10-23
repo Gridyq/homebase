@@ -34,6 +34,8 @@ export type Service = {
   since?: number;
   lastRun?: number;
   nextRun?: number;
+  /** Times systemd restarted it after it crashed, since the unit was loaded. */
+  restarts?: number;
   actions: ServiceAction[];
   /** Missing for stopped services and timers that aren't running. */
   usage?: Usage;
@@ -166,6 +168,8 @@ export type Series = {
   values: (number | null)[];
   average?: number;
   peak?: number;
+  /** Value × seconds over the range: bytes for a rate, joules for watts. */
+  total: number;
 };
 
 export type SystemSeries =
@@ -179,14 +183,41 @@ export type SystemSeries =
   | 'temp'
   | 'gpuTemp'
   | 'gpuPower'
-  | 'vram';
-export type ServiceSeries = 'memory' | 'cpu';
+  | 'vram'
+  | 'cpuPower'
+  | 'cpuClock'
+  | 'pressureCpu'
+  | 'pressureMemory'
+  | 'pressureIo'
+  | 'converting';
+export type ServiceSeries = 'memory' | 'cpu' | 'read' | 'write' | 'rx' | 'tx';
+export type DriveSeries = 'read' | 'write' | 'busy' | 'temp';
+export type DeviceSeries = 'rx' | 'tx';
+
+/**
+ * Something that happened on the server. `by` says who stopped or started a service when the
+ * server knows: 'you' from the app, 'game mode', or 'on demand' (Seerr and the assistant's models).
+ */
+export type ServerEvent = {
+  t: number;
+  kind: 'boot' | 'started' | 'stopped' | 'restarted' | 'crashed' | 'failed' | 'oom' | 'game' | 'problem' | 'resolved';
+  id?: string;
+  name?: string;
+  by?: 'you' | 'game mode' | 'on demand';
+  detail?: string;
+  /** For game mode. */
+  on?: boolean;
+  /** For a drive's problem. */
+  drive?: string;
+};
 
 export type History<K extends string> = {
   start: number;
   end: number;
   step: number;
   series: Record<K, Series>;
+  /** What happened in the range that bears on these series. */
+  events: ServerEvent[];
   /** Time of the oldest reading the server has. */
   oldest?: number;
   memoryTotalBytes: number;
@@ -282,6 +313,182 @@ export function fetchServiceHistory(conn: Connection, rangeSec: number, serviceI
     conn,
     `/api/history?range=${rangeSec}&service=${encodeURIComponent(serviceId)}`,
   );
+}
+
+export function fetchDriveHistory(conn: Connection, rangeSec: number, driveId: string) {
+  return request<History<DriveSeries>>(conn, `/api/history?range=${rangeSec}&drive=${encodeURIComponent(driveId)}`);
+}
+
+export function fetchDeviceHistory(conn: Connection, rangeSec: number, device: string) {
+  return request<History<DeviceSeries>>(conn, `/api/history?range=${rangeSec}&device=${encodeURIComponent(device)}`);
+}
+
+export type DriveIssue = { level: 'warning' | 'failing'; text: string };
+
+/** From the drive's SMART data, which udisks reads every 10 minutes. Fields a drive doesn't report are missing. */
+export type DriveSmart = {
+  updated?: number;
+  powerOnHours?: number;
+  /** Share of its rated life left, for SSDs. */
+  lifeLeft?: number;
+  readBytes?: number;
+  writtenBytes?: number;
+  powerCycles?: number;
+  selfTest?: string;
+  // SATA
+  failing?: boolean;
+  badSectors?: number;
+  reallocated?: number;
+  pending?: number;
+  uncorrectable?: number;
+  /** Data garbled between drive and board, usually a loose or bad cable. Counts up for life. */
+  cableErrors?: number;
+  /** Times a hard drive parked its heads. */
+  loadCycles?: number;
+  // NVMe
+  spare?: number;
+  spareThreshold?: number;
+  mediaErrors?: number;
+  unsafeShutdowns?: number;
+  /** Minutes spent above its warning temperature. */
+  hotMinutes?: number;
+  warnings?: string[];
+};
+
+export type Drive = {
+  /** Serial number. */
+  id: string;
+  model: string;
+  kind: 'nvme' | 'ssd' | 'hdd';
+  rpm?: number;
+  sizeBytes: number;
+  /** Kernel name, such as sda. */
+  device?: string;
+  mounts: string[];
+  temperature?: number;
+  smart?: DriveSmart;
+  health: 'good' | 'warning' | 'failing' | 'unknown';
+  issues: DriveIssue[];
+  activity?: { readPerSec: number; writePerSec: number; busy: number };
+  /** Who's reading and writing it right now, busiest first. */
+  users: { id?: string; name: string; readPerSec: number; writePerSec: number }[];
+};
+
+export type DriveReport = { drives: Drive[]; error?: string; at: number };
+
+export function fetchDrives(conn: Connection) {
+  return request<DriveReport>(conn, '/api/drives', { timeoutMs: 15_000 });
+}
+
+export type CpuReport = {
+  model?: string;
+  usage?: number;
+  load: number[];
+  /** Each logical core (two per physical core with SMT). */
+  cores: { usage?: number; mhz?: number }[];
+  maxMhz?: number;
+  temperature?: number;
+  watts?: number;
+  /** Why the power draw can't be read: the counter needs a udev rule, or isn't there. */
+  powerError?: 'permission' | 'missing';
+  /** Share of the last 10 seconds something waited on CPU, memory or disk. */
+  pressure: { cpu?: number; memory?: number; io?: number };
+  governor?: string;
+  preference?: string;
+  at: number;
+};
+
+export function fetchCpu(conn: Connection) {
+  return request<CpuReport>(conn, '/api/cpu');
+}
+
+export type PowerSettings = {
+  pricePerKwh?: number;
+  currency: string;
+  /** Estimate for what isn't measured: drives, board, fans, power supply losses. */
+  otherWatts: number;
+  cpuWatts?: number;
+  cpuPowerError?: 'permission' | 'missing';
+};
+
+export function fetchPower(conn: Connection) {
+  return request<PowerSettings>(conn, '/api/power');
+}
+
+/** A null price clears it. */
+export function savePower(conn: Connection, settings: { pricePerKwh?: number | null; currency?: string; otherWatts?: number }) {
+  return request<PowerSettings>(conn, '/api/power', { method: 'POST', body: JSON.stringify(settings) });
+}
+
+export type NetworkUser = {
+  id: string;
+  /** Containers that share one network, counted together. */
+  ids: string[];
+  name: string;
+  rxPerSec?: number;
+  txPerSec?: number;
+  rxBytes: number;
+  txBytes: number;
+};
+
+/** A Tailscale device. rx is what the server got from it, tx what it sent it. */
+export type NetworkDevice = {
+  name: string;
+  os?: string;
+  online: boolean;
+  rxPerSec?: number;
+  txPerSec?: number;
+  rxBytes: number;
+  txBytes: number;
+};
+
+export type NetworkReport = {
+  start: number;
+  end: number;
+  oldest?: number;
+  rxPerSec?: number;
+  txPerSec?: number;
+  rxBytes: number;
+  txBytes: number;
+  services: NetworkUser[];
+  devices: NetworkDevice[];
+  at: number;
+};
+
+export function fetchNetwork(conn: Connection, rangeSec: number) {
+  return request<NetworkReport>(conn, `/api/network?range=${rangeSec}`);
+}
+
+export type ServiceReliability = {
+  id: string;
+  name: string;
+  /** Stopped unexpectedly and restarted by systemd. */
+  crashes: number;
+  /** Stopped unexpectedly and stayed down. */
+  failures: number;
+  oomKills: number;
+  /** Restarted by something other than systemd's crash handling. */
+  restarts: number;
+  /** Stopped without the server knowing why. */
+  stops: number;
+  /** Share of the range it was running, of the time the server was keeping history. */
+  running?: number;
+  lastTrouble?: number;
+};
+
+export type ReliabilityReport = {
+  start: number;
+  end: number;
+  oldest?: number;
+  boots: number[];
+  services: ServiceReliability[];
+  /** Newest first. */
+  events: ServerEvent[];
+  at: number;
+};
+
+export function fetchReliability(conn: Connection, rangeSec: number) {
+  return request<ReliabilityReport>(conn, `/api/reliability?range=${rangeSec}`);
 }
 
 export type LogLine = {

@@ -30,6 +30,13 @@ function ServerStack() {
       <Stack.Screen name="processes" options={{ title: 'Processes' }} />
       <Stack.Screen name="gpu" options={{ title: 'Graphics Card' }} />
       <Stack.Screen name="trends" options={{ title: 'Trends' }} />
+      <Stack.Screen name="reliability" options={{ title: 'Reliability' }} />
+      <Stack.Screen name="cpu" options={{ title: 'CPU' }} />
+      <Stack.Screen name="drives" options={{ title: 'Drives' }} />
+      <Stack.Screen name="drive/[id]" options={{ title: '' }} />
+      <Stack.Screen name="network" options={{ title: 'Network' }} />
+      <Stack.Screen name="device/[name]" options={{ title: '' }} />
+      <Stack.Screen name="power" options={{ title: 'Power' }} />
       <Stack.Screen name="storage" options={{ title: 'Media Drive' }} />
       <Stack.Screen name="tailscale" options={{ title: 'Tailscale' }} />
       <Stack.Screen name="service/[id]" options={{ title: '' }} />

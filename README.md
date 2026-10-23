@@ -67,16 +67,32 @@ npm run publish-update
 
 Shows CPU, memory, GPU, network, temperatures, disks, and the Podman containers and systemd units
 on the home server, and can start, stop and restart them. The data comes from `status-server/`,
-which also sends an ntfy message when a disk passes 90%, a sensor passes 90°C, or a service fails
-(and again when it recovers).
+which also sends an ntfy message when a disk passes 90%, a sensor passes 90°C, a service fails,
+crashes or is killed for memory, or a drive's SMART health turns bad (and again when it recovers).
 
 Analytics: Memory breaks RAM into programs, kernel and cache and lists every service and app by
 memory, CPU or disk traffic (from their cgroups, so cache is counted apart from what programs
-hold); Processes lists the top programs; Graphics card (tap the GPU tile) shows engine load
-including video encode/decode, video memory, temperatures, power, fan, clocks and which programs
-have the card open (from DRM fdinfo); Trends and each service's page chart the last day. The
-history is a reading every 15 seconds, kept in `status-server/history.json` (git-ignored).
+hold); Processes lists the top programs; CPU shows each thread's load and clock and how long
+programs waited on CPU, memory and drives (pressure stall info); Graphics card (tap the GPU tile)
+shows engine load including video encode/decode, video memory, temperatures, power, fan, clocks
+and which programs have the card open (from DRM fdinfo); Drives shows SMART health, wear and
+temperature from udisks, and who's reading and writing each drive (cgroup `io.stat`); Network
+splits traffic by container (each container's own network namespace) and by Tailscale device;
+Power adds up the CPU's and graphics card's measured draw into kWh and cost; Reliability counts
+crashes, memory kills (kernel OOM killer and systemd-oomd, from the journal) and reboots per
+service, with a timeline. Trends and each service, drive and device page chart up to a year, with
+reboots, crashes and game mode marked.
 
+History is a reading every 15 seconds, kept a day, with averages kept longer: every 10 minutes for a
+week, hourly for a month and every 6 hours for a year. Each tier is `status-server/history-*.jsonl`
+and events are `status-server/events.jsonl` (all git-ignored), appended as they come and trimmed
+every few hours.
+
+- CPU power comes from the CPU's energy counter (RAPL), which only root can read. A udev rule
+  lets the server's user read it, and only that user, since the counter is a known side channel
+  (CVE-2020-8694). In `/etc/udev/rules.d/99-homebase-rapl.rules`:
+  `SUBSYSTEM=="powercap", KERNEL=="intel-rapl:0", RUN+="/bin/sh -c 'chgrp leonidas /sys%p/energy_uj && chmod 0440 /sys%p/energy_uj'"`
+  (it takes effect at the next boot, or run the `chgrp` and `chmod` once by hand).
 - It runs as a systemd user service: `systemctl --user status homebase-status`. It listens on
   port 8788; open it on the tailnet zone once with
   `sudo firewall-cmd --zone=tailnet --add-port=8788/tcp --permanent && sudo firewall-cmd --reload`.
