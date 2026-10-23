@@ -264,7 +264,8 @@ export function LegendItem({ color, label, value }: { color?: string; label: str
 /**
  * Values over time, drawn as thin columns with a line along their tops. Touching the chart shows
  * the reading under the finger. `max` fixes the top of the scale, such as 1 for a percentage;
- * otherwise it fits the highest value.
+ * otherwise it fits the highest value. `label` names a column when it isn't a span of clock time,
+ * with `startLabel` and `endLabel` under the ends.
  */
 export function TimeChart({
   values,
@@ -274,6 +275,9 @@ export function TimeChart({
   color,
   max,
   height = 110,
+  label,
+  startLabel,
+  endLabel = 'Now',
 }: {
   values: (number | null)[];
   start: number;
@@ -282,6 +286,9 @@ export function TimeChart({
   color: string;
   max?: number;
   height?: number;
+  label?: (index: number) => string;
+  startLabel?: string;
+  endLabel?: string;
 }) {
   const theme = useTheme();
   const [width, setWidth] = useState(0);
@@ -302,7 +309,9 @@ export function TimeChart({
       <View style={styles.chartLabels}>
         <ThemedText type="small" themeColor="textSecondary" style={[styles.caption, styles.flex]} numberOfLines={1}>
           {touched !== undefined
-            ? `${formatTime(start + step * touched)}–${formatTime(start + step * (touched + 1))}`
+            ? label
+              ? label(touched)
+              : `${formatTime(start + step * touched)}–${formatTime(start + step * (touched + 1))}`
             : `Scale ${format(top)}`}
         </ThemedText>
         {touched !== undefined ? (
@@ -342,10 +351,10 @@ export function TimeChart({
       </View>
       <View style={styles.chartLabels}>
         <ThemedText type="small" themeColor="textSecondary" style={[styles.caption, styles.flex]}>
-          {formatTime(start)}
+          {startLabel ?? formatTime(start)}
         </ThemedText>
         <ThemedText type="small" themeColor="textSecondary" style={styles.caption}>
-          Now
+          {endLabel}
         </ThemedText>
       </View>
     </View>

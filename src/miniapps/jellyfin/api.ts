@@ -441,6 +441,19 @@ export function createClient(session: Session) {
 
     item: (id: string) => get<BaseItem>(`/Items/${id}?userId=${userId}`),
 
+    /** Every movie and show, for finding the artwork of something known only by name. */
+    titles: () =>
+      get<ItemsResponse>(
+        `/Items?userId=${userId}&recursive=true&includeItemTypes=Movie,Series&fields=${itemFields}`,
+      ).then((r) => r.Items),
+
+    /** Runs a query on the Playback Reporting plugin's log of plays. Admins only. */
+    playbackReport: (query: string) =>
+      post<{ results: string[][] }>('/user_usage_stats/submit_custom_query', {
+        CustomQueryString: query,
+        ReplaceUserId: false,
+      }).then((r) => r.results),
+
     search: (term: string) =>
       get<ItemsResponse>(
         `/Items?userId=${userId}&searchTerm=${encodeURIComponent(term)}&recursive=true` +

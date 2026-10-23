@@ -27,6 +27,7 @@ export default function RootLayout() {
         <Stack.Screen name="drop" options={{ headerShown: false }} />
         <Stack.Screen name="videos" options={{ headerShown: false }} />
         <Stack.Screen name="assistant" options={{ headerShown: false }} />
+        <Stack.Screen name="history" options={{ headerShown: false }} />
         <Stack.Screen
           name="whats-new"
           options={{

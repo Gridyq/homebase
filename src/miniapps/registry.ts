@@ -99,4 +99,12 @@ export const miniApps: MiniApp[] = [
     color: '#8E4EC6',
     href: '/assistant',
   },
+  {
+    id: 'history',
+    name: 'Watch History',
+    description: 'What you watched, when, and how much',
+    glyph: '◷',
+    color: '#D6409F',
+    href: '/history',
+  },
 ];
