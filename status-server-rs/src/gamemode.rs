@@ -31,7 +31,6 @@ pub const GAME_MODE_UNITS: &[&str] = &[
     "sonarr",
     "radarr",
     "recyclarr",
-    "bazarr",
     "llama",
 ];
 /// Units that only run while something uses them, so game mode doesn't start them again.
