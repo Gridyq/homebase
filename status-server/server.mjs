@@ -1492,6 +1492,33 @@ async function setSeeding({ seed, stopWhenDone }) {
   return seeding();
 }
 
+/**
+ * Keep queued TV torrents in episode order, so a show grabbed one episode at a time comes in from
+ * the first episode on. Shows go in the order they were first added; movies keep their places.
+ * Sonarr also asks for sequential download, which does the same for the files in a season pack.
+ */
+async function sortTvQueue() {
+  if (gameMode.active) return;
+  // Queue positions start at 1; finished torrents have none.
+  const queue = (await qbit('torrents/info?sort=priority')).filter((t) => t.priority > 0);
+  const episode = (t) => {
+    const m = /^(.*?)[ ._-]*S(\d{1,2})(?:E(\d{1,3}))?(?!\d)/i.exec(t.name);
+    return m && { show: m[1].toLowerCase().replace(/[^a-z0-9]/g, ''), season: +m[2], episode: +(m[3] ?? 0) };
+  };
+  const tv = queue.filter((t) => t.category === 'tv').map((t) => ({ t, e: episode(t) }));
+  if (!tv.every((x) => x.e)) return;
+  const firstAdded = new Map();
+  for (const { t, e } of tv) firstAdded.set(e.show, Math.min(firstAdded.get(e.show) ?? Infinity, t.added_on));
+  const sorted = tv
+    .toSorted((a, b) => firstAdded.get(a.e.show) - firstAdded.get(b.e.show) || a.e.show.localeCompare(b.e.show) || a.e.season - b.e.season || a.e.episode - b.e.episode)
+    .map((x) => x.t);
+  let i = 0;
+  const wanted = queue.map((t) => (t.category === 'tv' ? sorted[i++] : t));
+  if (wanted.every((t, j) => t === queue[j])) return;
+  // Moving each to the top, last first, leaves them in the wanted order.
+  for (const t of wanted.toReversed()) await qbit('torrents/topPrio', { hashes: t.hash });
+}
+
 // ---------------------------------------------------------------------------------------------
 // Drop: files sent from the phone land in ~/Downloads/Homebase, and the phone can list, fetch and
 // delete what's there, so putting a file in that folder sends it the other way. Text sent from
@@ -2058,6 +2085,7 @@ if (process.argv[2] === 'pair') {
   await checkGame();
   setInterval(checkGame, GAME_CHECK_INTERVAL).unref();
   setInterval(stopIdleSeerr, 60_000).unref();
+  setInterval(() => sortTvQueue().catch(() => {}), 60_000).unref();
   await loadVideoJobs();
   setInterval(updateYtdlp, 3600_000).unref();
   setTimeout(watch, 10_000).unref();
