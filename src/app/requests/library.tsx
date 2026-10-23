@@ -31,6 +31,12 @@ export default function Library() {
   );
   const [pulled, setPulled] = useState(false);
   if (pulled && !loading) setPulled(false);
+  // After deleting a season the row keeps its old size until the reload; stay busy until then.
+  const [settling, setSettling] = useState(false);
+  if (settling && !loading) {
+    setSettling(false);
+    setBusy(undefined);
+  }
 
   if (!data) return <Centered loading={loading} error={error} onRetry={reload} />;
   const [items, disk] = data;
@@ -46,13 +52,17 @@ export default function Library() {
           setBusy(item.key);
           try {
             await action();
-            if (whole) setDeleted((d) => new Set(d).add(item.key));
+            if (whole) {
+              setDeleted((d) => new Set(d).add(item.key));
+              setBusy(undefined);
+            } else {
+              setSettling(true);
+            }
           } catch (e) {
-            Alert.alert(`Couldn't delete ${what}`, e instanceof Error ? e.message : String(e));
-          } finally {
             setBusy(undefined);
-            reload();
+            Alert.alert(`Couldn't delete ${what}`, e instanceof Error ? e.message : String(e));
           }
+          reload();
         },
       },
     ]);
