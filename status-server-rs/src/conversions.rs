@@ -701,23 +701,24 @@ fn next(state: &State) -> Option<String> {
 
 /// Scans every 5 minutes, and converts what's queued one file at a time.
 pub fn start(state: State) {
-    let scanner = state.clone();
     tokio::spawn(async move {
         // A conversion left running by the last server is in its own scope, so it outlived it.
+        // Cleared before either loop starts, or the first files fail on the old scope or folder.
         let unit = scope_unit();
         if !unit.is_empty() {
             let _ = run("systemctl", &args!["--user", "stop", format!("{unit}.scope")], Duration::from_secs(30)).await;
         }
         let _ = std::fs::remove_dir_all(cache_dir());
-        loop {
-            scan(&scanner).await;
-            tokio::select! {
-                _ = tokio::time::sleep(SCAN_EVERY) => {}
-                _ = scanner.conversions.rescan.notified() => {}
+        let scanner = state.clone();
+        tokio::spawn(async move {
+            loop {
+                scan(&scanner).await;
+                tokio::select! {
+                    _ = tokio::time::sleep(SCAN_EVERY) => {}
+                    _ = scanner.conversions.rescan.notified() => {}
+                }
             }
-        }
-    });
-    tokio::spawn(async move {
+        });
         loop {
             let Some(path) = next(&state) else {
                 tokio::select! {

@@ -1,5 +1,5 @@
 //! Status server for Homebase's mini-apps: the Server app's stats, services, history, drives and
-//! logs; game mode; the Requests app's Seerr, Sonarr and Radarr calls, qBittorrent, and converting the library;
+//! logs; game mode; the Requests app's Seerr, Sonarr and Radarr calls, qBittorrent, clearing stuck downloads and converting the library;
 //! Drop; Videos; and the Assistant's chats with a local model. Replaced the Node server that was
 //! in `status-server/server.mjs`, and keeps its files in that folder: the token, history, events,
 //! chats and settings.
@@ -13,6 +13,7 @@ mod actions;
 mod assistant;
 mod assistant_tools;
 mod cache;
+mod cleanup;
 mod client;
 mod command;
 mod conversions;
@@ -72,6 +73,7 @@ async fn main() {
     tokio::spawn(gamemode::start(state.clone()));
     media::start(state.clone());
     conversions::start(state.clone());
+    cleanup::start(state.clone());
     videos::start(state.clone());
     assistant::start(state.clone());
 
@@ -86,6 +88,7 @@ async fn main() {
         .route("/api/conversions", get(conversions::get).post(conversions::set))
         .route("/api/tdarr", get(conversions::get).post(conversions::set))
         .route("/api/arr/{*rest}", any(media::arr))
+        .route("/api/cleanup", get(cleanup::get))
         .route("/api/drop", get(drop::list))
         .route("/api/drop/text", post(drop::text))
         .route("/api/drop/files/{name}", get(drop::send).put(drop::receive).delete(drop::delete))

@@ -341,7 +341,7 @@ async fn qbit_login(state: &State) -> Result<String, HttpError> {
     }
 }
 
-async fn qbit(state: &State, api_path: &str, form_body: Option<&[(&str, &str)]>) -> Result<Value, HttpError> {
+pub async fn qbit(state: &State, api_path: &str, form_body: Option<&[(&str, &str)]>) -> Result<Value, HttpError> {
     state.game_mode.error("qBittorrent")?;
     let url = qbit_url();
     for attempt in 0..2 {
@@ -566,6 +566,27 @@ async fn sort_tv_queue(state: &State) -> Result<(), HttpError> {
         qbit(state, "torrents/topPrio", Some(&[("hashes", &hash(t))])).await?;
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------------------------
+// Calls of the server's own, rather than the phone's, so not held to the allow-lists.
+
+/// Sonarr's or Radarr's API, `path` after `/api/v3/`, answering JSON (null when there's no body).
+pub async fn arr_call(state: &State, name: &str, method: Method, path: &str, body: Option<Value>) -> Result<Value, String> {
+    let (name, app) = app(name).ok_or("No such app")?;
+    let key = api_key(name).ok_or_else(|| format!("{} isn't set up on the server", app.label))?;
+    let headers = [("X-Api-Key", key), ("Content-Type", "application/json".to_owned())];
+    let body = body.map(|b| b.to_string().into());
+    let reply = call(&state.upstream, method, &format!("{}/{path}", app.base), &headers, body, Duration::from_secs(60))
+        .await
+        .map_err(|e| format!("{} didn't answer ({e})", app.label))?;
+    if !reply.status.is_success() {
+        return Err(format!("{} answered {}", app.label, reply.status.as_u16()));
+    }
+    if reply.body.is_empty() {
+        return Ok(Value::Null);
+    }
+    serde_json::from_slice(&reply.body).map_err(|e| format!("{} answered something that isn't JSON ({e})", app.label))
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -28,6 +28,7 @@ pub struct State {
     pub game_mode: Arc<crate::gamemode::GameMode>,
     pub media: Arc<crate::media::Media>,
     pub conversions: Arc<crate::conversions::Conversions>,
+    pub cleanup: Arc<crate::cleanup::Cleanup>,
     pub videos: Arc<crate::videos::Videos>,
     pub assistant: Arc<crate::assistant::Assistant>,
 }
@@ -47,6 +48,7 @@ impl State {
             game_mode: Arc::new(crate::gamemode::GameMode::new(data_dir(&config))),
             media: Arc::new(crate::media::Media::new()),
             conversions: Arc::new(crate::conversions::Conversions::new(data_dir(&config))),
+            cleanup: Arc::new(crate::cleanup::Cleanup::new(data_dir(&config))),
             videos: Arc::new(crate::videos::Videos::new(data_dir(&config))),
             assistant: Arc::new(crate::assistant::Assistant::new(data_dir(&config))),
             config,

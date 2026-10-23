@@ -60,4 +60,6 @@ example
 /status-server/game-mode.json
 /status-server/videos.json
 /status-server/conversions.json
+/status-server/cleanup.json
+/status-server/blocklist.txt
 /status-server/assistant/

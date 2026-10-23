@@ -32,7 +32,6 @@ pub const GAME_MODE_UNITS: &[&str] = &[
     "radarr",
     "recyclarr",
     "bazarr",
-    "cleanuparr",
     "seerr",
     "llama",
 ];
