@@ -481,19 +481,19 @@ export function createClient(session: Session) {
      * as-is; everything else comes back as an HLS stream the server converts live.
      *
      * `subtitleIndex` picks a subtitle stream (-1 for none; omit for the server's default).
-     * AVPlayer can't load sidecar subtitle files, so choosing one turns off direct play and
-     * the server delivers it inside the HLS stream (or burns it in, for image subtitles).
+     * Subtitles embedded in an MP4 (mov_text) play directly, with every embedded track available
+     * to switch between; anything else (sidecar files, subtitles in MKV) makes the server deliver
+     * the chosen one inside the HLS stream (or burn it in, for image subtitles).
      *
      * `maxBitrate` caps the stream; files above it are converted down instead of played as-is.
      */
     playbackInfo: async (itemId: string, subtitleIndex?: number, maxBitrate = MAX_BITRATE) => {
-      const withSubtitles = subtitleIndex !== undefined && subtitleIndex >= 0;
       const info = await post<PlaybackInfoResponse>(`/Items/${itemId}/PlaybackInfo?userId=${userId}`, {
         DeviceProfile: { ...iosDeviceProfile, MaxStreamingBitrate: maxBitrate, MaxStaticBitrate: maxBitrate },
         MaxStreamingBitrate: maxBitrate,
         AutoOpenLiveStream: true,
         SubtitleStreamIndex: subtitleIndex,
-        EnableDirectPlay: !withSubtitles,
+        EnableDirectPlay: true,
       });
       if (info.ErrorCode) throw new JellyfinError(`Server can't play this item (${info.ErrorCode}).`);
       const source = info.MediaSources[0];
@@ -511,7 +511,19 @@ export function createClient(session: Session) {
         if (!/[?&]api_key=/i.test(url)) url += `&api_key=${accessToken}`;
         playMethod = 'Transcode';
       }
-      return { url, playMethod, mediaSourceId: source.Id, playSessionId: info.PlaySessionId };
+      // In direct play AVPlayer sees the file's own subtitle tracks, in file order.
+      const embeddedSubtitles =
+        playMethod === 'DirectPlay'
+          ? (source.MediaStreams ?? []).filter((s) => s.Type === 'Subtitle' && !s.IsExternal).map((s) => s.Index)
+          : undefined;
+      return {
+        url,
+        playMethod,
+        mediaSourceId: source.Id,
+        playSessionId: info.PlaySessionId,
+        embeddedSubtitles,
+        defaultSubtitleIndex: source.DefaultSubtitleStreamIndex,
+      };
     },
 
     reportPlayback: (
@@ -559,6 +571,7 @@ const iosDeviceProfile = {
   ContainerProfiles: [],
   CodecProfiles: [],
   SubtitleProfiles: [
+    { Format: 'mov_text', Method: 'Embed' },
     { Format: 'vtt', Method: 'Hls' },
     { Format: 'srt', Method: 'Hls' },
     { Format: 'subrip', Method: 'Hls' },

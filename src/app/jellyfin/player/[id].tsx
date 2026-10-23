@@ -126,6 +126,9 @@ function Player({
     p.showNowPlayingNotification = true;
     // Often enough for the controls' clock; the server only hears every PROGRESS_INTERVAL_SECONDS.
     p.timeUpdateEventInterval = 0.5;
+    // Start (and resume after a seek) as soon as there's a picture, instead of AVPlayer's default
+    // of buffering ahead first; the server sends segments well faster than real time.
+    p.bufferOptions = { waitsToMinimizeStalling: false };
   });
 
   const trickplay = client.trickplay(item, playback.mediaSourceId);
@@ -142,11 +145,23 @@ function Player({
     });
   };
 
-  // Subtitles chosen up front arrive as a track in the HLS stream; switch it on once, when it
-  // shows up, and leave later changes in the system menu alone.
+  // Played directly, the file's own subtitle tracks are all there to pick from; otherwise the
+  // chosen one arrives as the only track in the HLS stream. Either way, switch it on once, when
+  // it shows up, and leave later changes in the system menu alone.
+  const directSubtitles = playback.embeddedSubtitles;
+  const chosenSubtitle = useRef(
+    directSubtitles ? (playback.subtitleIndex ?? playback.defaultSubtitleIndex ?? SUBTITLES_OFF) : playback.subtitleIndex,
+  );
   const subtitleApplied = useRef(false);
   const applySubtitle = () => {
-    if (subtitleApplied.current || (playback.subtitleIndex ?? -1) < 0) return;
+    if (subtitleApplied.current) return;
+    if (directSubtitles) {
+      if (player.availableSubtitleTracks.length < directSubtitles.length) return;
+      showEmbeddedSubtitleTrack(player, directSubtitles, chosenSubtitle.current);
+      subtitleApplied.current = true;
+      return;
+    }
+    if ((playback.subtitleIndex ?? -1) < 0) return;
     subtitleApplied.current = showFirstSubtitleTrack(player);
   };
   useEventListener(player, 'availableSubtitleTracksChange', applySubtitle);
@@ -182,7 +197,7 @@ function Player({
     setEnded(true);
   });
 
-  const lang = () => subtitleLanguage(item, playback.subtitleIndex);
+  const lang = () => subtitleLanguage(item, chosenSubtitle.current);
   const playNext = () => {
     if (!next) return;
     const l = lang();
@@ -209,7 +224,7 @@ function Player({
   const pickSubtitles = () => {
     const streams = subtitleStreams(item);
     const choices = [{ index: SUBTITLES_OFF, label: 'Off' }, ...streams.map((s) => ({ index: s.Index, label: subtitleLabel(s) }))];
-    const current = player.subtitleTrack ? playback.subtitleIndex : SUBTITLES_OFF;
+    const current = player.subtitleTrack ? chosenSubtitle.current : SUBTITLES_OFF;
     ActionSheetIOS.showActionSheetWithOptions(
       {
         title: 'Subtitles',
@@ -221,9 +236,19 @@ function Player({
         if (!choice || choice.index === current) return;
         if (choice.index === SUBTITLES_OFF) {
           player.subtitleTrack = null;
+          chosenSubtitle.current = SUBTITLES_OFF;
           return;
         }
-        if (choice.index === playback.subtitleIndex && showFirstSubtitleTrack(player)) return;
+        const track = directSubtitles
+          ? embeddedSubtitleTrack(player, directSubtitles, choice.index)
+          : choice.index === playback.subtitleIndex
+            ? (player.subtitleTrack ?? player.availableSubtitleTracks[0] ?? null)
+            : null;
+        if (track) {
+          player.subtitleTrack = track;
+          chosenSubtitle.current = choice.index;
+          return;
+        }
         // The stream only carries the subtitle asked for, so another one means asking again.
         router.replace({
           pathname: '/jellyfin/player/[id]',
@@ -309,6 +334,17 @@ function showFirstSubtitleTrack(player: VideoPlayer) {
   const track = player.subtitleTrack ?? player.availableSubtitleTracks[0];
   if (track) player.subtitleTrack = track;
   return !!track;
+}
+
+/** The player's track for a Jellyfin subtitle stream, matched by position among the file's embedded ones. */
+function embeddedSubtitleTrack(player: VideoPlayer, embedded: number[], index: number | undefined) {
+  const position = index === undefined ? -1 : embedded.indexOf(index);
+  return position === -1 ? null : (player.availableSubtitleTracks[position] ?? null);
+}
+
+/** Shows that track, or none when the stream isn't one of the embedded ones (e.g. subtitles off). */
+function showEmbeddedSubtitleTrack(player: VideoPlayer, embedded: number[], index: number | undefined) {
+  player.subtitleTrack = embeddedSubtitleTrack(player, embedded, index);
 }
 
 function UpNext({
