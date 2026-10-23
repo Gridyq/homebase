@@ -1,11 +1,22 @@
-import { DarkTheme, DefaultTheme, Stack, ThemeProvider } from 'expo-router';
-import { useColorScheme } from 'react-native';
+import { DarkTheme, DefaultTheme, Stack, ThemeProvider, type ErrorBoundaryProps } from 'expo-router';
+import { useEffect } from 'react';
+import { ScrollView, StyleSheet, useColorScheme } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
+
+import { Button } from '@/components/button';
+import { ThemedText } from '@/components/themed-text';
+import { Spacing } from '@/constants/theme';
+import { useTheme } from '@/hooks/use-theme';
 
 import { useBackgroundUpdates } from '@/hooks/use-background-updates';
+import { describeError, installCrashRecorder, sendCrashReport, useCrashReports } from '@/hooks/use-crash-reports';
+
+installCrashRecorder();
 
 export default function RootLayout() {
   const colorScheme = useColorScheme();
   useBackgroundUpdates();
+  useCrashReports();
   return (
     <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
       <Stack>
@@ -26,3 +37,33 @@ export default function RootLayout() {
     </ThemeProvider>
   );
 }
+
+/** A screen that failed to render shows what went wrong instead of closing the app. */
+export function ErrorBoundary({ error, retry }: ErrorBoundaryProps) {
+  const theme = useTheme();
+  useEffect(() => {
+    sendCrashReport(describeError(error)).catch(() => {});
+  }, [error]);
+  return (
+    <SafeAreaView style={[styles.flex, { backgroundColor: theme.background }]}>
+      <ScrollView contentContainerStyle={styles.error}>
+        <ThemedText type="subtitle">Something went wrong</ThemedText>
+        <ThemedText selectable>{error.message}</ThemedText>
+        <ThemedText type="small" themeColor="textSecondary" selectable>
+          {error.stack}
+        </ThemedText>
+        <Button title="Try again" onPress={retry} />
+      </ScrollView>
+    </SafeAreaView>
+  );
+}
+
+const styles = StyleSheet.create({
+  flex: {
+    flex: 1,
+  },
+  error: {
+    padding: Spacing.four,
+    gap: Spacing.three,
+  },
+});

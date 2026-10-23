@@ -5,7 +5,7 @@ import { StatusBar } from 'expo-status-bar';
 import { useVideoPlayer, VideoView, type AudioTrack, type VideoPlayer, type VideoSource } from 'expo-video';
 import { useEffect, useRef, useState } from 'react';
 import { ActionSheetIOS, ActivityIndicator, Pressable, StyleSheet, View } from 'react-native';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Button } from '@/components/button';
 import { ThemedText } from '@/components/themed-text';
@@ -28,7 +28,17 @@ import { useAsync } from '@/miniapps/jellyfin/use-async';
 const PROGRESS_INTERVAL_SECONDS = 10;
 const UP_NEXT_SECONDS = 10;
 
+// A full-screen modal gets the insets of the screen under it, which stay portrait when the
+// phone turns, so the controls measure this screen's own edges instead.
 export default function PlayerScreen() {
+  return (
+    <SafeAreaProvider>
+      <PlayerLoader />
+    </SafeAreaProvider>
+  );
+}
+
+function PlayerLoader() {
   const { id, start, subtitle, subtitleLang, playlist } = useLocalSearchParams<{
     id: string;
     start?: string;

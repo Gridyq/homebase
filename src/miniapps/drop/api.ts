@@ -38,7 +38,8 @@ export async function uploadFile(conn: Connection, file: File, name: string, onP
     result = await file.upload(`${conn.url}${fileUrl(name)}`, {
       httpMethod: 'PUT',
       headers: auth(conn),
-      onProgress: ({ bytesSent, totalBytes }) => totalBytes > 0 && onProgress(bytesSent / totalBytes),
+      // Typed as numbers, but the native side sends Int64s, which arrive as BigInts.
+      onProgress: ({ bytesSent, totalBytes }) => totalBytes > 0 && onProgress(Number(bytesSent) / Number(totalBytes)),
     });
   } catch (e) {
     throw new Error(`Can't reach ${conn.url} (${reason(e)}). Is Tailscale connected?`);
@@ -60,7 +61,8 @@ export async function downloadFile(conn: Connection, name: string, onProgress: (
     return await File.downloadFileAsync(`${conn.url}${fileUrl(name)}`, new File(folder, name), {
       headers: auth(conn),
       idempotent: true,
-      onProgress: ({ bytesWritten, totalBytes }) => totalBytes > 0 && onProgress(bytesWritten / totalBytes),
+      onProgress: ({ bytesWritten, totalBytes }) =>
+        totalBytes > 0 && onProgress(Number(bytesWritten) / Number(totalBytes)),
     });
   } catch (e) {
     throw new Error(`Couldn't download ${name} (${reason(e)}).`);

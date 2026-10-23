@@ -2106,6 +2106,17 @@ async function handle(req, res) {
     }
   }
 
+  if (req.method === 'POST' && url.pathname === '/api/crash') {
+    // The JS error behind the app's last crash, which iOS's own report leaves out.
+    let report;
+    try {
+      report = JSON.parse((await readBody(req))?.toString() ?? '{}').report;
+    } catch {
+      throw new HttpError(400, 'Expected JSON');
+    }
+    log(req, `app crash report:\n${String(report).slice(0, 8000)}`);
+    return sendJson(res, 200, { ok: true });
+  }
   if (req.method === 'GET' && url.pathname === '/api/drop') return sendJson(res, 200, await dropFiles());
   if (req.method === 'POST' && url.pathname === '/api/drop/text') {
     let text;
