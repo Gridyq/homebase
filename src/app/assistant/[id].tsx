@@ -1,11 +1,14 @@
+import { Image } from 'expo-image';
 import { router, Stack, useLocalSearchParams } from 'expo-router';
 import { useHeaderHeight } from 'expo-router/react-navigation';
 import { SymbolView } from 'expo-symbols';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActionSheetIOS,
+  ActivityIndicator,
   Alert,
   KeyboardAvoidingView,
+  Modal,
   Pressable,
   ScrollView,
   Share,
@@ -25,9 +28,14 @@ import { useTheme } from '@/hooks/use-theme';
 import {
   ask,
   assistantState,
+  canAddPhotos,
   deleteChat,
   getChat,
+  photoSource,
+  PHOTOS_PER_QUESTION,
+  pickPhotos,
   stopAnswer,
+  uploadPhoto,
   type AssistantModel,
   type Chat,
   type ChatMessage,
@@ -42,6 +50,9 @@ import { useServerConnection } from '@/miniapps/server/connection';
 const CATCH_UP_MS = 1000;
 /** Within this distance of the bottom, new text keeps the view scrolled to the end. */
 const FOLLOW_SLACK = 80;
+
+/** A photo waiting to go with the next question; `id` arrives once it's on the server. */
+type Attachment = { key: string; uri: string; id?: string };
 
 export default function ChatScreen() {
   const { connection } = useServerConnection();
@@ -63,11 +74,15 @@ function ChatView({ conn, id }: { conn: Connection; id: string }) {
   const [text, setText] = useState('');
   const [status, setStatus] = useState<string>();
   const [streaming, setStreaming] = useState(false);
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [viewing, setViewing] = useState<string>();
   const scroll = useRef<ScrollViewInstance>(null);
   const following = useRef(true);
 
   const model = models.find((m) => m.id === (modelId ?? chat?.model)) ?? models[0];
   const answering = streaming || !!chat?.messages.at(-1)?.pending;
+  const uploading = attachments.some((a) => !a.id);
+  const canSend = (!!text.trim() || attachments.length > 0) && !uploading;
 
   const load = useCallback(async () => {
     const next = await getChat(conn, id);
@@ -105,25 +120,28 @@ function ChatView({ conn, id }: { conn: Connection; id: string }) {
 
   const send = async () => {
     const question = text.trim();
-    if (!question || answering) return;
+    const images = attachments.flatMap((a) => (a.id ? [a.id] : []));
+    if (!canSend || answering) return;
     const now = Date.now();
+    const unsent = attachments;
     setText('');
+    setAttachments([]);
     following.current = true;
     setChat((c) => ({
       id,
-      title: c?.title ?? question.split('\n')[0],
+      title: c?.title ?? (question.split('\n')[0] || 'Photo'),
       model: model?.id,
       createdAt: c?.createdAt ?? now,
       updatedAt: now,
       messages: [
         ...(c?.messages ?? []),
-        { role: 'user', content: question, at: now },
+        { role: 'user', content: question, images, at: now },
         { role: 'assistant', content: '', reasoning: '', at: now, pending: true },
       ],
     }));
     setStreaming(true);
     try {
-      await ask(conn, id, { text: question, model: model?.id, think: think && !!model?.thinking }, (event) => {
+      await ask(conn, id, { text: question, images, model: model?.id, think: think && !!model?.thinking }, (event) => {
         if (event.type === 'status') setStatus(event.text);
         else if (event.type === 'reasoning') updateLast((m) => ({ ...m, reasoning: (m.reasoning ?? '') + event.text }));
         else if (event.type === 'content') {
@@ -138,6 +156,7 @@ function ChatView({ conn, id }: { conn: Connection; id: string }) {
       const saved = await load().catch(() => undefined);
       if (!saved?.messages.some((m) => m.at === now && m.role === 'user')) {
         setText(question);
+        setAttachments(unsent);
         Alert.alert('Couldn’t ask', e instanceof Error ? e.message : String(e));
       }
     } finally {
@@ -147,6 +166,38 @@ function ChatView({ conn, id }: { conn: Connection; id: string }) {
   };
 
   const stop = () => stopAnswer(conn, id).catch(() => undefined);
+
+  const addPhotos = (from: 'library' | 'camera') =>
+    pickPhotos(from, PHOTOS_PER_QUESTION - attachments.length).then(
+      (uris) => {
+        const added = uris.map((uri, i) => ({ key: `${Date.now()}-${i}`, uri }));
+        setAttachments((list) => [...list, ...added]);
+        for (const a of added) {
+          uploadPhoto(conn, a.uri).then(
+            (photoId) => setAttachments((list) => list.map((x) => (x.key === a.key ? { ...x, id: photoId } : x))),
+            (e: Error) => {
+              setAttachments((list) => list.filter((x) => x.key !== a.key));
+              Alert.alert('Couldn’t add the photo', e.message);
+            },
+          );
+        }
+      },
+      (e: Error) => Alert.alert('Couldn’t add a photo', e.message),
+    );
+
+  const choosePhotoSource = () => {
+    if (attachments.length >= PHOTOS_PER_QUESTION) {
+      Alert.alert(`Up to ${PHOTOS_PER_QUESTION} photos at a time`);
+      return;
+    }
+    ActionSheetIOS.showActionSheetWithOptions(
+      { options: ['Take Photo', 'Choose Photos', 'Cancel'], cancelButtonIndex: 2 },
+      (i) => {
+        if (i === 0) addPhotos('camera');
+        if (i === 1) addPhotos('library');
+      },
+    );
+  };
 
   const chooseModel = () => {
     const names = models.map((m) => m.name);
@@ -222,7 +273,14 @@ function ChatView({ conn, id }: { conn: Connection; id: string }) {
         onContentSizeChange={() => following.current && scroll.current?.scrollToEnd({ animated: false })}>
         {messages.length ? (
           messages.map((m, i) => (
-            <MessageView key={`${m.at}-${i}`} message={m} status={i === messages.length - 1 ? status : undefined} onLongPress={() => messageActions(m)} />
+            <MessageView
+              key={`${m.at}-${i}`}
+              conn={conn}
+              message={m}
+              status={i === messages.length - 1 ? status : undefined}
+              onLongPress={() => messageActions(m)}
+              onOpenPhoto={setViewing}
+            />
           ))
         ) : (
           <ThemedText themeColor="textSecondary" style={styles.hint}>
@@ -231,7 +289,36 @@ function ChatView({ conn, id }: { conn: Connection; id: string }) {
           </ThemedText>
         )}
       </ScrollView>
+      {attachments.length ? (
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={[styles.attachments, gutter]} style={styles.attachmentBar}>
+          {attachments.map((a) => (
+            <View key={a.key} style={[styles.attachment, { backgroundColor: theme.backgroundElement }]}>
+              <Image source={a.uri} style={StyleSheet.absoluteFill} contentFit="cover" />
+              {a.id ? null : (
+                <View style={styles.attachmentBusy}>
+                  <ActivityIndicator color="#fff" />
+                </View>
+              )}
+              <Pressable
+                onPress={() => setAttachments((list) => list.filter((x) => x.key !== a.key))}
+                accessibilityLabel="Remove photo"
+                hitSlop={8}
+                style={styles.attachmentRemove}>
+                <SymbolView name="xmark.circle.fill" size={20} tintColor="#fff" />
+              </Pressable>
+            </View>
+          ))}
+        </ScrollView>
+      ) : null}
       <View style={[styles.composer, gutter, { paddingBottom: Math.max(insets.bottom, Spacing.two) }]}>
+        {model?.vision && canAddPhotos() ? (
+          <Pressable
+            onPress={choosePhotoSource}
+            accessibilityLabel="Add photo"
+            style={[styles.think, { backgroundColor: theme.backgroundElement }]}>
+            <SymbolView name="photo" size={18} tintColor={theme.textSecondary} />
+          </Pressable>
+        ) : null}
         {model?.thinking ? (
           <Pressable
             onPress={() => setThink((t) => !t)}
@@ -246,34 +333,68 @@ function ChatView({ conn, id }: { conn: Connection; id: string }) {
           style={[styles.input, { backgroundColor: theme.backgroundElement, color: theme.text }]}
           value={text}
           onChangeText={setText}
-          placeholder={think ? 'Ask, and it thinks it through' : 'Ask anything'}
+          placeholder={attachments.length ? 'Ask about the photo' : think ? 'Ask, and it thinks it through' : 'Ask anything'}
           placeholderTextColor={theme.textSecondary}
           multiline
         />
         <Pressable
           onPress={answering ? stop : send}
-          disabled={!answering && !text.trim()}
+          disabled={!answering && !canSend}
           accessibilityLabel={answering ? 'Stop' : 'Send'}
           style={({ pressed }) => [
             styles.send,
-            { backgroundColor: theme.accent, opacity: !answering && !text.trim() ? 0.4 : pressed ? 0.7 : 1 },
+            { backgroundColor: theme.accent, opacity: !answering && !canSend ? 0.4 : pressed ? 0.7 : 1 },
           ]}>
           <SymbolView name={answering ? 'stop.fill' : 'arrow.up'} size={18} weight="bold" tintColor="#fff" />
         </Pressable>
       </View>
+      <Modal visible={!!viewing} animationType="fade" onRequestClose={() => setViewing(undefined)}>
+        <Pressable style={styles.viewer} onPress={() => setViewing(undefined)} accessibilityLabel="Close photo">
+          {viewing ? <Image source={photoSource(conn, viewing)} style={styles.flex} contentFit="contain" /> : null}
+        </Pressable>
+      </Modal>
     </KeyboardAvoidingView>
   );
 }
 
-function MessageView({ message, status, onLongPress }: { message: ChatMessage; status?: string; onLongPress: () => void }) {
+function MessageView({
+  conn,
+  message,
+  status,
+  onLongPress,
+  onOpenPhoto,
+}: {
+  conn: Connection;
+  message: ChatMessage;
+  status?: string;
+  onLongPress: () => void;
+  onOpenPhoto: (id: string) => void;
+}) {
   const theme = useTheme();
   const [showThinking, setShowThinking] = useState(false);
 
   if (message.role === 'user') {
     return (
-      <Pressable onLongPress={onLongPress} style={[styles.user, { backgroundColor: theme.backgroundSelected }]}>
-        <ThemedText style={styles.userText}>{message.content}</ThemedText>
-      </Pressable>
+      <View style={styles.question}>
+        {message.images?.length ? (
+          <View style={styles.photos}>
+            {message.images.map((photo) => (
+              <Pressable key={photo} onPress={() => onOpenPhoto(photo)} accessibilityLabel="Show photo">
+                <Image
+                  source={photoSource(conn, photo)}
+                  style={[styles.photo, { backgroundColor: theme.backgroundElement }]}
+                  contentFit="cover"
+                />
+              </Pressable>
+            ))}
+          </View>
+        ) : null}
+        {message.content ? (
+          <Pressable onLongPress={onLongPress} style={[styles.user, { backgroundColor: theme.backgroundSelected }]}>
+            <ThemedText style={styles.userText}>{message.content}</ThemedText>
+          </Pressable>
+        ) : null}
+      </View>
     );
   }
 
@@ -323,6 +444,50 @@ const styles = StyleSheet.create({
   hint: {
     textAlign: 'center',
     paddingTop: Spacing.five,
+  },
+  question: {
+    alignItems: 'flex-end',
+    gap: Spacing.two,
+  },
+  photos: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'flex-end',
+    gap: Spacing.two,
+    maxWidth: '85%',
+  },
+  photo: {
+    width: 120,
+    height: 120,
+    borderRadius: 14,
+  },
+  attachmentBar: {
+    flexGrow: 0,
+  },
+  attachments: {
+    gap: Spacing.two,
+    paddingTop: Spacing.two,
+  },
+  attachment: {
+    width: 64,
+    height: 64,
+    borderRadius: 10,
+    overflow: 'hidden',
+  },
+  attachmentBusy: {
+    ...StyleSheet.absoluteFill,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  attachmentRemove: {
+    position: 'absolute',
+    top: 2,
+    right: 2,
+  },
+  viewer: {
+    flex: 1,
+    backgroundColor: '#000',
   },
   user: {
     alignSelf: 'flex-end',

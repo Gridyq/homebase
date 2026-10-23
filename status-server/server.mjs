@@ -2026,6 +2026,8 @@ const ASSISTANT_MODELS = [
     url: 'http://localhost:8080',
     /** Can think before answering, switched with the chat template's enable_thinking. */
     thinking: true,
+    /** Can look at photos (llama.cpp loads the mmproj file that -hf finds next to the model). */
+    vision: true,
     /** Qwen's recommended settings for each mode. */
     sampling: {
       think: { temperature: 0.6, top_p: 0.95, top_k: 20, min_p: 0 },
@@ -2042,6 +2044,18 @@ const ASSISTANT_MAX_TEXT = 32_000;
 /** A rough count, for keeping a long chat inside the model's context. */
 const CHARS_PER_TOKEN = 3;
 const CHAT_ID = /^[\w-]{8,64}$/;
+/**
+ * Photos are made a JPEG of at most this many pixels on the long side, which keeps one to
+ * roughly 1,600 tokens of context and reads fine for text in a screenshot.
+ */
+const IMAGE_MAX_SIDE = 1280;
+const IMAGE_TOKENS = 1600;
+const IMAGE_MAX_BYTES = 50 * 1024 * 1024;
+const IMAGES_PER_MESSAGE = 4;
+const IMAGE_DIR = path.join(ASSISTANT_DIR, 'images');
+const IMAGE_ID = /^[0-9a-f]{24}$/;
+/** Photos sent without a question after them are deleted once they're this old. */
+const IMAGE_ORPHAN_MS = 3600_000;
 
 let assistantLastUsed = 0;
 let assistantStarting; // { model, promise }
@@ -2072,7 +2086,7 @@ async function assistantState() {
         : (await modelAnswers(m)) ? 'running'
         : (await unitActive(m.unit)) ? 'starting'
         : 'stopped';
-      return { id: m.id, name: m.name, thinking: !!m.thinking, state };
+      return { id: m.id, name: m.name, thinking: !!m.thinking, vision: !!m.vision, state };
     }),
   );
   return { models, gameMode: gameMode.active };
@@ -2179,8 +2193,76 @@ async function getChat(id) {
 
 async function deleteChat(id) {
   generations.get(id)?.controller.abort();
+  const chat = await loadChat(id).catch(() => undefined);
+  for (const image of (chat?.messages ?? []).flatMap((m) => m.images ?? [])) {
+    await rm(imagePath(image), { force: true });
+  }
   await rm(chatPath(id), { force: true });
   return { ok: true };
+}
+
+function imagePath(id) {
+  if (!IMAGE_ID.test(id)) throw new HttpError(400, 'Bad photo id');
+  return path.join(IMAGE_DIR, `${id}.jpg`);
+}
+
+/** Takes a photo from the phone and keeps a smaller JPEG of it, upright and without its metadata. */
+async function receiveImage(req) {
+  if (Number(req.headers['content-length']) > IMAGE_MAX_BYTES) throw new HttpError(413, 'Photos can be up to 50 MB');
+  await mkdir(IMAGE_DIR, { recursive: true });
+  const id = randomBytes(12).toString('hex');
+  const part = path.join(IMAGE_DIR, `.${id}.part`);
+  try {
+    let size = 0;
+    await pipeline(
+      req,
+      async function* (chunks) {
+        for await (const chunk of chunks) {
+          size += chunk.length;
+          if (size > IMAGE_MAX_BYTES) throw new HttpError(413, 'Photos can be up to 50 MB');
+          yield chunk;
+        }
+      },
+      createWriteStream(part, { flags: 'wx' }),
+    );
+    // [0]: the first frame of a GIF or the like.
+    await run('magick', [`${part}[0]`, '-auto-orient', '-resize', `${IMAGE_MAX_SIDE}x${IMAGE_MAX_SIDE}>`, '-strip', '-quality', '85', `jpg:${imagePath(id)}`], {
+      timeout: 60_000,
+    }).catch((e) => {
+      console.error(`Assistant: couldn't read a photo: ${e.stderr?.trim() || e.message}`);
+      throw new HttpError(415, 'Couldn’t read that photo. JPEG, PNG and WebP work.');
+    });
+    return { id };
+  } finally {
+    await unlink(part).catch(() => {});
+  }
+}
+
+async function sendImage(res, id) {
+  const data = await readFile(imagePath(id)).catch(() => {
+    throw new HttpError(404, 'That photo is gone');
+  });
+  // A photo never changes once saved, so the phone can keep it.
+  res.writeHead(200, { 'content-type': 'image/jpeg', 'content-length': data.length, 'cache-control': 'private, max-age=31536000, immutable' });
+  res.end(data);
+}
+
+/** Deletes photos that were sent but never asked about, such as ones removed before sending. */
+async function sweepImages() {
+  const names = await readdir(IMAGE_DIR).catch(() => []);
+  if (!names.length) return;
+  const used = new Set();
+  for (const name of await readdir(ASSISTANT_DIR).catch(() => [])) {
+    if (!name.endsWith('.json')) continue;
+    const chat = await loadChat(name.slice(0, -'.json'.length)).catch(() => undefined);
+    for (const m of chat?.messages ?? []) for (const image of m.images ?? []) used.add(image);
+  }
+  for (const name of names) {
+    const file = path.join(IMAGE_DIR, name);
+    const info = await stat(file).catch(() => undefined);
+    if (!info || used.has(path.parse(name).name) || Date.now() - info.mtimeMs < IMAGE_ORPHAN_MS) continue;
+    await rm(file, { force: true });
+  }
 }
 
 function stopAnswer(id) {
@@ -2201,15 +2283,30 @@ function systemPrompt(model) {
   ].join(' ');
 }
 
-/** The newest messages that fit in the model's context, leaving room for the answer. */
-function chatHistory(chat, budgetChars) {
+/**
+ * The newest messages that fit in the model's context, leaving room for the answer. Photos go
+ * in as data URLs, for a model that can see them.
+ */
+async function chatHistory(chat, model, budgetChars) {
   const history = [];
   let used = 0;
   for (const m of chat.messages.slice(0, -1).reverse()) {
-    if (!m.content) continue;
-    used += m.content.length;
+    const images = model.vision ? (m.images ?? []) : [];
+    if (!m.content && !images.length) continue;
+    used += m.content.length + images.length * IMAGE_TOKENS * CHARS_PER_TOKEN;
     if (used > budgetChars && history.length) break;
-    history.unshift({ role: m.role, content: m.content });
+    if (!images.length) {
+      history.unshift({ role: m.role, content: m.content });
+      continue;
+    }
+    const parts = [];
+    for (const image of images) {
+      const data = await readFile(imagePath(image)).catch(() => undefined);
+      if (data) parts.push({ type: 'image_url', image_url: { url: `data:image/jpeg;base64,${data.toString('base64')}` } });
+    }
+    // A photo sent on its own gets a plain question, rather than a guess at what's wanted.
+    parts.push({ type: 'text', text: m.content || (images.length > 1 ? 'What’s in these photos?' : 'What’s in this photo?') });
+    history.unshift({ role: m.role, content: parts });
   }
   return history;
 }
@@ -2228,18 +2325,27 @@ async function ask(req, res, id) {
     throw new HttpError(400, 'Expected JSON');
   }
   const text = typeof body?.text === 'string' ? body.text.trim() : '';
-  if (!text) throw new HttpError(400, 'Nothing to ask');
+  const images = Array.isArray(body?.images) ? body.images : [];
+  if (!text && !images.length) throw new HttpError(400, 'Nothing to ask');
+  if (images.length > IMAGES_PER_MESSAGE) throw new HttpError(400, `Up to ${IMAGES_PER_MESSAGE} photos at a time`);
+  for (const image of images) {
+    if (typeof image !== 'string' || !(await stat(imagePath(image)).catch(() => undefined))) {
+      throw new HttpError(400, 'One of the photos is gone. Add it again.');
+    }
+  }
   if (text.length > ASSISTANT_MAX_TEXT) throw new HttpError(413, 'That message is too long');
   if (generations.has(id)) throw new HttpError(409, 'Still answering the last message');
   gameModeError('the assistant');
 
   const now = Date.now();
-  const chat = (await loadChat(id)) ?? { id, title: text.split('\n')[0].slice(0, 80), createdAt: now, messages: [] };
+  const title = text.split('\n')[0].slice(0, 80) || (images.length > 1 ? 'Photos' : 'Photo');
+  const chat = (await loadChat(id)) ?? { id, title, createdAt: now, messages: [] };
   const model = findModel(body.model ?? chat.model);
+  if (images.length && !model.vision) throw new HttpError(400, `${model.name} can’t look at photos`);
   const think = !!body.think && !!model.thinking;
   chat.model = model.id;
   chat.updatedAt = now;
-  chat.messages.push({ role: 'user', content: text, at: now });
+  chat.messages.push({ role: 'user', content: text, ...(images.length ? { images } : {}), at: now });
   const message = { role: 'assistant', content: '', reasoning: '', model: model.id, at: now, pending: true };
   chat.messages.push(message);
   const controller = new AbortController();
@@ -2264,7 +2370,7 @@ async function ask(req, res, id) {
       body: JSON.stringify({
         stream: true,
         max_tokens: reply,
-        messages: [{ role: 'system', content: system }, ...chatHistory(chat, budget)],
+        messages: [{ role: 'system', content: system }, ...(await chatHistory(chat, model, budget))],
         ...(model.thinking ? { chat_template_kwargs: { enable_thinking: think } } : {}),
         ...model.sampling?.[think ? 'think' : 'quick'],
       }),
@@ -2480,6 +2586,9 @@ async function handle(req, res) {
 
   if (req.method === 'GET' && url.pathname === '/api/assistant') return sendJson(res, 200, await assistantState());
   if (req.method === 'GET' && url.pathname === '/api/assistant/chats') return sendJson(res, 200, await listChats());
+  if (req.method === 'POST' && url.pathname === '/api/assistant/images') return sendJson(res, 200, await receiveImage(req));
+  const image = /^\/api\/assistant\/images\/([^/]+)$/.exec(url.pathname);
+  if (req.method === 'GET' && image) return sendImage(res, image[1]);
   const chat = /^\/api\/assistant\/chats\/([^/]+)(\/stop)?$/.exec(url.pathname);
   if (chat) {
     const [, id, stop] = chat;
@@ -2554,6 +2663,7 @@ if (process.argv[2] === 'pair') {
   setInterval(checkGame, GAME_CHECK_INTERVAL).unref();
   setInterval(stopIdleSeerr, 60_000).unref();
   setInterval(stopIdleAssistant, 60_000).unref();
+  setInterval(() => sweepImages().catch((e) => console.error("Couldn't clear old photos:", e.message)), 3600_000).unref();
   setInterval(() => sortTvQueue().catch(() => {}), 60_000).unref();
   await loadVideoJobs();
   setInterval(updateYtdlp, 3600_000).unref();

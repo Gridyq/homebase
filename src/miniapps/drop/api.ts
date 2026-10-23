@@ -79,7 +79,7 @@ export async function pickFiles(): Promise<Picked[]> {
 // expo-image-picker came after the first builds; requiring it without its native module is a
 // fatal error, so check first (see src/miniapps/jellyfin/settings.tsx).
 let imagePicker: typeof import('expo-image-picker') | null | undefined;
-function loadImagePicker() {
+export function loadImagePicker() {
   if (imagePicker === undefined) {
     imagePicker = requireOptionalNativeModule('ExponentImagePicker')
       ? // eslint-disable-next-line @typescript-eslint/no-require-imports

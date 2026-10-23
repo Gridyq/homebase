@@ -1,6 +1,8 @@
 import * as Crypto from 'expo-crypto';
+import { File } from 'expo-file-system';
 import { fetch } from 'expo/fetch';
 
+import { loadImagePicker } from '@/miniapps/drop/api';
 import { request, type Connection } from '@/miniapps/server/api';
 
 /**
@@ -13,6 +15,8 @@ export type AssistantModel = {
   name: string;
   /** Can think a question through before answering. */
   thinking: boolean;
+  /** Can look at photos. */
+  vision: boolean;
   state: 'running' | 'starting' | 'stopped';
 };
 
@@ -21,6 +25,8 @@ export type AssistantState = { models: AssistantModel[]; gameMode: boolean };
 export type ChatMessage = {
   role: 'user' | 'assistant';
   content: string;
+  /** Photo ids, for a question that came with photos. */
+  images?: string[];
   reasoning?: string;
   model?: string;
   at: number;
@@ -95,7 +101,7 @@ export function newChatId() {
 export async function ask(
   conn: Connection,
   id: string,
-  question: { text: string; model?: string; think: boolean },
+  question: { text: string; images: string[]; model?: string; think: boolean },
   onEvent: (event: AnswerEvent) => void,
 ) {
   let res: Awaited<ReturnType<typeof fetch>>;
@@ -124,4 +130,56 @@ export async function ask(
     buffer = lines.pop() ?? '';
     for (const line of lines) if (line) onEvent(JSON.parse(line));
   }
+}
+
+/** Most photos one question can carry. */
+export const PHOTOS_PER_QUESTION = 4;
+
+/** Sends a photo ahead of the question it goes with; the server keeps a smaller copy. */
+export async function uploadPhoto(conn: Connection, uri: string) {
+  let result;
+  try {
+    result = await new File(uri).upload(`${conn.url}/api/assistant/images`, {
+      httpMethod: 'POST',
+      headers: { Authorization: `Bearer ${conn.token}` },
+    });
+  } catch (e) {
+    throw new Error(`Can't reach ${conn.url} (${e instanceof Error ? e.message : String(e)}). Is Tailscale connected?`);
+  }
+  let body: { id?: string; error?: string } | undefined;
+  try {
+    body = JSON.parse(result.body);
+  } catch {}
+  if (result.status === 401) throw new Error('The server rejected the token. Check it in Settings.');
+  if (result.status < 200 || result.status >= 300 || !body?.id) throw new Error(body?.error ?? `The server answered ${result.status}.`);
+  return body.id;
+}
+
+/** For expo-image: a photo the server keeps, which never changes once saved. */
+export function photoSource(conn: Connection, id: string) {
+  return { uri: `${conn.url}/api/assistant/images/${id}`, headers: { Authorization: `Bearer ${conn.token}` }, cacheKey: `assistant-photo-${id}` };
+}
+
+/** False on builds made before the photo picker was added. */
+export const canAddPhotos = () => !!loadImagePicker();
+
+/** Photos from the library or the camera, as local file URIs. */
+export async function pickPhotos(from: 'library' | 'camera', limit: number): Promise<string[]> {
+  const ImagePicker = loadImagePicker();
+  if (!ImagePicker) return [];
+  if (from === 'camera') {
+    const { granted } = await ImagePicker.requestCameraPermissionsAsync();
+    if (!granted) throw new Error('Homebase isn’t allowed to use the camera. Turn it on in Settings › Homebase.');
+    const shot = await ImagePicker.launchCameraAsync({ mediaTypes: 'images', quality: 0.8 });
+    return shot.canceled ? [] : shot.assets.map((a) => a.uri);
+  }
+  const picked = await ImagePicker.launchImageLibraryAsync({
+    mediaTypes: 'images',
+    allowsMultipleSelection: true,
+    selectionLimit: limit,
+    quality: 0.8,
+    // JPEG rather than HEIC, which the server can't read.
+    preferredAssetRepresentationMode: ImagePicker.UIImagePickerPreferredAssetRepresentationMode.Compatible,
+  });
+  return picked.canceled ? [] : picked.assets.slice(0, limit).map((a) => a.uri);
 }
