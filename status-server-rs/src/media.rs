@@ -77,7 +77,7 @@ const SONARR: App = App {
         ),
         ("POST", r"^(release|command)$"),
         ("PUT", r"^series/\d+$"),
-        ("DELETE", r"^(queue/\d+|series/\d+|episodefile/bulk)$"),
+        ("DELETE", r"^(queue/\d+|queue/bulk|series/\d+|episodefile/bulk)$"),
     ],
 };
 const RADARR: App = App {
@@ -86,7 +86,7 @@ const RADARR: App = App {
     routes: &[
         ("GET", r"^(queue|calendar|release|movie|movie/\d+|qualityprofile|manualimport)$"),
         ("POST", r"^(release|command)$"),
-        ("DELETE", r"^(queue/\d+|movie/\d+)$"),
+        ("DELETE", r"^(queue/\d+|queue/bulk|movie/\d+)$"),
     ],
 };
 

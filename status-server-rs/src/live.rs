@@ -172,7 +172,9 @@ async fn serve(mut socket: WebSocket, state: State, topics: Vec<String>) {
             Next::Event(Ok(data)) => message("events", &data),
             Next::Event(Err(broadcast::error::RecvError::Lagged(_))) => continue,
             Next::Event(Err(_)) => return,
-            Next::Ping => Message::Ping(Default::default()),
+            // A text message rather than a WebSocket ping, which the app's JavaScript never sees:
+            // it's how the app notices a socket that died without closing.
+            Next::Ping => Message::Text(Utf8Bytes::from_static("{\"topic\":\"ping\"}")),
             Next::Incoming(Some(Ok(Message::Close(_))) | None | Some(Err(_))) => return,
             Next::Incoming(Some(Ok(_))) => continue,
         };

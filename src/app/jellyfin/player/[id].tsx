@@ -10,7 +10,7 @@ import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-cont
 import { Button } from '@/components/button';
 import { ThemedText } from '@/components/themed-text';
 import { Spacing } from '@/constants/theme';
-import { TICKS_PER_SECOND, type BaseItem, type JellyfinClient } from '@/miniapps/jellyfin/api';
+import { JellyfinError, TICKS_PER_SECOND, type BaseItem, type JellyfinClient } from '@/miniapps/jellyfin/api';
 import { episodeLabel } from '@/miniapps/jellyfin/components';
 import { clearLastPlayed, saveLastPlayed } from '@/miniapps/jellyfin/last-played';
 import { useJellyfin } from '@/miniapps/jellyfin/session';
@@ -70,14 +70,25 @@ function PlayerLoader() {
     ]);
     return { item, playback: { ...playback, subtitleIndex }, next };
   }, `${id}/${subtitle}/${playlist}`);
+  // Conversions give an item a new id, so Resume can point at one that's gone for good.
+  const gone = error instanceof JellyfinError && error.status === 404;
+  useEffect(() => {
+    if (gone) clearLastPlayed(id);
+  }, [gone, id]);
 
   if (!data) {
     return (
       <Shell>
         {error ? (
           <View style={styles.error}>
-            <ThemedText style={styles.light}>{error.message}</ThemedText>
-            <Button title="Try again" onPress={reload} />
+            <ThemedText style={styles.light}>
+              {gone ? 'This is no longer in the library. It may have been replaced by a new copy.' : error.message}
+            </ThemedText>
+            {gone ? (
+              <Button title="Close" onPress={() => router.back()} />
+            ) : (
+              <Button title="Try again" onPress={reload} />
+            )}
           </View>
         ) : (
           <ActivityIndicator color="#fff" />

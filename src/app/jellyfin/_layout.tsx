@@ -1,7 +1,7 @@
 import { router, Stack } from 'expo-router';
 
 import { Centered } from '@/miniapps/jellyfin/components';
-import { JellyfinSessionProvider, useJellyfinSession } from '@/miniapps/jellyfin/session';
+import { useJellyfinSession } from '@/miniapps/jellyfin/session';
 import { JellyfinSettingsProvider } from '@/miniapps/jellyfin/settings';
 
 // A native toolbar button renders as a round Liquid Glass icon; a custom headerLeft view gets
@@ -44,10 +44,8 @@ function JellyfinStack() {
 
 export default function JellyfinLayout() {
   return (
-    <JellyfinSessionProvider>
-      <JellyfinSettingsProvider>
-        <JellyfinStack />
-      </JellyfinSettingsProvider>
-    </JellyfinSessionProvider>
+    <JellyfinSettingsProvider>
+      <JellyfinStack />
+    </JellyfinSettingsProvider>
   );
 }

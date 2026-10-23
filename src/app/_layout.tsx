@@ -10,6 +10,8 @@ import { useTheme } from '@/hooks/use-theme';
 
 import { useBackgroundUpdates } from '@/hooks/use-background-updates';
 import { describeError, installCrashRecorder, sendCrashReport, useCrashReports } from '@/hooks/use-crash-reports';
+import { JellyfinSessionProvider } from '@/miniapps/jellyfin/session';
+import { ServerConnectionProvider } from '@/miniapps/server/connection';
 
 installCrashRecorder();
 
@@ -18,26 +20,32 @@ export default function RootLayout() {
   useBackgroundUpdates();
   useCrashReports();
   return (
+    // One connection and one sign-in for all the mini-apps, so connecting or signing in from one
+    // shows in the others.
     <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
-      <Stack>
-        <Stack.Screen name="index" options={{ title: 'Apps', headerLargeTitle: true }} />
-        <Stack.Screen name="jellyfin" options={{ headerShown: false }} />
-        <Stack.Screen name="server" options={{ headerShown: false }} />
-        <Stack.Screen name="requests" options={{ headerShown: false }} />
-        <Stack.Screen name="drop" options={{ headerShown: false }} />
-        <Stack.Screen name="videos" options={{ headerShown: false }} />
-        <Stack.Screen name="assistant" options={{ headerShown: false }} />
-        <Stack.Screen name="history" options={{ headerShown: false }} />
-        <Stack.Screen
-          name="whats-new"
-          options={{
-            presentation: 'formSheet',
-            headerShown: false,
-            sheetAllowedDetents: 'fitToContents',
-            sheetGrabberVisible: true,
-          }}
-        />
-      </Stack>
+      <ServerConnectionProvider>
+        <JellyfinSessionProvider>
+          <Stack>
+            <Stack.Screen name="index" options={{ title: 'Apps', headerLargeTitle: true }} />
+            <Stack.Screen name="jellyfin" options={{ headerShown: false }} />
+            <Stack.Screen name="server" options={{ headerShown: false }} />
+            <Stack.Screen name="requests" options={{ headerShown: false }} />
+            <Stack.Screen name="drop" options={{ headerShown: false }} />
+            <Stack.Screen name="videos" options={{ headerShown: false }} />
+            <Stack.Screen name="assistant" options={{ headerShown: false }} />
+            <Stack.Screen name="history" options={{ headerShown: false }} />
+            <Stack.Screen
+              name="whats-new"
+              options={{
+                presentation: 'formSheet',
+                headerShown: false,
+                sheetAllowedDetents: 'fitToContents',
+                sheetGrabberVisible: true,
+              }}
+            />
+          </Stack>
+        </JellyfinSessionProvider>
+      </ServerConnectionProvider>
     </ThemeProvider>
   );
 }

@@ -31,8 +31,15 @@ export function saveLastPlayed(item: BaseItem, startSeconds: number, subtitleLan
   SecureStore.setItemAsync(LAST_PLAYED_KEY, JSON.stringify(value)).catch(() => undefined);
 }
 
-export function clearLastPlayed() {
-  SecureStore.deleteItemAsync(LAST_PLAYED_KEY).catch(() => undefined);
+/** Forgets what was playing last, or with `id`, only if that was it. */
+export function clearLastPlayed(id?: string) {
+  (async () => {
+    if (id !== undefined) {
+      const raw = await SecureStore.getItemAsync(LAST_PLAYED_KEY);
+      if (!raw || (JSON.parse(raw) as LastPlayed).id !== id) return;
+    }
+    await SecureStore.deleteItemAsync(LAST_PLAYED_KEY);
+  })().catch(() => undefined);
 }
 
 /** Picks up what was playing last, if signed in and something was. */

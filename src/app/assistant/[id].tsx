@@ -200,8 +200,10 @@ function ChatView({ conn, id }: { conn: Connection; id: string }) {
       if (leaving.current.signal.aborted) return;
       // Refused before it started (the message wasn't added), or the connection dropped while the
       // server kept writing: either way the server's copy is the truth.
+      // The server stamps messages with its own clock, so count questions rather than match times.
+      const asked = (c: typeof chat) => c?.messages.filter((m) => m.role === 'user').length ?? 0;
       const saved = await load().catch(() => undefined);
-      if (!saved?.messages.some((m) => m.at === now && m.role === 'user')) {
+      if (!saved || asked(saved) <= asked(before)) {
         // Take the question back out of the list, or its empty answer would wait there forever.
         if (!saved) setChat(before);
         setText(question);

@@ -202,6 +202,23 @@ function problemOf(r: QueueRecord) {
   return r.errorMessage || r.statusMessages?.flatMap((m) => m.messages)[0] || undefined;
 }
 
+type QueueSeries = NonNullable<QueueRecord['series']>;
+const SERIES_FRESH_MS = 5 * 60_000;
+/** By server and id: the queue is polled every few seconds, and a series' name and art seldom change. */
+const seriesCache = new Map<string, { at: number; series: Promise<QueueSeries> }>();
+
+function cachedSeries(conn: Connection, id: number) {
+  const key = `${conn.url}|${id}`;
+  const hit = seriesCache.get(key);
+  if (hit && Date.now() - hit.at < SERIES_FRESH_MS) return hit.series;
+  const series = arr<QueueSeries>(conn, `sonarr/series/${id}`);
+  seriesCache.set(key, { at: Date.now(), series });
+  series.catch(() => {
+    if (seriesCache.get(key)?.series === series) seriesCache.delete(key);
+  });
+  return series;
+}
+
 async function queueOf(conn: Connection, app: Arr) {
   // The whole queue, since Sonarr sorts torrents qBittorrent hasn't started first: a page of 200
   // can be all queued while the ones downloading sit further down. includeSeries would repeat the
@@ -213,7 +230,7 @@ async function queueOf(conn: Connection, app: Arr) {
     const series = new Map(
       await Promise.all(
         ids.map((id) =>
-          arr<NonNullable<QueueRecord['series']>>(conn, `sonarr/series/${id}`).then(
+          cachedSeries(conn, id).then(
             (s) => [id, s] as const,
             () => [id, undefined] as const,
           ),
@@ -297,9 +314,12 @@ export async function removeDownload(
   searchAgain = true,
 ) {
   const query = `removeFromClient=true&blocklist=${blocklist}&skipRedownload=${!searchAgain}`;
-  for (const id of download.queueIds) {
-    await arr(conn, `${download.arr}/queue/${id}?${query}`, { method: 'DELETE' });
-  }
+  // A season pack is one download with a queue record per episode; removing them one at a time,
+  // the first takes the download and the rest are no longer there.
+  await arr(conn, `${download.arr}/queue/bulk?${query}`, {
+    method: 'DELETE',
+    body: JSON.stringify({ ids: download.queueIds }),
+  });
 }
 
 /** Have Sonarr or Radarr look at finished downloads again now, instead of on their next round. */

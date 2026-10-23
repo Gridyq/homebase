@@ -1,7 +1,7 @@
 import { router, Stack } from 'expo-router';
 
 import { Centered } from '@/miniapps/jellyfin/components';
-import { ServerConnectionProvider, useServerConnection } from '@/miniapps/server/connection';
+import { useServerConnection } from '@/miniapps/server/connection';
 
 // See src/app/jellyfin/_layout.tsx: a native toolbar button renders as a round Liquid Glass icon.
 const backToLauncher = (
@@ -12,7 +12,9 @@ const backToLauncher = (
   </Stack.Toolbar>
 );
 
-function AssistantStack() {
+// The model runs on the home server and its status service keeps the chats, so this shares the
+// Server mini-app's connection.
+export default function AssistantLayout() {
   const { loading } = useServerConnection();
   if (loading) return <Centered loading />;
 
@@ -23,15 +25,5 @@ function AssistantStack() {
       </Stack.Screen>
       <Stack.Screen name="[id]" options={{ title: '' }} />
     </Stack>
-  );
-}
-
-// The model runs on the home server and its status service keeps the chats, so this shares the
-// Server mini-app's connection.
-export default function AssistantLayout() {
-  return (
-    <ServerConnectionProvider>
-      <AssistantStack />
-    </ServerConnectionProvider>
   );
 }

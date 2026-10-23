@@ -185,13 +185,21 @@ function authHeader(deviceId: string, token?: string): string {
   return `MediaBrowser ${parts.join(', ')}`;
 }
 
+/** Without one, a server that's out of reach (Tailscale down) leaves screens spinning for a minute or more. */
+const TIMEOUT_MS = 15_000;
+const TITLES_FRESH_MS = 10 * 60_000;
+
+type CallOptions = { method?: string; body?: unknown; timeoutMs?: number };
+
 async function request<T>(
   serverUrl: string,
   path: string,
   deviceId: string,
   token: string | undefined,
-  init: { method?: string; body?: unknown } = {},
+  init: CallOptions = {},
 ): Promise<T> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), init.timeoutMs ?? TIMEOUT_MS);
   let res: Response;
   try {
     res = await fetch(`${serverUrl}${path}`, {
@@ -202,18 +210,25 @@ async function request<T>(
         Accept: 'application/json',
       },
       body: init.body === undefined ? undefined : JSON.stringify(init.body),
+      signal: controller.signal,
     });
   } catch (e) {
-    const reason = e instanceof Error ? e.message : String(e);
+    const reason = controller.signal.aborted ? 'timed out' : e instanceof Error ? e.message : String(e);
     throw new JellyfinError(
       `Couldn't reach ${serverUrl}. Check the address and your network.\n(${reason})`,
     );
+  } finally {
+    clearTimeout(timer);
   }
   if (res.status === 401) throw new JellyfinError('Your session has expired. Sign in again.', 401);
   if (!res.ok) throw new JellyfinError(`Server returned ${res.status} for ${path}`, res.status);
   if (res.status === 204) return undefined as T;
   const text = await res.text();
-  return (text ? JSON.parse(text) : undefined) as T;
+  try {
+    return (text ? JSON.parse(text) : undefined) as T;
+  } catch {
+    throw new JellyfinError(`The server's answer for ${path} wasn't readable. Is this a Jellyfin server?`, res.status);
+  }
 }
 
 export async function getPublicServerInfo(serverUrl: string, deviceId: string) {
@@ -258,7 +273,7 @@ export async function signIn(
 /** `onUnauthorized` runs when the server no longer accepts the session's token. */
 export function createClient(session: Session, onUnauthorized?: () => void) {
   const { serverUrl, userId, accessToken, deviceId } = session;
-  const call = <T>(path: string, init?: { method?: string; body?: unknown }) =>
+  const call = <T>(path: string, init?: CallOptions) =>
     request<T>(serverUrl, path, deviceId, accessToken, init).catch((e: unknown) => {
       if (e instanceof JellyfinError && e.status === 401) onUnauthorized?.();
       throw e;
@@ -268,6 +283,7 @@ export function createClient(session: Session, onUnauthorized?: () => void) {
 
   const itemFields = 'Overview,PrimaryImageAspectRatio,ParentBackdropItemId';
   let me: Promise<User> | undefined;
+  let titles: { at: number; list: Promise<BaseItem[]> } | undefined;
 
   return {
     session,
@@ -448,10 +464,22 @@ export function createClient(session: Session, onUnauthorized?: () => void) {
     item: (id: string) => get<BaseItem>(`/Items/${id}?userId=${userId}`),
 
     /** Every movie and show, for finding the artwork of something known only by name. */
-    titles: () =>
-      get<ItemsResponse>(
-        `/Items?userId=${userId}&recursive=true&includeItemTypes=Movie,Series&fields=${itemFields}`,
-      ).then((r) => r.Items),
+    /**
+     * Every movie and show, for matching History's plays to artwork. The whole library, so it's
+     * kept a few minutes instead of fetched on each period switch, and without overviews.
+     */
+    titles: () => {
+      if (!titles || Date.now() - titles.at > TITLES_FRESH_MS) {
+        const list = get<ItemsResponse>(
+          `/Items?userId=${userId}&recursive=true&includeItemTypes=Movie,Series&fields=PrimaryImageAspectRatio`,
+        ).then((r) => r.Items);
+        titles = { at: Date.now(), list };
+        list.catch(() => {
+          if (titles?.list === list) titles = undefined;
+        });
+      }
+      return titles.list;
+    },
 
     /** Runs a query on the Playback Reporting plugin's log of plays. Admins only. */
     playbackReport: (query: string) =>
@@ -507,12 +535,17 @@ export function createClient(session: Session, onUnauthorized?: () => void) {
      * `maxBitrate` caps the stream; files above it are converted down instead of played as-is.
      */
     playbackInfo: async (itemId: string, subtitleIndex?: number, maxBitrate = MAX_BITRATE) => {
-      const info = await post<PlaybackInfoResponse>(`/Items/${itemId}/PlaybackInfo?userId=${userId}`, {
-        DeviceProfile: { ...iosDeviceProfile, MaxStreamingBitrate: maxBitrate, MaxStaticBitrate: maxBitrate },
-        MaxStreamingBitrate: maxBitrate,
-        AutoOpenLiveStream: true,
-        SubtitleStreamIndex: subtitleIndex,
-        EnableDirectPlay: true,
+      // The server may probe the file first, so this one gets longer.
+      const info = await call<PlaybackInfoResponse>(`/Items/${itemId}/PlaybackInfo?userId=${userId}`, {
+        method: 'POST',
+        timeoutMs: 45_000,
+        body: {
+          DeviceProfile: { ...iosDeviceProfile, MaxStreamingBitrate: maxBitrate, MaxStaticBitrate: maxBitrate },
+          MaxStreamingBitrate: maxBitrate,
+          AutoOpenLiveStream: true,
+          SubtitleStreamIndex: subtitleIndex,
+          EnableDirectPlay: true,
+        },
       });
       if (info.ErrorCode) throw new JellyfinError(`Server can't play this item (${info.ErrorCode}).`);
       const source = info.MediaSources[0];

@@ -1,7 +1,7 @@
 import { router, Stack } from 'expo-router';
 
 import { Centered } from '@/miniapps/jellyfin/components';
-import { ServerConnectionProvider, useServerConnection } from '@/miniapps/server/connection';
+import { useServerConnection } from '@/miniapps/server/connection';
 
 // Opening the pairing link from a cold start lands on `connect`; keep the dashboard under it so
 // saving can go back to it.
@@ -16,7 +16,7 @@ const backToLauncher = (
   </Stack.Toolbar>
 );
 
-function ServerStack() {
+export default function ServerLayout() {
   const { loading } = useServerConnection();
   if (loading) return <Centered loading />;
 
@@ -43,13 +43,5 @@ function ServerStack() {
       <Stack.Screen name="service/[id]" options={{ title: '' }} />
       <Stack.Screen name="logs/[id]" options={{ title: 'Logs' }} />
     </Stack>
-  );
-}
-
-export default function ServerLayout() {
-  return (
-    <ServerConnectionProvider>
-      <ServerStack />
-    </ServerConnectionProvider>
   );
 }

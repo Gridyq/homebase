@@ -1,7 +1,7 @@
 import { router, Stack } from 'expo-router';
 
 import { Centered } from '@/miniapps/jellyfin/components';
-import { JellyfinSessionProvider, useJellyfinSession } from '@/miniapps/jellyfin/session';
+import { useJellyfinSession } from '@/miniapps/jellyfin/session';
 
 // See src/app/jellyfin/_layout.tsx: a native toolbar button renders as a round Liquid Glass icon.
 const backToLauncher = (
@@ -12,7 +12,8 @@ const backToLauncher = (
   </Stack.Toolbar>
 );
 
-function HistoryStack() {
+// History comes from Jellyfin, so this shares the Jellyfin mini-app's sign-in.
+export default function HistoryLayout() {
   const { loading } = useJellyfinSession();
   if (loading) return <Centered loading />;
 
@@ -22,14 +23,5 @@ function HistoryStack() {
         {backToLauncher}
       </Stack.Screen>
     </Stack>
-  );
-}
-
-// History comes from Jellyfin, so this shares the Jellyfin mini-app's sign-in.
-export default function HistoryLayout() {
-  return (
-    <JellyfinSessionProvider>
-      <HistoryStack />
-    </JellyfinSessionProvider>
   );
 }
