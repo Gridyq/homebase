@@ -17,6 +17,7 @@ import {
   importAnyway,
   recentRequests,
   removeDownload,
+  requestsMade,
   search,
   seeding,
   setSeeding,
@@ -63,6 +64,8 @@ export default function RequestsHome() {
 function Home({ conn }: { conn: Connection }) {
   const [query, setQuery] = useState('');
   const [term, setTerm] = useState('');
+  // Loaded here rather than in Overview, so a search doesn't throw it away and start over.
+  const overview = useOverview(conn);
 
   // Wait for a pause in typing before asking the server.
   useEffect(() => {
@@ -97,7 +100,7 @@ function Home({ conn }: { conn: Connection }) {
       <>
         {header}
         {searchBar}
-        <SearchResults conn={conn} term={term} />
+        <SearchResults conn={conn} term={term} typing={query.trim() !== term} />
       </>
     );
   }
@@ -106,34 +109,70 @@ function Home({ conn }: { conn: Connection }) {
     <>
       {header}
       {searchBar}
-      <Overview conn={conn} />
+      <Overview conn={conn} data={overview} />
     </>
   );
 }
 
-function Overview({ conn }: { conn: Connection }) {
-  const theme = useTheme();
-  const gutter = useGutter();
-  const queue = usePolling(() => downloads(conn), QUEUE_POLL_MS, conn.url);
-  const limit = usePolling(() => speedLimit(conn), QUEUE_POLL_MS, conn.url);
-  const seed = usePolling(() => seeding(conn), QUEUE_POLL_MS, conn.url);
-  const game = usePolling(() => fetchGameMode(conn), QUEUE_POLL_MS, conn.url);
-  const convert = usePolling(() => conversions(conn), CONVERSIONS_POLL_MS, conn.url);
-  const rest = useAsync(() => Promise.all([upcoming(conn), requestedTitles(conn)]), 'overview');
-  const [pulled, setPulled] = useState(false);
-  if (pulled && !rest.loading) setPulled(false);
+/** How long the Overview's titles stay fresh when nothing new was requested. */
+const OVERVIEW_STALE_MS = 5 * 60_000;
 
-  // Pick up requests made on a title page.
-  const focusedOnce = useRef(false);
-  useFocusEffect(
-    useCallback(() => {
-      if (focusedOnce.current) rest.reload();
-      focusedOnce.current = true;
-      // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [rest.reload]),
+function useOverview(conn: Connection) {
+  const game = usePolling(() => fetchGameMode(conn), QUEUE_POLL_MS, conn.url);
+  // Nothing else is asked for while game mode is on: Seerr would start up on the first call.
+  // An older status server without game mode answers with an error; carry on then.
+  const ready = !!game.error || game.data?.on === false;
+  const queue = usePolling(() => downloads(conn), QUEUE_POLL_MS, conn.url, { enabled: ready });
+  const limit = usePolling(() => speedLimit(conn), QUEUE_POLL_MS, conn.url, { enabled: ready });
+  const seed = usePolling(() => seeding(conn), QUEUE_POLL_MS, conn.url, { enabled: ready });
+  const convert = usePolling(() => conversions(conn), CONVERSIONS_POLL_MS, conn.url, { enabled: ready });
+  const coming = useAsync(() => (ready ? upcoming(conn) : new Promise<never>(() => {})), `upcoming:${ready}`);
+  const requested = useAsync(
+    () => (ready ? requestedTitles(conn) : new Promise<never>(() => {})),
+    `requested:${ready}`,
   );
 
+  // Pick up requests made on a title page, and refresh now and then, without asking Seerr for a
+  // dozen titles every time the screen comes back.
+  const loaded = useRef<{ at: number; requests: number }>(undefined);
+  const reloadTitles = useCallback(() => {
+    loaded.current = { at: Date.now(), requests: requestsMade() };
+    coming.reload();
+    requested.reload();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [coming.reload, requested.reload]);
+  useFocusEffect(
+    useCallback(() => {
+      // The first focus is the first load.
+      if (!loaded.current) loaded.current = { at: Date.now(), requests: requestsMade() };
+      const { at, requests } = loaded.current;
+      if (requests !== requestsMade() || Date.now() - at > OVERVIEW_STALE_MS) reloadTitles();
+    }, [reloadTitles]),
+  );
+
+  const refreshAll = useCallback(() => {
+    reloadTitles();
+    queue.refresh();
+    limit.refresh();
+    seed.refresh();
+    convert.refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reloadTitles]);
+
+  return { game, queue, limit, seed, convert, coming, requested, refreshAll };
+}
+
+function Overview({ conn, data }: { conn: Connection; data: ReturnType<typeof useOverview> }) {
+  const { game, queue, limit, seed, convert, coming, requested, refreshAll } = data;
+  const theme = useTheme();
+  const gutter = useGutter();
+  const [pulled, setPulled] = useState(false);
+  if (pulled && !coming.loading && !requested.loading) setPulled(false);
+  // Downloads being acted on, with what's happening to them.
+  const [working, setWorking] = useState<Record<string, string>>({});
+
   const showActions = (d: Download) => {
+    if (working[d.key]) return;
     const finished = d.state === 'blocked' || d.state === 'importing';
     const options = [
       d.state === 'blocked' ? 'Import anyway' : undefined,
@@ -141,9 +180,9 @@ function Overview({ conn }: { conn: Connection }) {
       d.tmdbId ? 'Open title' : undefined,
       'Remove',
       'Remove and find another',
-      d.arrId !== undefined ? 'Remove and choose a release' : undefined,
+      d.arrId !== undefined ? 'Choose another release' : undefined,
     ].filter((o): o is string => !!o);
-    const removals = ['Remove', 'Remove and find another', 'Remove and choose a release'];
+    const removals = ['Remove', 'Remove and find another'];
     ActionSheetIOS.showActionSheetWithOptions(
       {
         title: d.title,
@@ -159,6 +198,24 @@ function Overview({ conn }: { conn: Connection }) {
           router.push(titleHref(d.arr === 'sonarr' ? 'tv' : 'movie', d.tmdbId));
           return;
         }
+        if (choice === 'Choose another release' && d.arrId !== undefined) {
+          // This one is only removed once another is picked, so backing out keeps it.
+          router.push({
+            pathname: '/requests/releases',
+            params: {
+              app: d.arr,
+              id: String(d.arrId),
+              title: d.title,
+              replaces: d.queueIds.join(','),
+              ...(d.arr === 'sonarr' && d.seasonNumber !== undefined ? { season: String(d.seasonNumber) } : {}),
+            },
+          });
+          return;
+        }
+        setWorking((w) => ({
+          ...w,
+          [d.key]: choice === 'Import anyway' ? 'Importing…' : choice === 'Check again' ? 'Checking…' : 'Removing…',
+        }));
         try {
           if (choice === 'Import anyway') {
             const { imported, skipped } = await importAnyway(conn, d);
@@ -169,19 +226,6 @@ function Overview({ conn }: { conn: Connection }) {
             );
           } else if (choice === 'Check again') {
             await checkDownloads(conn, d.arr);
-          } else if (choice === 'Remove and choose a release' && d.arrId !== undefined) {
-            // Blocklist it so it isn't offered again, but don't let Sonarr or Radarr grab a
-            // replacement on their own while we're choosing.
-            await removeDownload(conn, d, true, false);
-            router.push({
-              pathname: '/requests/releases',
-              params: {
-                app: d.arr,
-                id: String(d.arrId),
-                title: d.title,
-                ...(d.arr === 'sonarr' && d.seasonNumber !== undefined ? { season: String(d.seasonNumber) } : {}),
-              },
-            });
           } else {
             // Blocklisting the release makes Sonarr or Radarr search for a different one.
             await removeDownload(conn, d, choice === 'Remove and find another');
@@ -191,6 +235,10 @@ function Overview({ conn }: { conn: Connection }) {
           Alert.alert(`Couldn't ${failed} ${d.title}`, e instanceof Error ? e.message : String(e));
         }
         await queue.refresh();
+        setWorking((w) => {
+          const { [d.key]: _done, ...rest } = w;
+          return rest;
+        });
       },
     );
   };
@@ -264,25 +312,23 @@ function Overview({ conn }: { conn: Connection }) {
         conn={conn}
         gameMode={game.data}
         onOff={async () => {
+          // Turning it off lets everything else load.
           await game.refresh();
-          rest.reload();
-          queue.refresh();
-          limit.refresh();
-          seed.refresh();
-          convert.refresh();
         }}
       />
     );
   }
 
-  if (!queue.data && !rest.data) {
-    const error = queue.error ?? rest.error;
-    return <Centered loading={!error} error={error} onRetry={rest.reload} />;
+  if (!queue.data && !coming.data && !requested.data) {
+    const error = queue.error ?? coming.error ?? requested.error;
+    return <Centered loading={!error} error={error} onRetry={refreshAll} />;
   }
 
-  const [comingUp, requested] = rest.data ?? [];
+  const comingUp = coming.data;
+  const recent = requested.data;
   const active = queue.data ?? [];
-  const nothing = !active.length && !comingUp?.length && !requested?.length;
+  const nothing =
+    !active.length && !comingUp?.length && !recent?.length && !queue.error && !coming.error && !requested.error;
   const speed = limit.data;
   const seeds = seed.data;
   // Tdarr may be stopped or not set up; then the section just doesn't show.
@@ -298,11 +344,7 @@ function Overview({ conn }: { conn: Connection }) {
           refreshing={pulled}
           onRefresh={() => {
             setPulled(true);
-            rest.reload();
-            queue.refresh();
-            limit.refresh();
-            seed.refresh();
-            convert.refresh();
+            refreshAll();
           }}
         />
       }>
@@ -324,6 +366,7 @@ function Overview({ conn }: { conn: Connection }) {
                   key={d.key}
                   download={d}
                   first={i === 0 && !speed && !seeds}
+                  working={working[d.key]}
                   onPress={() => showActions(d)}
                 />
               ))}
@@ -361,9 +404,19 @@ function Overview({ conn }: { conn: Connection }) {
             </Card>
           </View>
         </View>
-      ) : null}
+      ) : (
+        <SectionError title="Coming up" error={coming.data ? undefined : coming.error} onRetry={coming.reload} />
+      )}
 
-      {requested?.length ? <RequestedRow items={requested} /> : null}
+      {recent?.length ? (
+        <RequestedRow items={recent} />
+      ) : (
+        <SectionError
+          title="Recently requested"
+          error={requested.data ? undefined : requested.error}
+          onRetry={requested.reload}
+        />
+      )}
 
       {nothing ? (
         <ThemedText themeColor="textSecondary" style={[styles.center, gutter]}>
@@ -371,6 +424,24 @@ function Overview({ conn }: { conn: Connection }) {
         </ThemedText>
       ) : null}
     </ScrollView>
+  );
+}
+
+/** A section that couldn't load, with a way to try again. */
+function SectionError({ title, error, onRetry }: { title: string; error: Error | undefined; onRetry: () => void }) {
+  const theme = useTheme();
+  const gutter = useGutter();
+  if (!error) return null;
+  return (
+    <View style={styles.section}>
+      <SectionTitle title={title} />
+      <ThemedText type="small" style={[gutter, { color: theme.danger }]}>
+        {error.message}{' '}
+        <ThemedText type="small" style={{ color: theme.accent }} onPress={onRetry}>
+          Try again
+        </ThemedText>
+      </ThemedText>
+    </View>
   );
 }
 
@@ -451,13 +522,14 @@ function RequestedRow({ items }: { items: RequestedTitle[] }) {
   );
 }
 
-function SearchResults({ conn, term }: { conn: Connection; term: string }) {
+function SearchResults({ conn, term, typing }: { conn: Connection; term: string; typing: boolean }) {
   const theme = useTheme();
   const { columns, cardWidth, gutter } = usePosterGrid();
   const { data, error, loading, reload } = useAsync(
     () => (term ? search(conn, term) : Promise.resolve([])),
     `search:${term}`,
   );
+  const waiting = typing || loading;
 
   return (
     <FlatList
@@ -471,8 +543,8 @@ function SearchResults({ conn, term }: { conn: Connection; term: string }) {
       data={data ?? []}
       keyExtractor={(r) => `${r.mediaType}:${r.id}`}
       ListHeaderComponent={
-        loading ? (
-          <ActivityIndicator />
+        waiting ? (
+          <Searching />
         ) : error ? (
           <Centered error={error} onRetry={reload} />
         ) : data && !data.length && term ? (
@@ -493,6 +565,25 @@ function SearchResults({ conn, term }: { conn: Connection; term: string }) {
         />
       )}
     />
+  );
+}
+
+/** Seerr is stopped when idle, and the first search after that waits for it to start. */
+function Searching() {
+  const [slow, setSlow] = useState(false);
+  useEffect(() => {
+    const timer = setTimeout(() => setSlow(true), 3000);
+    return () => clearTimeout(timer);
+  }, []);
+  return (
+    <View style={styles.searching}>
+      <ActivityIndicator />
+      {slow ? (
+        <ThemedText type="small" themeColor="textSecondary" style={styles.center}>
+          Waking Seerr up. The first search takes a few seconds.
+        </ThemedText>
+      ) : null}
+    </View>
   );
 }
 
@@ -521,6 +612,9 @@ const styles = StyleSheet.create({
     gap: Spacing.three,
   },
   gridRow: {
+    gap: Spacing.two,
+  },
+  searching: {
     gap: Spacing.two,
   },
 });

@@ -8,7 +8,7 @@ import { useGutter } from '@/hooks/use-gutter';
 import { useTheme } from '@/hooks/use-theme';
 import { Centered, Chip } from '@/miniapps/jellyfin/components';
 import { useAsync } from '@/miniapps/jellyfin/use-async';
-import { grabRelease, searchReleases, type Arr, type Release } from '@/miniapps/requests/api';
+import { grabRelease, removeDownload, searchReleases, type Arr, type Release } from '@/miniapps/requests/api';
 import { formatAge } from '@/miniapps/requests/components';
 import { formatBytes, StatusColors } from '@/miniapps/server/components';
 import { useServerConnection } from '@/miniapps/server/connection';
@@ -26,13 +26,15 @@ const isHevc = (r: Release) => /\b(x265|hevc|h\.?265)\b/i.test(r.title);
 
 /** Interactive search: every release the indexers have, scored by the TRaSH rules, to pick by hand. */
 export default function Releases() {
-  const { app, id, season, title, episodes } = useLocalSearchParams<{
+  const { app, id, season, title, episodes, replaces } = useLocalSearchParams<{
     app: Arr;
     id: string;
     season?: string;
     title: string;
     /** Episodes in the season, to size a season pack per episode. */
     episodes?: string;
+    /** Queue ids of a download to remove and blocklist once another release is picked. */
+    replaces?: string;
   }>();
   const { connection } = useServerConnection();
   const conn = connection!;
@@ -70,8 +72,10 @@ export default function Releases() {
   }
 
   const tv = app === 'sonarr';
+  // Opened from a download there's no episode count; the highest episode any release covers is close.
+  const episodeCount = Number(episodes) || Math.max(0, ...data.flatMap((r) => r.episodeNumbers ?? [])) || undefined;
   const perEpisode = (r: Release) =>
-    tv ? r.size / Math.max(1, r.fullSeason ? Number(episodes) || 1 : r.episodeNumbers?.length || 1) : r.size;
+    tv ? r.size / Math.max(1, r.fullSeason ? (episodeCount ?? 1) : r.episodeNumbers?.length || 1) : r.size;
   const approved = data.filter((r) => r.approved);
   const unfiltered = showRejected ? data : approved;
   const filtered = unfiltered.filter(
@@ -97,7 +101,7 @@ export default function Releases() {
   };
 
   const grab = (r: Release) => {
-    Alert.alert('Download this release?', `${r.title}\n\n${r.quality} · ${formatBytes(r.size)} · ${r.seeders ?? 0} seeders`, [
+    Alert.alert(replaces ? 'Download this one instead?' : 'Download this release?', `${r.title}\n\n${r.quality} · ${formatBytes(r.size)} · ${r.seeders ?? 0} seeders`, [
       { text: 'Cancel', style: 'cancel' },
       {
         text: 'Download',
@@ -105,6 +109,15 @@ export default function Releases() {
           setGrabbing(r.guid);
           try {
             await grabRelease(conn, app, r);
+            if (replaces) {
+              const queueIds = replaces.split(',').map(Number);
+              await removeDownload(conn, { arr: app, queueIds }, true, false).catch((e) =>
+                Alert.alert(
+                  'Downloading the new release',
+                  `But the old download couldn't be removed: ${e instanceof Error ? e.message : String(e)}`,
+                ),
+              );
+            }
             router.back();
           } catch (e) {
             Alert.alert("Couldn't start the download", e instanceof Error ? e.message : String(e));
@@ -172,7 +185,7 @@ export default function Releases() {
         renderItem={({ item }) => (
           <ReleaseRow
             release={item}
-            perEpisode={tv && item.fullSeason ? perEpisode(item) : undefined}
+            perEpisode={tv && item.fullSeason && episodeCount ? perEpisode(item) : undefined}
             busy={grabbing === item.guid}
             disabled={!!grabbing}
             onPress={() => grab(item)}

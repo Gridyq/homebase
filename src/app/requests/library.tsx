@@ -23,6 +23,8 @@ export default function Library() {
   const gutter = useGutter();
   const [filter, setFilter] = useState<Filter>('all');
   const [busy, setBusy] = useState<string>();
+  // Hidden as soon as they're deleted, rather than after the reload.
+  const [deleted, setDeleted] = useState<Set<string>>(new Set());
   const { data, error, loading, reload } = useAsync(
     () => Promise.all([library(conn), mediaDisk(conn).catch(() => undefined)]),
     'library',
@@ -32,9 +34,9 @@ export default function Library() {
 
   if (!data) return <Centered loading={loading} error={error} onRetry={reload} />;
   const [items, disk] = data;
-  const shown = items.filter((i) => filter === 'all' || i.arr === filter);
+  const shown = items.filter((i) => (filter === 'all' || i.arr === filter) && !deleted.has(i.key));
 
-  const remove = (item: LibraryItem, what: string, size: number, action: () => Promise<void>) => {
+  const remove = (item: LibraryItem, what: string, size: number, action: () => Promise<void>, whole: boolean) => {
     Alert.alert(`Delete ${what}?`, `This deletes ${formatBytes(size)} of files from the server.`, [
       { text: 'Cancel', style: 'cancel' },
       {
@@ -44,6 +46,7 @@ export default function Library() {
           setBusy(item.key);
           try {
             await action();
+            if (whole) setDeleted((d) => new Set(d).add(item.key));
           } catch (e) {
             Alert.alert(`Couldn't delete ${what}`, e instanceof Error ? e.message : String(e));
           } finally {
@@ -85,9 +88,10 @@ export default function Library() {
         if (season) {
           remove(item, `${item.title} ${seasonName(season.seasonNumber)}`, season.size, () =>
             deleteSeason(conn, item.id, season.seasonNumber),
+            false,
           );
         } else {
-          remove(item, item.title, item.size, () => deleteFromLibrary(conn, item));
+          remove(item, item.title, item.size, () => deleteFromLibrary(conn, item), true);
         }
       },
     );
@@ -132,7 +136,7 @@ export default function Library() {
         </ThemedText>
       }
       renderItem={({ item }) => (
-        <LibraryRow item={item} busy={busy === item.key} onPress={() => showActions(item)} />
+        <LibraryRow item={item} busy={busy === item.key} onPress={() => busy !== item.key && showActions(item)} />
       )}
     />
   );

@@ -148,14 +148,25 @@ const DOWNLOAD_STATE_LABELS: Record<Download['state'], string> = {
   completed: 'Done',
 };
 
-export function DownloadRow({ download, first, onPress }: { download: Download; first: boolean; onPress: () => void }) {
+export function DownloadRow({
+  download,
+  first,
+  working,
+  onPress,
+}: {
+  download: Download;
+  first: boolean;
+  /** What's being done to it right now, like "Removing…". */
+  working?: string;
+  onPress: () => void;
+}) {
   const theme = useTheme();
   const done = download.size ? 1 - download.sizeLeft / download.size : 0;
   const trouble = ['failed', 'warning', 'stalled', 'blocked'].includes(download.state);
   const color = download.state === 'failed' ? theme.danger : trouble ? StatusColors.warn : StatusColors.good;
   const left = download.state === 'downloading' ? formatTimeLeft(download.timeLeft) : undefined;
   const line = [
-    download.state === 'downloading' ? `${Math.floor(done * 100)}%` : DOWNLOAD_STATE_LABELS[download.state],
+    working ?? (download.state === 'downloading' ? `${Math.floor(done * 100)}%` : DOWNLOAD_STATE_LABELS[download.state]),
     left && `${left} left`,
     formatBytes(download.size),
   ]
@@ -165,10 +176,11 @@ export function DownloadRow({ download, first, onPress }: { download: Download; 
   return (
     <Pressable
       onPress={onPress}
+      disabled={!!working}
       style={({ pressed }) => [
         styles.row,
         !first && { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: theme.backgroundSelected },
-        { opacity: pressed ? 0.6 : 1 },
+        { opacity: working ? 0.5 : pressed ? 0.6 : 1 },
       ]}>
       <Poster uri={download.posterUrl} width={40} />
       <View style={styles.rowText}>

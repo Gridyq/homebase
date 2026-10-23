@@ -104,11 +104,18 @@ export function details(conn: Connection, type: MediaType, id: number) {
  * Ask for a movie, or for some seasons of a show. Seerr sends it on to Sonarr or Radarr, with
  * the given quality profile or else the one set in Seerr.
  */
-export function requestMedia(conn: Connection, type: MediaType, id: number, seasons?: number[], profileId?: number) {
-  return arr<SeerrRequest>(conn, 'seerr/request', {
+let requestCount = 0;
+
+/** Goes up with every request made, so the Overview knows when its list of requests is out of date. */
+export const requestsMade = () => requestCount;
+
+export async function requestMedia(conn: Connection, type: MediaType, id: number, seasons?: number[], profileId?: number) {
+  const result = await arr<SeerrRequest>(conn, 'seerr/request', {
     method: 'POST',
     body: JSON.stringify({ mediaType: type, mediaId: id, ...(type === 'tv' ? { seasons } : {}), ...(profileId ? { profileId } : {}) }),
   });
+  requestCount++;
+  return result;
 }
 
 export async function recentRequests(conn: Connection, take = 10) {
@@ -262,7 +269,12 @@ export async function downloads(conn: Connection) {
  * release makes Sonarr or Radarr search for another, unless `searchAgain` is false (for picking
  * one by hand instead).
  */
-export async function removeDownload(conn: Connection, download: Download, blocklist: boolean, searchAgain = true) {
+export async function removeDownload(
+  conn: Connection,
+  download: Pick<Download, 'arr' | 'queueIds'>,
+  blocklist: boolean,
+  searchAgain = true,
+) {
   const query = `removeFromClient=true&blocklist=${blocklist}&skipRedownload=${!searchAgain}`;
   for (const id of download.queueIds) {
     await arr(conn, `${download.arr}/queue/${id}?${query}`, { method: 'DELETE' });

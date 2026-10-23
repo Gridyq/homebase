@@ -103,17 +103,23 @@ function realSeasons(item: Details) {
 }
 
 function useRequest(conn: Connection, item: Details, type: MediaType, onDone: () => void) {
-  const [busy, setBusy] = useState(false);
+  const [sending, setSending] = useState(false);
+  // The details it was requested from: the button stays busy until fresh ones replace them, or
+  // it would offer the same request again in between.
+  const [requestedFrom, setRequestedFrom] = useState<Details>();
   const [profileId, setProfileId] = useState<number>();
+  const busy = sending || requestedFrom === item;
   const send = async (seasons?: number[]) => {
-    setBusy(true);
+    if (busy) return;
+    setSending(true);
     try {
       await requestMedia(conn, type, item.id, seasons, profileId);
+      setRequestedFrom(item);
       onDone();
     } catch (e) {
       Alert.alert("Couldn't request it", e instanceof Error ? e.message : String(e));
     } finally {
-      setBusy(false);
+      setSending(false);
     }
   };
   return { busy, send, profileId, setProfileId };
@@ -132,8 +138,23 @@ function QualityRow({
   onChange: (id: number | undefined) => void;
 }) {
   const theme = useTheme();
-  const { data: profiles } = useAsync(() => qualityProfiles(conn, type === 'tv' ? 'sonarr' : 'radarr'), `profiles:${type}`);
-  if (!profiles?.length) return null;
+  const { data: profiles, error, reload } = useAsync(
+    () => qualityProfiles(conn, type === 'tv' ? 'sonarr' : 'radarr'),
+    `profiles:${type}`,
+  );
+  if (!profiles?.length) {
+    if (!error) return null;
+    return (
+      <Pressable onPress={reload} style={({ pressed }) => [styles.quality, { opacity: pressed ? 0.6 : 1 }]}>
+        <ThemedText type="small" themeColor="textSecondary">
+          Quality
+        </ThemedText>
+        <ThemedText type="small" style={{ color: theme.danger }}>
+          Couldn&apos;t load · Try again
+        </ThemedText>
+      </Pressable>
+    );
+  }
   const pick = () => {
     const labels = ['Server default', ...profiles.map((p) => p.name)];
     ActionSheetIOS.showActionSheetWithOptions(

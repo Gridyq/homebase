@@ -39,7 +39,10 @@ export default function ConversionsScreen() {
   const togglePause = async () => {
     setBusy(true);
     try {
-      setOverride(await setConversionsPaused(conn, !shown.paused));
+      const next = await setConversionsPaused(conn, !shown.paused);
+      // A poll sent before the change may still land; ask again so it can't put the old state back.
+      await refresh();
+      setOverride(next);
     } catch (e) {
       Alert.alert(`Couldn't ${shown.paused ? 'resume' : 'pause'}`, e instanceof Error ? e.message : String(e));
     } finally {
@@ -108,7 +111,7 @@ export default function ConversionsScreen() {
         </ThemedText>
       </View>
       <Button
-        title={busy ? '…' : shown.paused ? 'Resume converting' : 'Pause converting'}
+        title={busy ? (shown.paused ? 'Resuming…' : 'Pausing…') : shown.paused ? 'Resume converting' : 'Pause converting'}
         variant="secondary"
         disabled={busy}
         onPress={togglePause}
