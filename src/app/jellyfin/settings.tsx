@@ -5,9 +5,11 @@ import { ThemedText } from '@/components/themed-text';
 import { Spacing } from '@/constants/theme';
 import { useGutter } from '@/hooks/use-gutter';
 import { useTheme } from '@/hooks/use-theme';
+import { JellyfinError, type User } from '@/miniapps/jellyfin/api';
 import { Chip } from '@/miniapps/jellyfin/components';
 import { useJellyfin, useJellyfinSession } from '@/miniapps/jellyfin/session';
 import { BITRATE_OPTIONS, useJellyfinSettings } from '@/miniapps/jellyfin/settings';
+import { useAsync } from '@/miniapps/jellyfin/use-async';
 
 export default function JellyfinSettings() {
   const client = useJellyfin();
@@ -42,6 +44,8 @@ export default function JellyfinSettings() {
         start playing.
       </ThemedText>
 
+      <AutoplaySection />
+
       <View style={styles.account}>
         <ThemedText type="smallBold">Account</ThemedText>
         <ThemedText type="small" themeColor="textSecondary">
@@ -53,6 +57,44 @@ export default function JellyfinSettings() {
         <Button title="Sign out" variant="secondary" onPress={confirmSignOut} />
       </View>
     </ScrollView>
+  );
+}
+
+/**
+ * The server's "play next episode automatically" setting for every user. The Roku and iPhone
+ * apps both follow it. Admins only; hidden for everyone else.
+ */
+function AutoplaySection() {
+  const client = useJellyfin();
+  const { data: users, error, reload } = useAsync(() => client.users(), 'users');
+  if (error instanceof JellyfinError && error.status === 403) return null;
+  if (!users) return null;
+
+  const isOn = (u: User) => u.Configuration?.EnableNextEpisodeAutoPlay !== false;
+  const set = async (targets: User[], enabled: boolean) => {
+    try {
+      await Promise.all(targets.map((u) => client.setAutoplay(u, enabled)));
+    } catch (e) {
+      Alert.alert("Couldn't change autoplay", e instanceof Error ? e.message : String(e));
+    }
+    reload();
+  };
+  const off = users.filter((u) => !isOn(u));
+
+  return (
+    <View style={styles.picker}>
+      <ThemedText type="smallBold">Play next episode automatically</ThemedText>
+      <View style={styles.chips}>
+        {users.map((u) => (
+          <Chip key={u.Id} label={`${isOn(u) ? '✓ ' : ''}${u.Name}`} selected={isOn(u)} onPress={() => set([u], !isOn(u))} />
+        ))}
+      </View>
+      {off.length > 1 ? <Button title="Turn on for everyone" variant="secondary" onPress={() => set(off, true)} /> : null}
+      <ThemedText type="small" themeColor="textSecondary">
+        For each person on the server, on every Jellyfin app they use, including Roku. It also lets “Play on…”
+        keep going after the first episode.
+      </ThemedText>
+    </View>
   );
 }
 

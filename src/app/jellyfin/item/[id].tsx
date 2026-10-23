@@ -21,6 +21,7 @@ import {
   useRowCardWidth,
 } from '@/miniapps/jellyfin/components';
 import { addToPlaylist, PlaylistEntries } from '@/miniapps/jellyfin/playlists';
+import { playOnDevice } from '@/miniapps/jellyfin/remote-play';
 import { useJellyfin } from '@/miniapps/jellyfin/session';
 import { defaultSubtitleIndex, subtitleLabel, subtitleStreams, SUBTITLES_OFF } from '@/miniapps/jellyfin/subtitles';
 import { useAsync } from '@/miniapps/jellyfin/use-async';
@@ -74,6 +75,7 @@ export default function ItemDetail() {
   const canMarkPlayed = playable || item.Type === 'Series' || item.Type === 'Season' || item.Type === 'BoxSet';
   const isPerson = item.Type === 'Person';
   const canAddToPlaylist = playable || item.Type === 'Series' || item.Type === 'Season' || item.Type === 'BoxSet';
+  const canPlayOn = playable || item.Type === 'Series' || item.Type === 'Season';
 
   const meta = [
     item.Type === 'Episode' && item.SeriesName,
@@ -145,6 +147,7 @@ export default function ItemDetail() {
               onPress={() => toggle(() => client.setFavorite(item.Id, !favorite))}
             />
             {canAddToPlaylist ? <Chip label="+ Playlist" selected={false} onPress={() => addToPlaylist(client, item)} /> : null}
+            {canPlayOn ? <Chip label="Play on…" selected={false} onPress={() => playOnDevice(client, item)} /> : null}
             <Trailers item={item} />
           </View>
         ) : null}

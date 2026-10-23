@@ -117,6 +117,33 @@ export type MediaStream = {
 
 export type ItemsResponse = { Items: BaseItem[]; TotalRecordCount: number };
 
+export type User = {
+  Id: string;
+  Name: string;
+  Policy?: { IsAdministrator?: boolean; IsDisabled?: boolean; IsHidden?: boolean };
+  /** Sent back whole when changing a setting: the server replaces the user's configuration. */
+  Configuration?: { EnableNextEpisodeAutoPlay?: boolean } & Record<string, unknown>;
+};
+
+export type PlaylistShare = { UserId: string; CanEdit: boolean };
+
+/** Someone's open Jellyfin app, as the server sees it. */
+export type RemoteSession = {
+  Id: string;
+  UserId?: string;
+  UserName?: string;
+  Client?: string;
+  DeviceName?: string;
+  DeviceId?: string;
+  /** Whether it takes "play this" commands. The Roku app doesn't. */
+  SupportsMediaControl?: boolean;
+  NowPlayingItem?: BaseItem;
+};
+
+/** Ids come back with or without dashes depending on the endpoint. */
+export const sameId = (a: string | undefined, b: string | undefined) =>
+  !!a && !!b && a.replace(/-/g, '').toLowerCase() === b.replace(/-/g, '').toLowerCase();
+
 export type MediaSource = {
   Id: string;
   SupportsDirectPlay: boolean;
@@ -352,6 +379,49 @@ export function createClient(session: Session) {
 
     movePlaylistItem: (playlistId: string, entryId: string, newIndex: number) =>
       post<void>(`/Playlists/${playlistId}/Items/${entryId}/Move/${newIndex}`),
+
+    /** Admins only (403 otherwise). */
+    users: () => get<User[]>('/Users?isDisabled=false'),
+
+    /** Users other than the owner the playlist is shared with. */
+    playlistShares: (playlistId: string) => get<PlaylistShare[]>(`/Playlists/${playlistId}/Users`),
+
+    /**
+     * Replaces who the playlist is shared with (owner only). Not `/Playlists/{id}/Users/{userId}`:
+     * the server looks the playlist up as the person being added, who can't see it yet, and fails.
+     */
+    setPlaylistShares: (playlistId: string, shares: PlaylistShare[]) =>
+      post<void>(`/Playlists/${playlistId}`, { Users: shares }),
+
+    setAutoplay: (user: User, enabled: boolean) =>
+      post<void>(`/Users/Configuration?userId=${user.Id}`, { ...user.Configuration, EnableNextEpisodeAutoPlay: enabled }),
+
+    /** Apps opened in the last 16 minutes that this user may control: their own, or everyone's for an admin. */
+    remoteSessions: () => get<RemoteSession[]>(`/Sessions?controllableByUserId=${userId}&activeWithinSeconds=960`),
+
+    /**
+     * Start playing on another device. With autoplay on for that user, the server queues the
+     * rest of the show after a single episode.
+     */
+    playOnSession: (sessionId: string, itemIds: string[], startTicks = 0) =>
+      post<void>(
+        `/Sessions/${sessionId}/Playing?playCommand=PlayNow&itemIds=${itemIds.join(',')}` +
+          `&startPositionTicks=${Math.round(startTicks)}`,
+      ),
+
+    /** An item with someone else's watched state and resume point (admins only). */
+    itemFor: (forUserId: string, id: string) => get<BaseItem>(`/Items/${id}?userId=${forUserId}`),
+
+    nextUpFor: (forUserId: string, seriesId: string) =>
+      get<ItemsResponse>(`/Shows/NextUp?userId=${forUserId}&seriesId=${seriesId}&limit=1&enableResumable=true`).then(
+        (r) => r.Items[0] as BaseItem | undefined,
+      ),
+
+    /** A show's episodes in order (one season's, with `seasonId`), with someone else's watched state. */
+    episodesFor: (forUserId: string, seriesId: string, seasonId?: string) =>
+      get<ItemsResponse>(
+        `/Shows/${seriesId}/Episodes?userId=${forUserId}` + (seasonId ? `&seasonId=${seasonId}` : ''),
+      ).then((r) => r.Items),
 
     deleteItem: (itemId: string) =>
       request<void>(serverUrl, `/Items/${itemId}`, deviceId, accessToken, { method: 'DELETE' }),

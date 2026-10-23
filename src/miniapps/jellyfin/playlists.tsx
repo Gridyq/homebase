@@ -9,8 +9,17 @@ import { Spacing } from '@/constants/theme';
 import { useGutter } from '@/hooks/use-gutter';
 import { useTheme } from '@/hooks/use-theme';
 
-import { TICKS_PER_SECOND, type BaseItem, type JellyfinClient } from './api';
+import {
+  JellyfinError,
+  sameId,
+  TICKS_PER_SECOND,
+  type BaseItem,
+  type JellyfinClient,
+  type PlaylistShare,
+  type User,
+} from './api';
 import { episodeLabel, formatRuntime, itemHref } from './components';
+import { playOnDevice } from './remote-play';
 import { useJellyfin } from './session';
 import { useAsync } from './use-async';
 
@@ -44,6 +53,67 @@ export async function addToPlaylist(client: JellyfinClient, item: BaseItem) {
           );
         });
       }
+    },
+  );
+}
+
+/** Pick who a playlist is shared with and whether they can change it. Reopens after each change. */
+export async function sharePlaylist(client: JellyfinClient, playlist: BaseItem) {
+  let users: User[];
+  let shares: PlaylistShare[];
+  try {
+    [users, shares] = await Promise.all([client.users(), client.playlistShares(playlist.Id)]);
+  } catch (e) {
+    const forbidden = e instanceof JellyfinError && e.status === 403;
+    Alert.alert("Couldn't load people", forbidden ? 'Only a server admin can share playlists with people.' : errorText(e));
+    return;
+  }
+  const people = users.filter((u) => !sameId(u.Id, client.session.userId));
+  if (!people.length) {
+    Alert.alert('Nobody to share with', 'Add more users on the Jellyfin server first.');
+    return;
+  }
+  const shareOf = (user: User) => shares.find((s) => sameId(s.UserId, user.Id));
+  const options = people.map((u) => {
+    const share = shareOf(u);
+    return `${u.Name} — ${share ? (share.CanEdit ? 'can watch and edit' : 'can watch') : 'not shared'}`;
+  });
+  ActionSheetIOS.showActionSheetWithOptions(
+    {
+      title: `Share “${playlist.Name}”`,
+      message: 'It shows up in their Playlists on every Jellyfin app, including Roku.',
+      options: [...options, 'Done'],
+      cancelButtonIndex: options.length,
+    },
+    (index) => {
+      const user = people[index];
+      if (!user) return;
+      const shared = !!shareOf(user);
+      const choices = ['Can watch', 'Can watch and edit', shared ? 'Stop sharing' : undefined].filter(
+        (c): c is string => !!c,
+      );
+      ActionSheetIOS.showActionSheetWithOptions(
+        {
+          title: user.Name,
+          options: [...choices, 'Cancel'],
+          cancelButtonIndex: choices.length,
+          destructiveButtonIndex: shared ? choices.length - 1 : undefined,
+        },
+        async (i) => {
+          const choice = choices[i];
+          if (!choice) return sharePlaylist(client, playlist);
+          const rest = shares.filter((s) => !sameId(s.UserId, user.Id));
+          const next =
+            choice === 'Stop sharing' ? rest : [...rest, { UserId: user.Id, CanEdit: choice === 'Can watch and edit' }];
+          try {
+            await client.setPlaylistShares(playlist.Id, next);
+          } catch (e) {
+            Alert.alert(`Couldn't share with ${user.Name}`, errorText(e));
+            return;
+          }
+          sharePlaylist(client, playlist);
+        },
+      );
     },
   );
 }
@@ -136,6 +206,16 @@ export function PlaylistEntries({ playlist }: { playlist: BaseItem }) {
   return (
     <View style={[styles.section, gutter]}>
       {firstVideo ? <Button title="Play all" onPress={() => playEntry(playlist.Id, firstVideo)} /> : null}
+      <View style={styles.buttons}>
+        {firstVideo ? (
+          <View style={styles.button}>
+            <Button title="Play on…" variant="secondary" onPress={() => playOnDevice(client, playlist)} />
+          </View>
+        ) : null}
+        <View style={styles.button}>
+          <Button title="Share…" variant="secondary" onPress={() => sharePlaylist(client, playlist)} />
+        </View>
+      </View>
       {!entries.length ? (
         <ThemedText themeColor="textSecondary">
           Nothing here yet. Add movies or episodes from their pages with “+ Playlist”.
@@ -181,6 +261,13 @@ export function PlaylistEntries({ playlist }: { playlist: BaseItem }) {
 const styles = StyleSheet.create({
   section: {
     gap: Spacing.three,
+  },
+  buttons: {
+    flexDirection: 'row',
+    gap: Spacing.three,
+  },
+  button: {
+    flex: 1,
   },
   entry: {
     flexDirection: 'row',
