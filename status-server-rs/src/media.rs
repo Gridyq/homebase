@@ -34,7 +34,7 @@ fn arr_dir() -> PathBuf {
 }
 
 /// A value from the shared credentials file, as `key=value` lines.
-fn credential(key: &str) -> Option<String> {
+pub fn credential(key: &str) -> Option<String> {
     let text = std::fs::read_to_string(arr_dir().join("credentials")).ok()?;
     text.lines()
         .find_map(|l| l.strip_prefix(&format!("{key}=")))

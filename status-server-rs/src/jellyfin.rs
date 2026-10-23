@@ -5,7 +5,6 @@
 //!
 //! Borrows Seerr's API key for Jellyfin. Jellyfin 12 only takes it in a `MediaBrowser` header.
 
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -22,16 +21,9 @@ const POLL_EVERY: Duration = Duration::from_secs(5);
 /// Jellyfin counts time in ticks of 100 ns.
 const TICKS_PER_MS: f64 = 10_000.0;
 
-/// Seerr's API key for Jellyfin, which is admin-level.
+/// The server's admin-level API key for Jellyfin, from the shared credentials file.
 pub fn api_key() -> Option<String> {
-    let arr = std::env::var("ARR_DIR").map_or_else(
-        |_| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/share/arr"),
-        PathBuf::from,
-    );
-    std::fs::read_to_string(arr.join("seerr/settings.json"))
-        .ok()
-        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
-        .and_then(|s| s["jellyfin"]["apiKey"].as_str().map(str::to_owned))
+    crate::media::credential("jellyfin_api_key")
 }
 
 #[derive(Default)]
@@ -149,7 +141,7 @@ fn reason(r: &str) -> String {
 }
 
 async fn read(state: &State) -> Result<Vec<Value>, String> {
-    let key = api_key().ok_or("No Jellyfin API key in Seerr's settings")?;
+    let key = api_key().ok_or("No jellyfin_api_key in the credentials file")?;
     let reply = crate::client::call(
         &state.upstream,
         Method::GET,
