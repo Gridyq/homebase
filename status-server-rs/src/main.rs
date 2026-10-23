@@ -96,9 +96,7 @@ async fn main() {
         .route("/api/game-mode", get(gamemode::get).post(gamemode::set))
         .route("/api/qbittorrent/limit", get(media::speed_limit).post(media::set_speed_limit))
         .route("/api/qbittorrent/seeding", get(media::seeding).post(media::set_seeding))
-        // /api/tdarr is what app updates before 2026-10-23 call it.
         .route("/api/conversions", get(conversions::get).post(conversions::set))
-        .route("/api/tdarr", get(conversions::get).post(conversions::set))
         .route("/api/requests/{*rest}", any(media::requests))
         .route("/api/arr/{*rest}", any(media::arr))
         .route("/api/cleanup", get(cleanup::get))
