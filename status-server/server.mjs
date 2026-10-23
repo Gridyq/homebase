@@ -6,7 +6,8 @@
  * and runs Seerr only while it's used. Passes the Requests mini-app's calls on to Seerr, Sonarr
  * and Radarr, and qBittorrent's speed limit and seeding. Takes files, text and links from the
  * Drop mini-app, and hands back the files in its folder. Saves web videos into Jellyfin with
- * yt-dlp for the Videos mini-app. No dependencies beyond Node.js (and yt-dlp for videos).
+ * yt-dlp for the Videos mini-app. Runs the Assistant mini-app's chats on a local model, starting it
+ * when asked. No dependencies beyond Node.js (and yt-dlp for videos).
  *
  * It also keeps a day of history (CPU, memory, network, and each service's memory and CPU) in
  * `history.json`, and can list the processes and cgroups using the most memory and CPU.
@@ -1132,7 +1133,8 @@ async function watch() {
 // game runs, it stays off until that game closes. Jellyfin keeps running so the TV still works.
 
 /** In start order; systemd works out the rest from the units' own dependencies. */
-const GAME_MODE_UNITS = ['gluetun', 'qbittorrent', 'flaresolverr', 'prowlarr', 'sonarr', 'radarr', 'recyclarr', 'bazarr', 'cleanuparr', 'tdarr', 'seerr'];
+// The assistant's models hold several GB of video memory, so they stop too (see ASSISTANT_MODELS).
+const GAME_MODE_UNITS = ['gluetun', 'qbittorrent', 'flaresolverr', 'prowlarr', 'sonarr', 'radarr', 'recyclarr', 'bazarr', 'cleanuparr', 'tdarr', 'seerr', 'llama'];
 const GAME_MODE_PATH = path.join(ROOT, 'game-mode.json');
 const GAME_CHECK_INTERVAL = 10_000;
 /** How long after a game closes before the services come back, so restarting a game doesn't bounce them. */
@@ -1195,7 +1197,7 @@ function updateGameMode() {
     gameMode.active = want;
     gameMode.since = Date.now();
     await saveGameMode();
-    await (want ? stopGameModeUnits() : run('systemctl', ['--user', 'start', ...GAME_MODE_UNIT_FILES.filter((u) => u !== SEERR_UNIT)], { timeout: 180_000 })).catch(
+    await (want ? stopGameModeUnits() : run('systemctl', ['--user', 'start', ...GAME_MODE_UNIT_FILES.filter((u) => !onDemandUnit(u))], { timeout: 180_000 })).catch(
       (e) => console.error(`Couldn't ${want ? 'stop' : 'start'} the game mode services:`, e.stderr?.trim() || e.message),
     );
   });
@@ -1247,6 +1249,9 @@ async function loadGameMode() {
   // After a reboot the services started with everything else, so stop them again.
   await stopGameModeUnits().catch((e) => console.error("Couldn't stop the game mode services:", e.message));
 }
+
+/** Units that only run while something uses them, so game mode doesn't start them again. */
+const onDemandUnit = (unit) => unit === SEERR_UNIT || ASSISTANT_MODELS.some((m) => m.unit === unit);
 
 function gameModeError(service) {
   if (gameMode.active) {
@@ -2005,6 +2010,311 @@ function downloadVideo(job) {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Assistant: chats for the Assistant mini-app, answered by a model running on this machine. Each
+// model is its own systemd unit serving llama.cpp's OpenAI-style API. Only one fits in video
+// memory, so starting one stops the others, and the one in use stops after a quarter of an hour
+// without questions. To add a model: give it a quadlet on its own port with no [Install], add its
+// container to GAME_MODE_UNITS, and add an entry below. The first entry is the default.
+// An answer keeps being written when the phone disconnects, so leaving the app doesn't lose it.
+// Each chat is a JSON file in `assistant/`.
+
+const ASSISTANT_MODELS = [
+  {
+    id: 'qwen3.5-9b',
+    name: 'Qwen3.5 9B',
+    unit: 'llama.service',
+    url: 'http://localhost:8080',
+    /** Can think before answering, switched with the chat template's enable_thinking. */
+    thinking: true,
+    /** Qwen's recommended settings for each mode. */
+    sampling: {
+      think: { temperature: 0.6, top_p: 0.95, top_k: 20, min_p: 0 },
+      quick: { temperature: 0.7, top_p: 0.8, top_k: 20, min_p: 0, presence_penalty: 1.5 },
+    },
+  },
+];
+const ASSISTANT_DIR = path.join(ROOT, 'assistant');
+const ASSISTANT_IDLE_MS = 15 * 60_000;
+const ASSISTANT_START_TIMEOUT_MS = 5 * 60_000;
+/** Longest answer, thinking included. Thinking takes far more room than the answer. */
+const ASSISTANT_REPLY_TOKENS = { think: 8192, quick: 4096 };
+const ASSISTANT_MAX_TEXT = 32_000;
+/** A rough count, for keeping a long chat inside the model's context. */
+const CHARS_PER_TOKEN = 3;
+const CHAT_ID = /^[\w-]{8,64}$/;
+
+let assistantLastUsed = 0;
+let assistantStarting; // { model, promise }
+/** Context per request (tokens), read from each model once it's up. */
+const assistantContext = new Map();
+/** Answers being written, by chat id: { chat, message, controller }. */
+const generations = new Map();
+
+const modelAnswers = (model) =>
+  fetch(`${model.url}/health`, { signal: AbortSignal.timeout(2000) }).then((r) => r.ok, () => false);
+
+async function unitActive(unit) {
+  const { stdout } = await run('systemctl', ['--user', 'is-active', unit]).catch((e) => e);
+  return stdout?.trim() === 'active';
+}
+
+function findModel(id) {
+  const model = id === undefined ? ASSISTANT_MODELS[0] : ASSISTANT_MODELS.find((m) => m.id === id);
+  if (!model) throw new HttpError(400, `No model called ${id}`);
+  return model;
+}
+
+async function assistantState() {
+  const models = await Promise.all(
+    ASSISTANT_MODELS.map(async (m) => {
+      const state =
+        assistantStarting?.model === m ? 'starting'
+        : (await modelAnswers(m)) ? 'running'
+        : (await unitActive(m.unit)) ? 'starting'
+        : 'stopped';
+      return { id: m.id, name: m.name, thinking: !!m.thinking, state };
+    }),
+  );
+  return { models, gameMode: gameMode.active };
+}
+
+/** Starts the model if it isn't running, stopping any other one first. */
+async function wakeModel(model) {
+  gameModeError('the assistant');
+  assistantLastUsed = Date.now();
+  while (assistantStarting && assistantStarting.model !== model) await assistantStarting.promise.catch(() => {});
+  if (!assistantStarting && (await modelAnswers(model))) return;
+  if (!assistantStarting) {
+    const promise = (async () => {
+      for (const other of ASSISTANT_MODELS) {
+        if (other !== model && (await unitActive(other.unit))) {
+          console.log(`Stopping ${other.name} to make room for ${model.name}`);
+          await run('systemctl', ['--user', 'stop', other.unit], { timeout: 120_000 });
+        }
+      }
+      console.log(`Starting ${model.name} for the Assistant app`);
+      await run('systemctl', ['--user', 'start', model.unit], { timeout: 120_000 });
+      const deadline = Date.now() + ASSISTANT_START_TIMEOUT_MS;
+      while (!(await modelAnswers(model))) {
+        if (Date.now() > deadline) throw new HttpError(504, `${model.name} is taking too long to start. Try again in a minute.`);
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+    })().finally(() => {
+      assistantStarting = undefined;
+    });
+    assistantStarting = { model, promise };
+  }
+  await assistantStarting?.promise;
+}
+
+async function contextTokens(model) {
+  if (!assistantContext.has(model.id)) {
+    const props = await fetch(`${model.url}/props`, { signal: AbortSignal.timeout(5000) }).then((r) => r.json(), () => undefined);
+    const n = props?.default_generation_settings?.n_ctx;
+    if (!n) return 8192;
+    assistantContext.set(model.id, n);
+  }
+  return assistantContext.get(model.id);
+}
+
+async function stopIdleAssistant() {
+  if (assistantStarting || generations.size || Date.now() - assistantLastUsed < ASSISTANT_IDLE_MS) return;
+  for (const model of ASSISTANT_MODELS) {
+    if (!(await unitActive(model.unit))) continue;
+    console.log(`Stopping ${model.name}, unused for a quarter of an hour`);
+    await run('systemctl', ['--user', 'stop', model.unit], { timeout: 120_000 }).catch((e) =>
+      console.error(`Couldn't stop ${model.name}:`, e.message),
+    );
+  }
+}
+
+function chatPath(id) {
+  if (!CHAT_ID.test(id)) throw new HttpError(400, 'Bad chat id');
+  return path.join(ASSISTANT_DIR, `${id}.json`);
+}
+
+async function loadChat(id) {
+  if (generations.has(id)) return generations.get(id).chat;
+  const chat = await readFile(chatPath(id), 'utf8').then(JSON.parse, () => undefined);
+  // An answer the server was writing when it restarted.
+  for (const m of chat?.messages ?? []) {
+    if (m.pending) Object.assign(m, { pending: undefined, stopped: true });
+  }
+  return chat;
+}
+
+async function saveChat(chat) {
+  await mkdir(ASSISTANT_DIR, { recursive: true });
+  const file = chatPath(chat.id);
+  await writeFile(`${file}.tmp`, JSON.stringify(chat));
+  await rename(`${file}.tmp`, file);
+}
+
+async function listChats() {
+  const names = await readdir(ASSISTANT_DIR).catch(() => []);
+  const chats = await Promise.all(
+    names.filter((n) => n.endsWith('.json')).map((n) => loadChat(n.slice(0, -'.json'.length)).catch(() => undefined)),
+  );
+  return chats
+    .filter(Boolean)
+    .map((c) => {
+      const last = c.messages.at(-1);
+      return {
+        id: c.id,
+        title: c.title,
+        model: c.model,
+        updatedAt: c.updatedAt,
+        preview: (last?.content || last?.error || '').slice(0, 200),
+        answering: generations.has(c.id),
+      };
+    })
+    .sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
+async function getChat(id) {
+  const chat = await loadChat(id);
+  if (!chat) throw new HttpError(404, 'No such chat');
+  return chat;
+}
+
+async function deleteChat(id) {
+  generations.get(id)?.controller.abort();
+  await rm(chatPath(id), { force: true });
+  return { ok: true };
+}
+
+function stopAnswer(id) {
+  const generation = generations.get(id);
+  if (!generation) throw new HttpError(409, 'Nothing is being answered');
+  generation.message.stopped = true;
+  generation.controller.abort();
+  return { ok: true };
+}
+
+function systemPrompt(model) {
+  const today = new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+  return [
+    `You are the assistant in Homebase, the user's personal iPhone app. You are ${model.name}, running on their home PC.`,
+    `Today is ${today}.`,
+    'Answers are read on a phone, so get to the point and keep them short unless asked for detail.',
+    'Markdown is shown: headings, lists, bold, italics, inline code and code blocks. Avoid tables, which display poorly.',
+  ].join(' ');
+}
+
+/** The newest messages that fit in the model's context, leaving room for the answer. */
+function chatHistory(chat, budgetChars) {
+  const history = [];
+  let used = 0;
+  for (const m of chat.messages.slice(0, -1).reverse()) {
+    if (!m.content) continue;
+    used += m.content.length;
+    if (used > budgetChars && history.length) break;
+    history.unshift({ role: m.role, content: m.content });
+  }
+  return history;
+}
+
+/**
+ * Adds the question to the chat (making the chat if it's new) and streams the answer back as
+ * newline-separated JSON: `status` while the model starts, then `reasoning` and `content` pieces,
+ * and `done` with the finished message, or `error`.
+ */
+async function ask(req, res, id) {
+  chatPath(id);
+  let body;
+  try {
+    body = JSON.parse((await readBody(req))?.toString() ?? '{}');
+  } catch {
+    throw new HttpError(400, 'Expected JSON');
+  }
+  const text = typeof body?.text === 'string' ? body.text.trim() : '';
+  if (!text) throw new HttpError(400, 'Nothing to ask');
+  if (text.length > ASSISTANT_MAX_TEXT) throw new HttpError(413, 'That message is too long');
+  if (generations.has(id)) throw new HttpError(409, 'Still answering the last message');
+  gameModeError('the assistant');
+
+  const now = Date.now();
+  const chat = (await loadChat(id)) ?? { id, title: text.split('\n')[0].slice(0, 80), createdAt: now, messages: [] };
+  const model = findModel(body.model ?? chat.model);
+  const think = !!body.think && !!model.thinking;
+  chat.model = model.id;
+  chat.updatedAt = now;
+  chat.messages.push({ role: 'user', content: text, at: now });
+  const message = { role: 'assistant', content: '', reasoning: '', model: model.id, at: now, pending: true };
+  chat.messages.push(message);
+  const controller = new AbortController();
+  generations.set(id, { chat, message, controller });
+  await saveChat(chat);
+
+  res.writeHead(200, { 'content-type': 'application/x-ndjson', 'cache-control': 'no-store' });
+  // The phone may go away mid-answer (the app was left); the answer is still finished and saved.
+  const send = (event) => {
+    if (!res.destroyed && !res.writableEnded) res.write(`${JSON.stringify(event)}\n`);
+  };
+
+  try {
+    if (!(await modelAnswers(model))) send({ type: 'status', text: `Starting ${model.name}…` });
+    await wakeModel(model);
+    const reply = ASSISTANT_REPLY_TOKENS[think ? 'think' : 'quick'];
+    const system = systemPrompt(model);
+    const budget = ((await contextTokens(model)) - reply) * CHARS_PER_TOKEN - system.length;
+    const upstream = await fetch(`${model.url}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        stream: true,
+        max_tokens: reply,
+        messages: [{ role: 'system', content: system }, ...chatHistory(chat, budget)],
+        ...(model.thinking ? { chat_template_kwargs: { enable_thinking: think } } : {}),
+        ...model.sampling?.[think ? 'think' : 'quick'],
+      }),
+      signal: controller.signal,
+    });
+    if (!upstream.ok) {
+      const detail = await upstream.json().then((b) => b?.error?.message, () => undefined);
+      throw new Error(`${model.name} answered ${upstream.status}${detail ? `: ${detail}` : ''}`);
+    }
+    const decoder = new TextDecoder();
+    let buffer = '';
+    for await (const chunk of upstream.body) {
+      buffer += decoder.decode(chunk, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith('data: ') || line === 'data: [DONE]') continue;
+        const choice = JSON.parse(line.slice(6)).choices?.[0];
+        const { reasoning_content: reasoning, content } = choice?.delta ?? {};
+        if (reasoning) {
+          message.reasoning += reasoning;
+          send({ type: 'reasoning', text: reasoning });
+        }
+        if (content) {
+          message.content += content;
+          send({ type: 'content', text: content });
+        }
+        if (choice?.finish_reason === 'length') message.cutOff = true;
+      }
+      assistantLastUsed = Date.now();
+    }
+  } catch (e) {
+    if (!message.stopped) {
+      message.error = e.name === 'TimeoutError' ? `${model.name} didn't answer` : e.message;
+      console.error(`Assistant: ${message.error}`);
+    }
+  } finally {
+    message.pending = undefined;
+    if (!message.reasoning) message.reasoning = undefined;
+    chat.updatedAt = Date.now();
+    assistantLastUsed = Date.now();
+    generations.delete(id);
+    // A chat deleted while it was being answered stays deleted.
+    if (!controller.signal.aborted || message.stopped) await saveChat(chat).catch((e) => console.error("Couldn't save a chat:", e.message));
+    send(message.error ? { type: 'error', error: message.error } : { type: 'done', message });
+    if (!res.writableEnded) res.end();
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
 // HTTP
 
 class HttpError extends Error {
@@ -2168,6 +2478,23 @@ async function handle(req, res) {
     }
   }
 
+  if (req.method === 'GET' && url.pathname === '/api/assistant') return sendJson(res, 200, await assistantState());
+  if (req.method === 'GET' && url.pathname === '/api/assistant/chats') return sendJson(res, 200, await listChats());
+  const chat = /^\/api\/assistant\/chats\/([^/]+)(\/stop)?$/.exec(url.pathname);
+  if (chat) {
+    const [, id, stop] = chat;
+    if (req.method === 'GET' && !stop) return sendJson(res, 200, await getChat(id));
+    if (req.method === 'POST' && stop) return sendJson(res, 200, stopAnswer(id));
+    if (req.method === 'POST') {
+      log(req, `assistant ask ${id}`);
+      return ask(req, res, id);
+    }
+    if (req.method === 'DELETE' && !stop) {
+      log(req, `assistant delete ${id}`);
+      return sendJson(res, 200, await deleteChat(id));
+    }
+  }
+
   const arr = /^\/api\/arr\/(\w+)\/(.+)$/.exec(url.pathname);
   if (arr) return proxyArr(req, res, arr[1], arr[2], url.search);
 
@@ -2226,6 +2553,7 @@ if (process.argv[2] === 'pair') {
   await checkGame();
   setInterval(checkGame, GAME_CHECK_INTERVAL).unref();
   setInterval(stopIdleSeerr, 60_000).unref();
+  setInterval(stopIdleAssistant, 60_000).unref();
   setInterval(() => sortTvQueue().catch(() => {}), 60_000).unref();
   await loadVideoJobs();
   setInterval(updateYtdlp, 3600_000).unref();

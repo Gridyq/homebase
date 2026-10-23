@@ -89,4 +89,12 @@ export const miniApps: MiniApp[] = [
     color: '#F76B15',
     href: '/videos',
   },
+  {
+    id: 'assistant',
+    name: 'Assistant',
+    description: 'Chat with the AI model on the home PC',
+    glyph: '✦',
+    color: '#8E4EC6',
+    href: '/assistant',
+  },
 ];
