@@ -1,4 +1,4 @@
-import { Fragment, type ReactNode } from 'react';
+import { Fragment, memo, useMemo, type ReactNode } from 'react';
 import { StyleSheet, View } from 'react-native';
 
 import { ThemedText } from '@/components/themed-text';
@@ -9,15 +9,16 @@ import { useTheme } from '@/hooks/use-theme';
  * Just enough Markdown for chat answers: headings, lists, quotes, code blocks, rules, and bold,
  * italics and code inside a line. Anything else shows as written. A table shows as its text.
  */
-export function Markdown({ text }: { text: string }) {
+export const Markdown = memo(function Markdown({ text }: { text: string }) {
+  const blocks = useMemo(() => parseBlocks(text), [text]);
   return (
     <View style={styles.blocks}>
-      {parseBlocks(text).map((block, i) => (
+      {blocks.map((block, i) => (
         <BlockView key={i} block={block} />
       ))}
     </View>
   );
-}
+});
 
 type Block =
   | { kind: 'paragraph'; text: string }
@@ -89,7 +90,10 @@ function parseBlocks(text: string): Block[] {
 
 const startsBlock = (line: string) => /^\s*(```|#{1,6}\s|>)/.test(line) || LIST_ITEM.test(line);
 
-function BlockView({ block }: { block: Block }) {
+/** While an answer streams, only its last block changes; the rest stay as they were. */
+const BlockView = memo(BlockContent, (a, b) => JSON.stringify(a.block) === JSON.stringify(b.block));
+
+function BlockContent({ block }: { block: Block }) {
   const theme = useTheme();
   switch (block.kind) {
     case 'paragraph':

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { memo, useState } from 'react';
 import { ActivityIndicator, Pressable, RefreshControl, StyleSheet, View, type GestureResponderEvent } from 'react-native';
 
 import { ThemedText } from '@/components/themed-text';
@@ -404,25 +404,21 @@ export function TimeChart({
             style={[styles.marker, { left: `${((m.t - start) / span) * 100}%`, backgroundColor: m.color }]}
           />
         ))}
-        {values.map((v, i) => {
-          const fraction = v == null ? 0 : Math.min(1, Math.max(0, v / top));
-          const active = touched === i;
-          return (
-            <View key={i} style={styles.column}>
-              {v != null ? (
-                <View
-                  style={{
-                    height: `${fraction * 100}%`,
-                    minHeight: 2,
-                    backgroundColor: active ? color : `${color}40`,
-                    borderTopWidth: 2,
-                    borderTopColor: color,
-                  }}
-                />
-              ) : null}
-            </View>
-          );
-        })}
+        <ChartColumns values={values} top={top} color={color} />
+        {touchedValue != null ? (
+          <View
+            pointerEvents="none"
+            style={{
+              position: 'absolute',
+              bottom: 0,
+              left: `${(touched! / values.length) * 100}%`,
+              width: `${100 / values.length}%`,
+              height: `${Math.min(1, Math.max(0, touchedValue / top)) * 100}%`,
+              minHeight: 2,
+              backgroundColor: color,
+            }}
+          />
+        ) : null}
       </View>
       {touchedMarks.length ? (
         <ThemedText type="small" style={[styles.caption, { color: touchedMarks[0].color }]} numberOfLines={2}>
@@ -440,6 +436,28 @@ export function TimeChart({
     </View>
   );
 }
+
+/**
+ * The bars, apart from the touched one, which is drawn over them: a finger dragging across a chart
+ * then redraws one bar rather than all of them (and Trends has a dozen charts).
+ */
+const ChartColumns = memo(function ChartColumns({ values, top, color }: { values: (number | null)[]; top: number; color: string }) {
+  return values.map((v, i) => (
+    <View key={i} style={styles.column}>
+      {v != null ? (
+        <View
+          style={{
+            height: `${Math.min(1, Math.max(0, v / top)) * 100}%`,
+            minHeight: 2,
+            backgroundColor: `${color}40`,
+            borderTopWidth: 2,
+            borderTopColor: color,
+          }}
+        />
+      ) : null}
+    </View>
+  ));
+});
 
 export function serviceColor(service: Service, danger: string) {
   if (service.state === 'failed' || service.health === 'unhealthy') return danger;

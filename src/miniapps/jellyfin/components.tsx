@@ -1,5 +1,6 @@
 import { Image } from 'expo-image';
 import { router } from 'expo-router';
+import { memo } from 'react';
 import { ActivityIndicator, FlatList, PixelRatio, Pressable, StyleSheet, useWindowDimensions, View } from 'react-native';
 
 import { Button } from '@/components/button';
@@ -39,7 +40,8 @@ type PosterProps = {
   shape?: 'poster' | 'wide';
 };
 
-export function PosterCard({ item, width, shape = 'poster' }: PosterProps) {
+/** Memoized: a library grid re-renders every card on each page it loads otherwise. */
+export const PosterCard = memo(function PosterCard({ item, width, shape = 'poster' }: PosterProps) {
   const client = useJellyfin();
   const theme = useTheme();
   const aspect = shape === 'wide' ? 16 / 9 : 2 / 3;
@@ -96,9 +98,9 @@ export function PosterCard({ item, width, shape = 'poster' }: PosterProps) {
       ) : null}
     </Pressable>
   );
-}
+});
 
-export function ItemRow({
+export const ItemRow = memo(function ItemRow({
   title,
   items,
   shape = 'poster',
@@ -123,7 +125,7 @@ export function ItemRow({
       />
     </View>
   );
-}
+});
 
 /**
  * Card width for horizontal rows: about 3 posters or 1.4 wide cards across a phone in portrait,

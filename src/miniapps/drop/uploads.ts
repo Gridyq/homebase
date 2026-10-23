@@ -34,8 +34,16 @@ async function run() {
     const { conn, id } = next;
     const upload = uploads.find((u) => u.id === id);
     if (!upload) continue;
+    // The native side reports far more often than the bar can show; each report redraws Drop.
+    let shown = { progress: 0, at: 0 };
+    const onProgress = (progress: number) => {
+      const now = Date.now();
+      if (progress < 1 && progress - shown.progress < 0.01 && now - shown.at < 250) return;
+      shown = { progress, at: now };
+      update(id, { progress });
+    };
     try {
-      await uploadFile(conn, upload.picked.file, upload.picked.name, (progress) => update(id, { progress }));
+      await uploadFile(conn, upload.picked.file, upload.picked.name, onProgress);
       finished++;
       set(uploads.filter((u) => u.id !== id));
     } catch (e) {

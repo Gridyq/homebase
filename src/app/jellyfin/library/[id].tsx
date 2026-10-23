@@ -66,6 +66,11 @@ export default function Library() {
     }
   }, [client, data, library, query, hasMore, loading, items]);
 
+  const renderItem = useCallback(
+    ({ item }: { item: BaseItem }) => <PosterCard item={item} width={cardWidth} />,
+    [cardWidth],
+  );
+
   if (!library) return <Centered loading={!libraryError} error={libraryError} onRetry={reloadLibrary} />;
 
   const pickSort = (sort: (typeof SORTS)[number]) =>
@@ -127,7 +132,7 @@ export default function Library() {
         numColumns={columns}
         columnWrapperStyle={[styles.column, gutter]}
         contentContainerStyle={styles.content}
-        renderItem={({ item }) => <PosterCard item={item} width={cardWidth} />}
+        renderItem={renderItem}
         // A failed page waits for "Try again" rather than retrying on every scroll.
         onEndReached={moreError ? undefined : loadMore}
         refreshControl={

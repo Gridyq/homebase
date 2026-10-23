@@ -1,11 +1,12 @@
-import { router, Stack, useFocusEffect } from 'expo-router';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { router, Stack } from 'expo-router';
+import { useEffect, useState } from 'react';
 import { ActivityIndicator, RefreshControl, ScrollView, StyleSheet } from 'react-native';
 
 import { ThemedText } from '@/components/themed-text';
 import { Spacing } from '@/constants/theme';
 import { useGutter } from '@/hooks/use-gutter';
 import { useTheme } from '@/hooks/use-theme';
+import { useReloadAfterChanges } from '@/miniapps/jellyfin/changes';
 import type { BaseItem } from '@/miniapps/jellyfin/api';
 import { Centered, ItemRow } from '@/miniapps/jellyfin/components';
 import { useJellyfin } from '@/miniapps/jellyfin/session';
@@ -38,13 +39,7 @@ export default function JellyfinHome() {
   );
 
   // Refresh "Continue watching" when coming back from the player.
-  const focusedOnce = useRef(false);
-  useFocusEffect(
-    useCallback(() => {
-      if (focusedOnce.current) reload();
-      focusedOnce.current = true;
-    }, [reload]),
-  );
+  useReloadAfterChanges(reload);
 
   // Only show the refresh spinner for a pull. Showing it for the quiet reload above makes iOS push
   // the whole list down to fit it, then snap back up when loading finishes.

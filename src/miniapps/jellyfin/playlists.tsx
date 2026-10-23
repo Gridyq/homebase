@@ -1,6 +1,5 @@
 import { Image } from 'expo-image';
-import { router, useFocusEffect } from 'expo-router';
-import { useCallback, useRef } from 'react';
+import { router } from 'expo-router';
 import { ActionSheetIOS, Alert, Pressable, StyleSheet, useWindowDimensions, View } from 'react-native';
 
 import { Button } from '@/components/button';
@@ -18,6 +17,7 @@ import {
   type PlaylistShare,
   type User,
 } from './api';
+import { useReloadAfterChanges } from './changes';
 import { episodeLabel, formatRuntime, itemHref } from './components';
 import { playOnDevice } from './remote-play';
 import { useIsAdmin, useJellyfin } from './session';
@@ -141,13 +141,7 @@ export function PlaylistEntries({ playlist }: { playlist: BaseItem }) {
   const thumbWidth = Math.min(width, height) * 0.32;
 
   // Pick up watched state and resume points after coming back from the player.
-  const focusedOnce = useRef(false);
-  useFocusEffect(
-    useCallback(() => {
-      if (focusedOnce.current) reload();
-      focusedOnce.current = true;
-    }, [reload]),
-  );
+  useReloadAfterChanges(reload);
 
   const change = async (action: () => Promise<unknown>, failure: string) => {
     try {

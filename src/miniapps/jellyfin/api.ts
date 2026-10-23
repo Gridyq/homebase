@@ -1,5 +1,7 @@
 import Constants from 'expo-constants';
 
+import { noteChange } from './changes';
+
 /** Jellyfin counts time in ticks of 100ns. */
 export const TICKS_PER_SECOND = 10_000_000;
 
@@ -274,10 +276,17 @@ export async function signIn(
 export function createClient(session: Session, onUnauthorized?: () => void) {
   const { serverUrl, userId, accessToken, deviceId } = session;
   const call = <T>(path: string, init?: CallOptions) =>
-    request<T>(serverUrl, path, deviceId, accessToken, init).catch((e: unknown) => {
-      if (e instanceof JellyfinError && e.status === 401) onUnauthorized?.();
-      throw e;
-    });
+    request<T>(serverUrl, path, deviceId, accessToken, init).then(
+      (result) => {
+        // Screens showing watched state, resume points or playlists reload when next shown.
+        if (init?.method && init.method !== 'GET') noteChange();
+        return result;
+      },
+      (e: unknown) => {
+        if (e instanceof JellyfinError && e.status === 401) onUnauthorized?.();
+        throw e;
+      },
+    );
   const get = <T>(path: string) => call<T>(path);
   const post = <T>(path: string, body?: unknown) => call<T>(path, { method: 'POST', body: body ?? {} });
 

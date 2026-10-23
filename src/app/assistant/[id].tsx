@@ -111,7 +111,15 @@ function ChatView({ conn, id }: { conn: Connection; id: string }) {
 
   const load = useCallback(async () => {
     const next = await getChat(conn, id);
-    setChat(next);
+    // Messages that didn't change keep their objects, so following an answer doesn't redraw the
+    // whole chat every second.
+    setChat((prev) => {
+      if (!prev || !next) return next;
+      const messages = next.messages.map((m, i) =>
+        prev.messages[i] && JSON.stringify(prev.messages[i]) === JSON.stringify(m) ? prev.messages[i] : m,
+      );
+      return { ...next, messages };
+    });
     setLoaded(true);
     return next;
   }, [conn, id]);
@@ -331,7 +339,9 @@ function ChatView({ conn, id }: { conn: Connection; id: string }) {
         {messages.length ? (
           messages.map((m, i) => (
             <MessageView
-              key={`${m.at}-${i}`}
+              // By position: the list only grows, and the server's timestamp replaces the phone's
+              // when an answer finishes, which as a key would remount it and close its panels.
+              key={i}
               conn={conn}
               message={m}
               status={i === messages.length - 1 ? status : undefined}

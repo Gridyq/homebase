@@ -1,7 +1,7 @@
 import { Image } from 'expo-image';
-import { Link, router, Stack, useFocusEffect, useLocalSearchParams } from 'expo-router';
+import { Link, router, Stack, useLocalSearchParams } from 'expo-router';
 import * as WebBrowser from 'expo-web-browser';
-import { useCallback, useRef, useState } from 'react';
+import { useState } from 'react';
 import { ActivityIndicator, Alert, FlatList, Pressable, ScrollView, StyleSheet, useWindowDimensions, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -10,6 +10,7 @@ import { ThemedText } from '@/components/themed-text';
 import { Spacing } from '@/constants/theme';
 import { useGutter } from '@/hooks/use-gutter';
 import { useTheme } from '@/hooks/use-theme';
+import { useReloadAfterChanges } from '@/miniapps/jellyfin/changes';
 import { TICKS_PER_SECOND, type BaseItem, type Person, type UserData } from '@/miniapps/jellyfin/api';
 import {
   Centered,
@@ -45,13 +46,7 @@ export default function ItemDetail() {
     loaded && userData?.base === loaded ? { ...loaded, UserData: { ...loaded.UserData, ...userData.data } } : loaded;
 
   // Pick up the new resume position after returning from the player.
-  const focusedOnce = useRef(false);
-  useFocusEffect(
-    useCallback(() => {
-      if (focusedOnce.current) reload();
-      focusedOnce.current = true;
-    }, [reload]),
-  );
+  useReloadAfterChanges(reload);
 
   if (!item) return <Centered loading={loading} error={error} onRetry={reload} />;
 
@@ -219,13 +214,7 @@ function SeriesEpisodes({ series }: { series: BaseItem }) {
   );
 
   // Show what was just watched when coming back from the player.
-  const focusedOnce = useRef(false);
-  useFocusEffect(
-    useCallback(() => {
-      if (focusedOnce.current) reloadEpisodes();
-      focusedOnce.current = true;
-    }, [reloadEpisodes]),
-  );
+  useReloadAfterChanges(reloadEpisodes);
   const error = seasonsError ?? episodesError;
 
   const episodeActions = (ep: BaseItem) => {

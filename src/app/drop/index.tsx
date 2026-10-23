@@ -74,10 +74,14 @@ function Drop({ conn }: { conn: Connection }) {
     }
   };
 
-  // A file that just arrived on the PC shows up in its folder.
+  // A file that just arrived on the PC shows up in its folder. Uploads finished before this screen
+  // opened are in the first load already.
   const { refresh } = folder;
+  const finishedSeen = useRef(finished);
   useEffect(() => {
-    if (finished) refresh();
+    if (finished === finishedSeen.current) return;
+    finishedSeen.current = finished;
+    refresh();
   }, [finished, refresh]);
 
   const choose = async (pick: () => Promise<Picked[]>) => {
