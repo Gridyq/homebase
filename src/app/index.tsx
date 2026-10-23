@@ -34,13 +34,15 @@ export default function Launcher() {
   // Waits for the saved order, so the first Now list isn't thrown away when the order arrives.
   const activity = usePolling(() => loadActivity(apps), ACTIVITY_POLL_MS, 'launcher', { enabled: ordered });
   useWhatsNewOnce();
+  // In the tiles' order, which may have changed since the last poll.
+  const now = activity.data && [...activity.data].sort((a, b) => apps.indexOf(a.app) - apps.indexOf(b.app));
 
   return (
     <ScrollView
       contentInsetAdjustmentBehavior="automatic"
       contentContainerStyle={styles.content}
       style={{ backgroundColor: theme.background }}>
-      {activity.data?.length ? <NowList items={activity.data} /> : null}
+      {now?.length ? <NowList items={now} /> : null}
       <View style={[styles.grid, gutter]}>
         {/* Not drawn until the saved order is known, or the tiles would jump into place. */}
         {!ordered ? null : apps.map((app, i) => (
