@@ -41,6 +41,8 @@ const TOKEN_PATH = path.join(ROOT, 'token');
 const PAIRING_PATH = path.join(ROOT, 'pairing');
 const PAIRING_TTL_MS = 10 * 60_000;
 const PORT = Number(process.env.PORT ?? 8788);
+/** Loopback only (127.0.0.1) when the Rust server in front of it takes the outside requests. */
+const HOST = process.env.HOST;
 /** Address the phone uses, sent in the pairing link. */
 const PUBLIC_URL = process.env.PUBLIC_URL ?? `http://fedora.tail27f991.ts.net:${PORT}`;
 const NTFY_URL = process.env.NTFY_URL ?? 'http://localhost:2586/Homebase';
@@ -3977,8 +3979,15 @@ function sendJson(res, status, body) {
   res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' }).end(JSON.stringify(body));
 }
 
+/** Who sent a request. Through the Rust server in front, that's the address it passes on. */
+function peerAddress(req) {
+  const forwarded = req.headers['x-forwarded-for'];
+  const viaLoopback = /^(::ffff:)?127\.0\.0\.1$|^::1$/.test(req.socket.remoteAddress ?? '');
+  return viaLoopback && typeof forwarded === 'string' ? forwarded : req.socket.remoteAddress;
+}
+
 function log(req, message) {
-  console.log(`${new Date().toISOString()} ${req.socket.remoteAddress} ${message}`);
+  console.log(`${new Date().toISOString()} ${peerAddress(req)} ${message}`);
 }
 
 async function handle(req, res) {
@@ -4250,5 +4259,5 @@ if (process.argv[2] === 'pair') {
       console.error(e);
       if (!res.headersSent) sendJson(res, 500, { error: e.stderr?.trim() || e.message || 'Internal error' });
     }
-  }).listen(PORT, () => console.log(`Homebase status server listening on :${PORT}`));
+  }).listen(PORT, HOST, () => console.log(`Homebase status server listening on ${HOST ?? ''}:${PORT}`));
 }
