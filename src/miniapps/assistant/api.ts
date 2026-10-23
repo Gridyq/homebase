@@ -28,6 +28,8 @@ export type ChatMessage = {
   /** Photo ids, for a question that came with photos. */
   images?: string[];
   reasoning?: string;
+  /** What it looked at on the server before answering, in order. */
+  steps?: { label: string }[];
   model?: string;
   at: number;
   /** Still being written. */
@@ -60,6 +62,7 @@ export type ChatSummary = {
 export type AnswerEvent =
   | { type: 'status'; text: string }
   | { type: 'reasoning' | 'content'; text: string }
+  | { type: 'step'; label: string }
   | { type: 'done'; message: ChatMessage }
   | { type: 'error'; error: string };
 

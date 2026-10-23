@@ -59,4 +59,5 @@ example
 /status-server/power.json
 /status-server/game-mode.json
 /status-server/videos.json
+/status-server/digest.json
 /status-server/assistant/

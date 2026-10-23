@@ -24,7 +24,7 @@
  * the home network.
  */
 import { execFile, spawn } from 'node:child_process';
-import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { constants, createWriteStream } from 'node:fs';
 import { appendFile, link, mkdir, open, readdir, readFile, readlink, realpath, rename, rm, stat, statfs, unlink, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
@@ -1066,11 +1066,14 @@ async function logSource(id) {
 
 /**
  * The last lines a service wrote, or with `after` (the cursor from an earlier call) only what
- * came since. `errors` keeps lines that mention an error, failure or warning.
+ * came since. `errors` keeps lines that mention an error, failure or warning. `since` and `until`
+ * (ms) keep to a stretch of time.
  */
-async function serviceLogs(id, { after, errors }) {
-  const args = [...(await logSource(id)), '--no-pager', '-o', 'json', '--output-fields=MESSAGE,PRIORITY', '-n', String(LOG_LINES)];
+async function serviceLogs(id, { after, errors, since, until, lines: count = LOG_LINES }) {
+  const args = [...(await logSource(id)), '--no-pager', '-o', 'json', '--output-fields=MESSAGE,PRIORITY', '-n', String(count)];
   if (after) args.push(`--after-cursor=${after}`);
+  if (since) args.push(`--since=@${Math.floor(since / 1000)}`);
+  if (until) args.push(`--until=@${Math.ceil(until / 1000)}`);
   if (errors) args.push(`--grep=${LOG_ERRORS}`, '--case-sensitive=false');
   // journalctl exits 1 when --grep matches nothing.
   const { stdout } = await run('journalctl', args, { maxBuffer: 32 * 1024 * 1024, timeout: 15_000 }).catch((e) => {
@@ -1483,20 +1486,20 @@ function historyEntries(start) {
  * null. Each also gets its average and peak over the whole range, and its total (value ×
  * seconds), which makes bytes of a rate and joules of watts.
  */
-function summarize(entries, keys, start, end) {
-  const step = (end - start) / HISTORY_POINTS;
+function summarize(entries, keys, start, end, points = HISTORY_POINTS) {
+  const step = (end - start) / points;
   const acc = Object.entries(keys).map(([name, key]) => ({
     name,
     key,
-    sums: new Array(HISTORY_POINTS).fill(0),
-    weights: new Array(HISTORY_POINTS).fill(0),
+    sums: new Array(points).fill(0),
+    weights: new Array(points).fill(0),
     sum: 0,
     weight: 0,
     peak: undefined,
   }));
   for (const e of entries) {
     const n = e.n ?? 1;
-    const i = Math.min(HISTORY_POINTS - 1, Math.max(0, Math.floor((e.t - start) / step)));
+    const i = Math.min(points - 1, Math.max(0, Math.floor((e.t - start) / step)));
     for (const s of acc) {
       const v = e.a[s.key];
       if (typeof v !== 'number') continue;
@@ -3116,6 +3119,8 @@ const ASSISTANT_MODELS = [
     thinking: true,
     /** Can look at photos (llama.cpp loads the mmproj file that -hf finds next to the model). */
     vision: true,
+    /** Can call ASSISTANT_TOOLS to look at the server. */
+    tools: true,
     /** Qwen's recommended settings for each mode. */
     sampling: {
       think: { temperature: 0.6, top_p: 0.95, top_k: 20, min_p: 0 },
@@ -3220,9 +3225,11 @@ async function contextTokens(model) {
 }
 
 async function stopIdleAssistant() {
-  if (assistantStarting || generations.size || Date.now() - assistantLastUsed < ASSISTANT_IDLE_MS) return;
+  const idle = () => !assistantStarting && !generations.size && Date.now() - assistantLastUsed >= ASSISTANT_IDLE_MS;
+  if (!idle()) return;
   for (const model of ASSISTANT_MODELS) {
-    if (!(await unitActive(model.unit))) continue;
+    // Checked again after the wait, in case a question (or the digest) came in meanwhile.
+    if (!(await unitActive(model.unit)) || !idle()) continue;
     console.log(`Stopping ${model.name}, unused for a quarter of an hour`);
     await run('systemctl', ['--user', 'stop', model.unit], { timeout: 120_000 }).catch((e) =>
       console.error(`Couldn't stop ${model.name}:`, e.message),
@@ -3361,11 +3368,346 @@ function stopAnswer(id) {
   return { ok: true };
 }
 
+// ---------------------------------------------------------------------------------------------
+// Assistant tools: what a model with `tools` can look at to answer questions about the server.
+// All of them only read. Each returns plain text, short enough for a small model's context.
+
+/** Rounds of tool calls before the model has to answer with what it has. */
+const TOOL_ROUNDS = 4;
+/** Room for everything the tools return in one answer (characters). */
+const TOOL_RESULTS_CHARS = 14_000;
+const TOOL_RESULT_CHARS = 5000;
+const TOOL_LOG_LINES = 60;
+const TOOL_LOG_LINE_CHARS = 300;
+const TOOL_HISTORY_POINTS = 12;
+
+const when = { type: 'string', description: 'Local time, like 2026-10-22 23:00' };
+const tool = (name, description, properties = {}, required = []) => ({
+  type: 'function',
+  function: { name, description, parameters: { type: 'object', properties, required } },
+});
+const ASSISTANT_TOOLS = [
+  tool('server_now', 'What the server is doing right now: CPU, memory, temperatures, disk space, and each service with its state and usage.'),
+  tool(
+    'server_history',
+    'How busy the server was over a stretch of time: CPU, GPU, memory, swap, stalls, temperatures, network and power, with the services using the most CPU and memory. Give a service to see just that one.',
+    { from: when, to: when, service: { type: 'string', description: 'A service name, like sonarr or jellyfin' } },
+    ['from', 'to'],
+  ),
+  tool(
+    'server_events',
+    'What happened over a stretch of time: boots, services starting, stopping, crashing or failing, memory kills, problems like full disks or hot drives, and game mode.',
+    { from: when, to: when },
+    ['from', 'to'],
+  ),
+  tool(
+    'service_logs',
+    "What a service wrote to its log, newest last. Defaults to its last lines; give a stretch of time to look at when something happened.",
+    {
+      service: { type: 'string', description: 'A service name, like sonarr or jellyfin' },
+      from: when,
+      to: when,
+      problems_only: { type: 'boolean', description: 'Only lines mentioning errors, failures or warnings' },
+    },
+    ['service'],
+  ),
+  tool(
+    'reliability',
+    'How each service held up over the last days: crashes, failures, memory kills, restarts, and how much of the time it was running.',
+    { days: { type: 'number', description: 'How many days back, 1 to 365' } },
+    ['days'],
+  ),
+  tool('drives', 'Each drive with its SMART health, temperature, age, wear and what is reading or writing it now.'),
+];
+
+const pct = (v) => `${Math.round(v * 100)}%`;
+const gb = (v) => `${(v / GIB).toFixed(1)} GB`;
+const mbits = (v) => `${((v * 8) / 1e6).toFixed(1)} Mb/s`;
+const mbytes = (v) => `${(v / 1e6).toFixed(1)} MB/s`;
+
+/** HH:MM, 24-hour, in the server's time zone. */
+const clockTime = (t) => new Date(t).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+/** The form tools take times in. */
+const toolTime = (t) => {
+  const d = new Date(t);
+  const two = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())} ${two(d.getHours())}:${two(d.getMinutes())}`;
+};
+const dayTime = (t) => `${new Date(t).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })} ${clockTime(t)}`;
+/** A stretch of time for a step's label, without the day twice. */
+const span = (from, to) =>
+  `${dayTime(from)}–${new Date(from).toDateString() === new Date(to).toDateString() ? clockTime(to) : dayTime(to)}`;
+
+/** A time a model gave, as ms. Throws a message the model can act on. */
+function parseToolTime(value, name) {
+  const t = typeof value === 'string' ? Date.parse(value.trim().replace(' ', 'T')) : NaN;
+  if (Number.isNaN(t)) throw new Error(`${name} should be a local time like ${toolTime(Date.now())}`);
+  return t;
+}
+
+function toolRange(args) {
+  const from = parseToolTime(args.from, 'from');
+  const to = Math.min(Date.now(), parseToolTime(args.to, 'to'));
+  if (from >= to) throw new Error('from must be before to, and in the past');
+  return [from, to];
+}
+
+/** The service a model named: by id, name, or part of the name. */
+async function findService(name) {
+  const list = lastServices ?? (await services());
+  const want = String(name ?? '').trim().toLowerCase();
+  const found =
+    list.find((s) => s.id.toLowerCase() === want || s.name.toLowerCase() === want) ??
+    list.find((s) => s.name.toLowerCase().includes(want) || s.id.toLowerCase().includes(want));
+  if (!want || !found) throw new Error(`No service called "${name}". There are: ${list.map((s) => s.name).join(', ')}`);
+  return found;
+}
+
+/** System series the history tool reports, with how to show their values. */
+const TOOL_SERIES = [
+  ['CPU', 'cpu', pct],
+  ['GPU', 'gpu', pct],
+  ['Memory used', 'mem', gb],
+  ['Swap used', 'swap', gb],
+  ['Time stalled waiting for CPU', 'pcpu', pct],
+  ['Time stalled waiting for memory', 'pmem', pct],
+  ['Time stalled waiting for disk', 'pio', pct],
+  ['CPU temperature', 'temp', (v) => `${Math.round(v)}°C`],
+  ['GPU temperature', 'gtemp', (v) => `${Math.round(v)}°C`],
+  ['Download', 'rx', mbits],
+  ['Upload', 'tx', mbits],
+  ['CPU power', 'cpow', (v) => `${Math.round(v)} W`],
+  ['GPU power', 'gpow', (v) => `${Math.round(v)} W`],
+  ['Files Tdarr is converting', 'conv', (v) => v.toFixed(1)],
+];
+const TOOL_SERVICE_SERIES = [
+  ['CPU (share of the whole machine)', 'cpu', pct],
+  ['Memory', 'mem', gb],
+  ['Disk read', 'r', mbytes],
+  ['Disk write', 'w', mbytes],
+  ['Download', 'rx', mbits],
+  ['Upload', 'tx', mbits],
+];
+
+function historyText(from, to, service) {
+  const entries = historyEntries(from).filter((e) => e.t < to);
+  if (!entries.length) return 'No readings in that stretch; the server may have been off.';
+  const series = service
+    ? TOOL_SERVICE_SERIES.map(([label, k, format]) => [label, `s:${service.id}:${k}`, format])
+    : TOOL_SERIES;
+  const summary = summarize(entries, Object.fromEntries(series.map(([label, key]) => [label, key])), from, to, TOOL_HISTORY_POINTS);
+  const step = (to - from) / TOOL_HISTORY_POINTS;
+  const stamp = to - from > DAY_MS ? dayTime : clockTime;
+  const out = [`${service ? service.name : 'Whole server'}, ${dayTime(from)} to ${dayTime(to)}, in ${TOOL_HISTORY_POINTS} steps from ${stamp(from)}, ${Math.round(step / 60_000)} min each (- = no reading):`];
+  for (const [label, , format] of series) {
+    const s = summary[label];
+    if (s.average === undefined) continue;
+    out.push(`${label}: average ${format(s.average)}, peak ${format(s.peak)}; ${s.values.map((v) => (v === null ? '-' : format(v))).join(', ')}`);
+  }
+  if (!service) {
+    const names = new Map((lastServices ?? []).map((x) => [x.id, x.name]));
+    for (const [label, pattern, format] of [
+      ['Most CPU', /^s:(.+):cpu$/, pct],
+      ['Most memory', /^s:(.+):mem$/, gb],
+    ]) {
+      const top = [...totals(entries, pattern)].sort((a, b) => b[1].average - a[1].average).slice(0, 5);
+      out.push(`${label} (average while running): ${top.map(([id, t]) => `${names.get(id) ?? id} ${format(t.average)}`).join(', ')}`);
+    }
+  }
+  return out.join('\n');
+}
+
+function eventText(e) {
+  const what =
+    e.kind === 'game' ? `Game mode ${e.on ? 'on' : 'off'}${e.detail ? ` (${e.detail})` : ''}`
+    : e.kind === 'problem' ? `Problem: ${e.detail}`
+    : e.kind === 'resolved' ? `Resolved: ${e.detail}`
+    : e.kind === 'boot' ? 'Server booted'
+    : e.kind === 'oom' ? `${e.name} killed for running out of memory${e.detail ? ` (${e.detail})` : ''}`
+    : `${e.name ?? e.id} ${e.kind}${e.by ? ` by ${e.by}` : ''}${e.detail ? ` (${e.detail})` : ''}`;
+  return `${dayTime(e.t)} ${what}`;
+}
+
+async function runTool(name, args) {
+  if (name === 'server_now') {
+    const s = await status();
+    const lines = [
+      `Up ${Math.round(s.host.uptimeSec / 3600)} h. CPU ${pct(s.cpu.usage)} (load ${s.cpu.load.map((l) => l.toFixed(1)).join(' ')} on ${s.cpu.cores} threads), GPU ${pct(s.gpu.usage)}.`,
+      `Memory ${gb(s.memory.totalBytes - s.memory.availableBytes)} used of ${gb(s.memory.totalBytes)}, swap ${gb(s.memory.swapTotalBytes - s.memory.swapFreeBytes)} used.`,
+      `Network: down ${mbits(s.network.rxPerSec)}, up ${mbits(s.network.txPerSec)}.`,
+      `Temperatures: ${s.temperatures.map((t) => `${t.label} ${Math.round(t.celsius)}°C`).join(', ')}.`,
+      `Disks: ${s.disks.map((d) => `${d.mount} ${pct(d.usedBytes / d.totalBytes)} full, ${gb(d.availableBytes)} free`).join('; ')}.`,
+      `Game mode ${s.gameMode.active ? 'on: the download stack is stopped' : 'off'}.`,
+      'Services:',
+      ...s.services.map(
+        (x) =>
+          `- ${x.name}: ${x.state}${x.health ? ` (${x.health})` : ''}${x.detail && x.state === 'failed' ? `, ${x.detail}` : ''}` +
+          (x.usage ? `, ${gb(x.usage.usedBytes)} memory, ${pct(x.usage.cpu)} CPU` : '') +
+          (x.since && x.state === 'running' ? `, since ${dayTime(x.since)}` : '') +
+          (x.restarts ? `, restarted ${x.restarts}×` : ''),
+      ),
+    ];
+    return { label: 'Checked the server now', text: lines.join('\n') };
+  }
+  if (name === 'server_history') {
+    const [from, to] = toolRange(args);
+    const service = args.service ? await findService(args.service) : undefined;
+    return { label: `${service ? `${service.name}’s` : 'Server'} usage, ${span(from, to)}`, text: historyText(from, to, service) };
+  }
+  if (name === 'server_events') {
+    const [from, to] = toolRange(args);
+    const list = events.filter((e) => e.t >= from && e.t <= to);
+    const shown = list.slice(-80);
+    const text = list.length
+      ? [...(list.length > shown.length ? [`${list.length - shown.length} earlier events left out.`] : []), ...shown.map(eventText)].join('\n')
+      : 'Nothing happened in that stretch.';
+    return { label: `Events, ${span(from, to)}`, text };
+  }
+  if (name === 'service_logs') {
+    const service = await findService(args.service);
+    const [from, to] = args.from || args.to ? toolRange({ from: args.from ?? toolTime(Date.now() - DAY_MS), to: args.to ?? toolTime(Date.now()) }) : [];
+    const { lines } = await serviceLogs(service.id, { errors: !!args.problems_only, since: from, until: to, lines: TOOL_LOG_LINES });
+    const stamp = from && to - from <= DAY_MS ? clockTime : dayTime;
+    const text = lines.length
+      ? lines.map((l) => `${stamp(l.at)} ${l.text.length > TOOL_LOG_LINE_CHARS ? `${l.text.slice(0, TOOL_LOG_LINE_CHARS)}…` : l.text}`).join('\n')
+      : `${service.name} logged nothing${args.problems_only ? ' about problems' : ''}${from ? ' then' : ''}.`;
+    return { label: `${service.name}’s ${args.problems_only ? 'problems' : 'log'}${from ? `, ${span(from, to)}` : ''}`, text };
+  }
+  if (name === 'reliability') {
+    const days = Math.min(365, Math.max(1, Number(args.days) || 7));
+    const r = reliability(days * 86400);
+    const covered = (Date.now() - Math.max(r.start, r.oldest)) / DAY_MS;
+    const lines = [
+      ...(covered < days - 0.5 ? [`Records only go back ${covered.toFixed(1)} days.`] : []),
+      r.boots.length ? `The server booted ${r.boots.length} times: ${r.boots.map(dayTime).join(', ')}.` : 'The server didn’t reboot.',
+      ...r.services.map((x) => {
+        const trouble = [
+          x.crashes && `${x.crashes} crashes`,
+          x.failures && `${x.failures} failures`,
+          x.oomKills && `${x.oomKills} memory kills`,
+          x.restarts && `${x.restarts} restarts`,
+          x.stops && `${x.stops} unexplained stops`,
+        ].filter(Boolean);
+        return `- ${x.name}: running ${x.running === undefined ? '?' : pct(x.running)} of the time${trouble.length ? `, ${trouble.join(', ')}` : ''}${x.lastTrouble ? `, last trouble ${dayTime(x.lastTrouble)}` : ''}`;
+      }),
+      'Services that only start on demand (llama, seerr) or stop in game mode run less than all the time by design.',
+    ];
+    return { label: `Reliability over ${days} days`, text: lines.join('\n') };
+  }
+  if (name === 'drives') {
+    const { drives: list, error } = await drives();
+    const lines = list.map((d) => {
+      const m = d.smart ?? {};
+      const facts = [
+        `${d.kind}, ${gb(d.sizeBytes)}`,
+        d.mounts.length ? `mounted at ${d.mounts.join(', ')}` : 'not mounted',
+        `health ${d.health}`,
+        d.temperature !== undefined && `${Math.round(d.temperature)}°C`,
+        m.powerOnHours !== undefined && `${(m.powerOnHours / 8766).toFixed(1)} years powered on`,
+        m.lifeLeft !== undefined && `${pct(m.lifeLeft)} life left`,
+        m.badSectors && `${m.badSectors} bad sectors`,
+        m.reallocated && `${m.reallocated} reallocated`,
+        m.pending && `${m.pending} pending sectors`,
+        m.cableErrors && `${m.cableErrors} cable errors`,
+        m.selfTest && `last self-test ${m.selfTest}`,
+        d.activity && `now reading ${mbytes(d.activity.readPerSec)}, writing ${mbytes(d.activity.writePerSec)}, ${pct(d.activity.busy)} busy`,
+      ].filter(Boolean);
+      const issues = d.issues.map((i) => i.text);
+      return `- ${d.model}: ${facts.join(', ')}${issues.length ? `. Issues: ${issues.join('; ')}` : ''}${d.users.length ? `. Using it most: ${d.users.map((u) => u.name).join(', ')}` : ''}`;
+    });
+    return { label: 'Checked the drives', text: [...(error ? [`Couldn't read SMART data: ${error}`] : []), ...lines].join('\n') };
+  }
+  throw new Error(`There's no tool called ${name}`);
+}
+
+/** Runs one tool call; failures go back to the model as text, so it can try again or say so. */
+async function useTool(call, room) {
+  const name = call.function.name;
+  let args;
+  try {
+    args = JSON.parse(call.function.arguments || '{}');
+  } catch {
+    return { label: `Tried ${name}`, result: 'Error: the arguments weren’t valid JSON.' };
+  }
+  try {
+    const { label, text } = await runTool(name, args ?? {});
+    const max = Math.max(500, Math.min(TOOL_RESULT_CHARS, room));
+    return { label, result: text.length > max ? `${text.slice(0, max)}\n… (cut short)` : text };
+  } catch (e) {
+    console.error(`Assistant tool ${name} failed: ${e.message}`);
+    return { label: `Tried ${name.replace(/_/g, ' ')}`, result: `Error: ${e.message}` };
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Weekly digest: on Monday morning the assistant looks back over the last week and writes it up
+// as a new chat, and ntfy links to it. Missed while the PC was off or in game mode, it's written
+// at the next chance.
+
+const DIGEST_PATH = path.join(ROOT, 'digest.json');
+const DIGEST_DAY = 1; // Monday
+const DIGEST_HOUR = 9;
+const DIGEST_RETRY_MS = 3600_000;
+const DIGEST_QUESTION =
+  'Write my weekly server digest for the last 7 days. Look at reliability and server_events for the week, server_history for the week, and drives, ' +
+  'then check service_logs (problems only) of any service that crashed, failed or was killed. ' +
+  'Start with one line on whether all is well. Then only what is worth knowing: what broke and why if the logs say, anything getting worse, drives, disk space. Skip whatever was normal.';
+
+let digestTriedAt = 0;
+
+/** When this week's digest is due: the last DIGEST_DAY at DIGEST_HOUR. */
+function digestDue(now = new Date()) {
+  const due = new Date(now);
+  due.setHours(DIGEST_HOUR, 0, 0, 0);
+  due.setDate(due.getDate() - ((due.getDay() - DIGEST_DAY + 7) % 7));
+  if (due > now) due.setDate(due.getDate() - 7);
+  return due.getTime();
+}
+
+async function checkDigest() {
+  const due = digestDue();
+  const last = (await readFile(DIGEST_PATH, 'utf8').then(JSON.parse, () => undefined))?.writtenAt ?? 0;
+  // A digest days late isn't worth the wait for a model to start; the next one comes Monday.
+  if (last >= due || Date.now() - due > 2 * DAY_MS) return;
+  if (gameMode.active || generations.size || Date.now() - digestTriedAt < DIGEST_RETRY_MS) return;
+  digestTriedAt = Date.now();
+  const model = ASSISTANT_MODELS.find((m) => m.tools);
+  if (!model) return;
+  const id = randomUUID();
+  const now = Date.now();
+  const title = `Week to ${new Date(now).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`;
+  const message = { role: 'assistant', content: '', reasoning: '', model: model.id, at: now, pending: true };
+  const chat = { id, title, model: model.id, createdAt: now, updatedAt: now, messages: [{ role: 'user', content: DIGEST_QUESTION, at: now }, message] };
+  const controller = new AbortController();
+  generations.set(id, { chat, message, controller });
+  await saveChat(chat);
+  console.log('Writing the weekly digest');
+  await answer({ chat, message, model, think: false, controller, send: () => {} });
+  if (message.error || !message.content) {
+    console.error(`The weekly digest failed: ${message.error ?? 'no answer'}`);
+    await deleteChat(id).catch(() => {});
+    return;
+  }
+  await writeFile(DIGEST_PATH, JSON.stringify({ writtenAt: now, chat: id }));
+  // The first line is meant to say whether all is well; enough for the notification.
+  const headline = message.content.replace(/[#*_`>]/g, '').trim().split('\n')[0].slice(0, 200);
+  await notify('Weekly server digest', headline, 'memo', `homebase://assistant/${id}`);
+}
+
 function systemPrompt(model) {
-  const today = new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+  const now = new Date();
+  const today = now.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
   return [
     `You are the assistant in Homebase, the user's personal iPhone app. You are ${model.name}, running on their home PC.`,
-    `Today is ${today}.`,
+    `Today is ${today}, and the time is ${clockTime(now.getTime())}.`,
+    ...(model.tools
+      ? [
+          'The PC is also the home server: Jellyfin, the Sonarr/Radarr/qBittorrent download stack, Tdarr and more, as Podman containers.',
+          'For questions about it (slowness, crashes, what happened when, drives, what a service logged), look with the tools rather than guessing, then answer from what they show.',
+          'Say what the data shows. When it doesn’t show why something happened, say so rather than guessing a cause.',
+          `Times you pass to tools are the PC's local time, like ${toolTime(now.getTime())}. Don't use tools for questions that aren't about the server.`,
+        ]
+      : []),
     'Answers are read on a phone, so get to the point and keep them short unless asked for detail.',
     'Markdown is shown: headings, lists, bold, italics, inline code and code blocks. Avoid tables, which display poorly.',
   ].join(' ');
@@ -3445,48 +3787,93 @@ async function ask(req, res, id) {
   const send = (event) => {
     if (!res.destroyed && !res.writableEnded) res.write(`${JSON.stringify(event)}\n`);
   };
+  await answer({ chat, message, model, think, controller, send });
+  if (!res.writableEnded) res.end();
+}
 
+/**
+ * Writes the answer to the chat's last question into `message`, calling `send` with each piece,
+ * and saves the chat. A model with tools may look at the server first, a few rounds at most.
+ */
+async function answer({ chat, message, model, think, controller, send }) {
+  const id = chat.id;
   try {
     if (!(await modelAnswers(model))) send({ type: 'status', text: `Starting ${model.name}…` });
     await wakeModel(model);
     const reply = ASSISTANT_REPLY_TOKENS[think ? 'think' : 'quick'];
     const system = systemPrompt(model);
-    const budget = ((await contextTokens(model)) - reply) * CHARS_PER_TOKEN - system.length;
-    const upstream = await fetch(`${model.url}/v1/chat/completions`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        stream: true,
-        max_tokens: reply,
-        messages: [{ role: 'system', content: system }, ...(await chatHistory(chat, model, budget))],
-        ...(model.thinking ? { chat_template_kwargs: { enable_thinking: think } } : {}),
-        ...model.sampling?.[think ? 'think' : 'quick'],
-      }),
-      signal: controller.signal,
-    });
-    if (!upstream.ok) {
-      const detail = await upstream.json().then((b) => b?.error?.message, () => undefined);
-      throw new Error(`${model.name} answered ${upstream.status}${detail ? `: ${detail}` : ''}`);
-    }
-    const decoder = new TextDecoder();
-    let buffer = '';
-    for await (const chunk of upstream.body) {
-      buffer += decoder.decode(chunk, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop();
-      for (const line of lines) {
-        if (!line.startsWith('data: ') || line === 'data: [DONE]') continue;
-        const choice = JSON.parse(line.slice(6)).choices?.[0];
-        const { reasoning_content: reasoning, content } = choice?.delta ?? {};
-        if (reasoning) {
-          message.reasoning += reasoning;
-          send({ type: 'reasoning', text: reasoning });
+    const tools = model.tools ? JSON.stringify(ASSISTANT_TOOLS) : '';
+    const budget = ((await contextTokens(model)) - reply) * CHARS_PER_TOKEN - system.length - tools.length;
+    // What the tools return needs room too, so a long chat gives up some of its oldest messages.
+    const messages = [
+      { role: 'system', content: system },
+      ...(await chatHistory(chat, model, model.tools ? budget - TOOL_RESULTS_CHARS : budget)),
+    ];
+    let toolChars = 0;
+    for (let round = 0; ; round++) {
+      // The last round has no tools, so it has to answer with what it found.
+      const offerTools = model.tools && round < TOOL_ROUNDS;
+      const upstream = await fetch(`${model.url}/v1/chat/completions`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          stream: true,
+          max_tokens: reply,
+          messages,
+          ...(offerTools ? { tools: ASSISTANT_TOOLS } : {}),
+          ...(model.thinking ? { chat_template_kwargs: { enable_thinking: think } } : {}),
+          ...model.sampling?.[think ? 'think' : 'quick'],
+        }),
+        signal: controller.signal,
+      });
+      if (!upstream.ok) {
+        const detail = await upstream.json().then((b) => b?.error?.message, () => undefined);
+        throw new Error(`${model.name} answered ${upstream.status}${detail ? `: ${detail}` : ''}`);
+      }
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let said = '';
+      // Tool calls come in pieces, by index: the id and name first, then the arguments bit by bit.
+      const calls = [];
+      for await (const chunk of upstream.body) {
+        buffer += decoder.decode(chunk, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop();
+        for (const line of lines) {
+          if (!line.startsWith('data: ') || line === 'data: [DONE]') continue;
+          const choice = JSON.parse(line.slice(6)).choices?.[0];
+          const { reasoning_content: reasoning, tool_calls: callParts } = choice?.delta ?? {};
+          let content = choice?.delta?.content;
+          if (reasoning) {
+            message.reasoning += reasoning;
+            send({ type: 'reasoning', text: reasoning });
+          }
+          if (content) {
+            // Text from before a look at the server, then the answer after it: keep them apart.
+            if (!said && message.content && !message.content.endsWith('\n')) content = `\n\n${content}`;
+            said += content;
+            message.content += content;
+            send({ type: 'content', text: content });
+          }
+          for (const part of callParts ?? []) {
+            const call = (calls[part.index ?? 0] ??= { id: '', type: 'function', function: { name: '', arguments: '' } });
+            if (part.id) call.id = part.id;
+            if (part.function?.name) call.function.name += part.function.name;
+            if (part.function?.arguments) call.function.arguments += part.function.arguments;
+          }
+          if (choice?.finish_reason === 'length') message.cutOff = true;
         }
-        if (content) {
-          message.content += content;
-          send({ type: 'content', text: content });
-        }
-        if (choice?.finish_reason === 'length') message.cutOff = true;
+        assistantLastUsed = Date.now();
+      }
+      const made = calls.filter((c) => c?.function.name);
+      if (!offerTools || !made.length) break;
+      messages.push({ role: 'assistant', content: said || null, tool_calls: made });
+      for (const call of made) {
+        const { label, result } = await useTool(call, TOOL_RESULTS_CHARS - toolChars);
+        toolChars += result.length;
+        (message.steps ??= []).push({ label });
+        send({ type: 'step', label });
+        messages.push({ role: 'tool', tool_call_id: call.id, content: result });
       }
       assistantLastUsed = Date.now();
     }
@@ -3504,7 +3891,6 @@ async function ask(req, res, id) {
     // A chat deleted while it was being answered stays deleted.
     if (!controller.signal.aborted || message.stopped) await saveChat(chat).catch((e) => console.error("Couldn't save a chat:", e.message));
     send(message.error ? { type: 'error', error: message.error } : { type: 'done', message });
-    if (!res.writableEnded) res.end();
   }
 }
 
@@ -3779,6 +4165,10 @@ if (process.argv[2] === 'pair') {
   setInterval(checkGame, GAME_CHECK_INTERVAL).unref();
   setInterval(stopIdleSeerr, 60_000).unref();
   setInterval(stopIdleAssistant, 60_000).unref();
+  const digest = () => checkDigest().catch((e) => console.error('The weekly digest failed:', e.message));
+  // Off the minute, so it doesn't land on the idle check that stops the model after a restart.
+  setTimeout(digest, 90_000).unref();
+  setInterval(digest, 10 * 60_000).unref();
   setInterval(() => sweepImages().catch((e) => console.error("Couldn't clear old photos:", e.message)), 3600_000).unref();
   setInterval(() => sortTvQueue().catch(() => {}), 60_000).unref();
   await loadVideoJobs();

@@ -189,6 +189,7 @@ function ChatView({ conn, id }: { conn: Connection; id: string }) {
       await ask(conn, id, { text: question, images, model: model?.id, think: think && !!model?.thinking }, (event) => {
         if (event.type === 'status') setStatus(event.text);
         else if (event.type === 'reasoning') updateLast((m) => ({ ...m, reasoning: (m.reasoning ?? '') + event.text }));
+        else if (event.type === 'step') updateLast((m) => ({ ...m, steps: [...(m.steps ?? []), { label: event.label }] }));
         else if (event.type === 'content') {
           setStatus(undefined);
           updateLast((m) => ({ ...m, content: m.content + event.text }));
@@ -340,6 +341,7 @@ function ChatView({ conn, id }: { conn: Connection; id: string }) {
           <ThemedText themeColor="textSecondary" style={styles.hint}>
             {model ? `${model.name} on the home PC.` : ''}
             {model?.state === 'stopped' ? ' It takes a few seconds to start on the first question.' : ''}
+            {model ? ' It can look at the server too: ask what crashed this week, or why it was slow last night.' : ''}
             {modelsError && !models.length ? (
               <>
                 {`Couldn’t load the models. ${modelsError.message} `}
@@ -450,6 +452,7 @@ const MessageView = memo(function MessageView({
 }) {
   const theme = useTheme();
   const [showThinking, setShowThinking] = useState(false);
+  const [showSteps, setShowSteps] = useState(false);
 
   if (message.role === 'user') {
     return (
@@ -477,6 +480,8 @@ const MessageView = memo(function MessageView({
   }
 
   const thinkingNow = message.pending && !!message.reasoning && !message.content;
+  const steps = message.steps ?? [];
+  const lookingNow = message.pending && !message.content && steps.length > 0;
   const notes = [
     message.stopped ? 'Stopped' : undefined,
     message.cutOff ? 'Stopped at the length limit' : undefined,
@@ -499,8 +504,24 @@ const MessageView = memo(function MessageView({
           </ThemedText>
         </View>
       ) : null}
+      {steps.length ? (
+        <Pressable onPress={() => setShowSteps((s) => !s)} style={styles.thinkingRow}>
+          <ThemedText type="small" themeColor="textSecondary" style={styles.caption}>
+            {lookingNow ? `${steps.at(-1)!.label}…` : `Looked at the server (${steps.length})`} {showSteps ? '▾' : '▸'}
+          </ThemedText>
+        </Pressable>
+      ) : null}
+      {showSteps && steps.length ? (
+        <View style={[styles.reasoning, { borderLeftColor: theme.backgroundSelected }]}>
+          {steps.map((step, i) => (
+            <ThemedText key={i} type="small" themeColor="textSecondary" style={styles.caption}>
+              {step.label}
+            </ThemedText>
+          ))}
+        </View>
+      ) : null}
       {message.content ? <Markdown text={message.content} /> : null}
-      {message.pending && !message.content && !thinkingNow ? (
+      {message.pending && !message.content && !thinkingNow && !lookingNow ? (
         <ThemedText themeColor="textSecondary">{status ?? '…'}</ThemedText>
       ) : null}
       {message.error ? <ThemedText style={{ color: theme.danger }}>{message.error}</ThemedText> : null}
