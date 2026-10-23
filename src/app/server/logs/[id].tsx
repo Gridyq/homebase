@@ -1,6 +1,6 @@
 import { Stack, useLocalSearchParams } from 'expo-router';
-import { useState } from 'react';
-import { FlatList, Share, StyleSheet, View } from 'react-native';
+import { useRef, useState } from 'react';
+import { FlatList, type NativeScrollEvent, type NativeSyntheticEvent, Share, StyleSheet, View } from 'react-native';
 
 import { ThemedText } from '@/components/themed-text';
 import { Fonts, Spacing } from '@/constants/theme';
@@ -15,6 +15,8 @@ import { usePolling } from '@/miniapps/server/use-polling';
 const POLL_MS = 3000;
 /** Older lines drop off the top past this, so a chatty service doesn't grow the list forever. */
 const KEPT = 1500;
+/** How close to the bottom still counts as following along. */
+const FOLLOW_SLACK = 48;
 
 type Filter = 'all' | 'problems';
 
@@ -41,7 +43,12 @@ export default function LogsScreen() {
   const [filter, setFilter] = useState<Filter>('all');
   const [paused, setPaused] = useState(false);
   const [lines, setLines] = useState<LogLine[]>([]);
+  // How many lines have dropped off the top, so each line keeps the same key as the list trims.
+  const [dropped, setDropped] = useState(0);
   const [cursor, setCursor] = useState<string>();
+  const list = useRef<FlatList<LogLine>>(null);
+  // Starts true so the first page opens at the newest line; scrolling up to read stops the follow.
+  const following = useRef(true);
 
   const key = `${conn.url}|${id}|${filter}`;
   const { data, error, refresh } = usePolling(
@@ -57,11 +64,16 @@ export default function LogsScreen() {
   if (prevKey !== key) {
     setPrevKey(key);
     setLines([]);
+    setDropped(0);
     setCursor(undefined);
     setSeen(undefined);
   } else if (data && data !== seen) {
     setSeen(data);
-    if (data.lines.length) setLines((prev) => [...prev, ...data.lines].slice(-KEPT));
+    if (data.lines.length) {
+      const all = [...lines, ...data.lines];
+      setLines(all.slice(-KEPT));
+      setDropped(dropped + Math.max(0, all.length - KEPT));
+    }
     if (data.cursor) setCursor(data.cursor);
   }
 
@@ -120,14 +132,25 @@ export default function LogsScreen() {
     <>
       {header}
       <FlatList
-        // Inverted so it opens at the newest line and stays there as more arrive.
-        inverted
-        data={[...lines].reverse()}
-        keyExtractor={(l, i) => `${l.at}-${lines.length - i}`}
+        // Not `inverted`: iOS 26 draws the header's scroll-edge dimming on a flipped list's far
+        // edge, tinting the whole screen. Instead, stay pinned to the bottom while following.
+        ref={list}
+        data={lines}
+        keyExtractor={(_, i) => String(dropped + i)}
+        contentInsetAdjustmentBehavior="automatic"
         style={{ backgroundColor: theme.background }}
         contentContainerStyle={[styles.content, gutter]}
-        maintainVisibleContentPosition={{ minIndexForVisible: 1, autoscrollToTopThreshold: 48 }}
-        ListFooterComponent={top}
+        // Keeps what you're reading still when old lines drop off the top.
+        maintainVisibleContentPosition={{ minIndexForVisible: 0 }}
+        onScroll={({ nativeEvent: e }: NativeSyntheticEvent<NativeScrollEvent>) => {
+          following.current =
+            e.contentOffset.y + e.layoutMeasurement.height >= e.contentSize.height - FOLLOW_SLACK;
+        }}
+        scrollEventThrottle={100}
+        onContentSizeChange={() => {
+          if (following.current) list.current?.scrollToEnd({ animated: false });
+        }}
+        ListHeaderComponent={top}
         ListEmptyComponent={
           <ThemedText type="small" themeColor="textSecondary" style={styles.empty}>
             {filter === 'problems' ? 'Nothing that looks like a problem lately.' : 'This service hasn’t written anything yet.'}
