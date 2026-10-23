@@ -1,14 +1,17 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
 type AsyncState<T> = {
-  /** Last loaded value; kept while reloading so pull-to-refresh doesn't blank the screen. */
+  /**
+   * Last loaded value for this `key`; kept while reloading so pull-to-refresh doesn't blank the
+   * screen, but dropped when `key` changes so one key's data never shows under another.
+   */
   data: T | undefined;
   error: Error | undefined;
   loading: boolean;
   reload: () => void;
 };
 
-type Result<T> = { request: object; data?: T; error?: Error };
+type Result<T> = { request: object; key: string; data?: T; error?: Error };
 
 /** Run an async loader whenever `key` changes; stale results are dropped. */
 export function useAsync<T>(load: () => Promise<T>, key: string): AsyncState<T> {
@@ -22,10 +25,15 @@ export function useAsync<T>(load: () => Promise<T>, key: string): AsyncState<T> 
   useEffect(() => {
     let cancelled = false;
     load().then(
-      (data) => !cancelled && setResult({ request, data }),
+      (data) => !cancelled && setResult({ request, key, data }),
       (e: unknown) =>
         !cancelled &&
-        setResult((prev) => ({ request, data: prev?.data, error: e instanceof Error ? e : new Error(String(e)) })),
+        setResult((prev) => ({
+          request,
+          key,
+          data: prev?.key === key ? prev.data : undefined,
+          error: e instanceof Error ? e : new Error(String(e)),
+        })),
     );
     return () => {
       cancelled = true;
@@ -36,7 +44,7 @@ export function useAsync<T>(load: () => Promise<T>, key: string): AsyncState<T> 
   const reload = useCallback(() => setNonce((n) => n + 1), []);
   const current = result?.request === request;
   return {
-    data: result?.data,
+    data: result?.key === key ? result.data : undefined,
     error: current ? result?.error : undefined,
     loading: !current,
     reload,

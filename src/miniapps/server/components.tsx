@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { ActivityIndicator, Pressable, StyleSheet, View, type GestureResponderEvent } from 'react-native';
+import { ActivityIndicator, Pressable, RefreshControl, StyleSheet, View, type GestureResponderEvent } from 'react-native';
 
 import { ThemedText } from '@/components/themed-text';
 import { Spacing } from '@/constants/theme';
@@ -22,6 +22,49 @@ const SeriesColors = {
 
 export function useSeriesColors() {
   return SeriesColors[useColorScheme() === 'dark' ? 'dark' : 'light'];
+}
+
+/** What a disk is called on screen: the root filesystem is the system disk. */
+export const diskName = (mount: string) => (mount === '/' ? 'System' : mount);
+
+/**
+ * What a polled list shows besides its rows: a spinner before the first answer, the error with
+ * a way to try again when there's nothing to show, or a note that what's shown is old.
+ */
+export function PollStatus({ error, loaded, onRetry }: { error?: Error; loaded: boolean; onRetry: () => void }) {
+  const theme = useTheme();
+  if (!loaded && !error) return <ActivityIndicator style={styles.pollSpinner} />;
+  if (!error) return null;
+  if (loaded) {
+    return (
+      <ThemedText type="small" style={{ color: theme.danger }}>
+        {error.message} Showing the last list.
+      </ThemedText>
+    );
+  }
+  return (
+    <ThemedText themeColor="textSecondary">
+      {error.message}{' '}
+      <ThemedText style={{ color: theme.accent }} onPress={onRetry}>
+        Try again
+      </ThemedText>
+    </ThemedText>
+  );
+}
+
+/** Pull-to-refresh that spins until every load it starts has finished. */
+export function usePullToRefresh(...refreshes: (() => Promise<unknown>)[]) {
+  const [pulled, setPulled] = useState(false);
+  return (
+    <RefreshControl
+      refreshing={pulled}
+      onRefresh={async () => {
+        setPulled(true);
+        await Promise.allSettled(refreshes.map((r) => r()));
+        setPulled(false);
+      }}
+    />
+  );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -455,6 +498,9 @@ const styles = StyleSheet.create({
   section: {
     gap: Spacing.two,
     marginTop: Spacing.two,
+  },
+  pollSpinner: {
+    paddingVertical: Spacing.two,
   },
   sectionTitle: {
     fontSize: 20,
