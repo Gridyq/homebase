@@ -1,6 +1,6 @@
 import { router, Stack } from 'expo-router';
 import { useState } from 'react';
-import { Alert, RefreshControl, ScrollView, StyleSheet, Switch, View } from 'react-native';
+import { Alert, Pressable, RefreshControl, ScrollView, StyleSheet, Switch, View } from 'react-native';
 
 import { Button } from '@/components/button';
 import { ThemedText } from '@/components/themed-text';
@@ -29,6 +29,8 @@ import { usePolling } from '@/miniapps/server/use-polling';
 
 const POLL_MS = 3000;
 const HOT_CELSIUS = 80;
+/** The drive the storage screen breaks down. */
+const MEDIA_MOUNT = '/mnt/media';
 
 export default function ServerDashboard() {
   const { connection } = useServerConnection();
@@ -168,6 +170,8 @@ function Dashboard() {
             <NavRow title="Graphics card" caption="Engines, memory, heat, power and programs" onPress={() => router.push('/server/gpu')} />
           ) : null}
           <NavRow title="Trends" caption="CPU, memory, network and heat over the last day" onPress={() => router.push('/server/trends')} />
+          <NavRow title="Media drive" caption="What's taking up space, by show and download" onPress={() => router.push('/server/storage')} />
+          <NavRow title="Tailscale" caption="Devices on the tailnet and how they connect" onPress={() => router.push('/server/tailscale')} />
         </Card>
       </Section>
 
@@ -175,18 +179,24 @@ function Dashboard() {
         <Card>
           {data.disks.map((d, i) => {
             const used = d.usedBytes / d.totalBytes;
+            const media = d.mount === MEDIA_MOUNT;
             return (
-              <View key={d.mount} style={[styles.disk, i > 0 && styles.diskGap]}>
+              <Pressable
+                key={d.mount}
+                disabled={!media}
+                onPress={() => router.push('/server/storage')}
+                style={({ pressed }) => [styles.disk, i > 0 && styles.diskGap, { opacity: pressed ? 0.6 : 1 }]}>
                 <View style={styles.diskLine}>
                   <ThemedText type="smallBold" style={styles.flex} numberOfLines={1}>
                     {diskName(d.mount)}
                   </ThemedText>
                   <ThemedText type="small" themeColor="textSecondary">
                     {formatBytes(d.availableBytes)} free of {formatBytes(d.totalBytes)}
+                    {media ? '  ›' : ''}
                   </ThemedText>
                 </View>
                 <Meter fraction={used} color={levelColor(used, theme.danger)} />
-              </View>
+              </Pressable>
             );
           })}
         </Card>
