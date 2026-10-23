@@ -25,7 +25,7 @@
  */
 import { execFile, spawn } from 'node:child_process';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { constants, createWriteStream } from 'node:fs';
+import { constants, createWriteStream, readdirSync, readFileSync, readlinkSync } from 'node:fs';
 import { appendFile, link, mkdir, open, readdir, readFile, readlink, realpath, rename, rm, stat, statfs, unlink, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import os from 'node:os';
@@ -367,17 +367,38 @@ const CLOCK_TICKS = 100;
 const PAGE_SIZE = 4096;
 
 /**
+ * /proc and /sys files are made on the spot from kernel memory, so reading one takes
+ * microseconds. Read asynchronously, each costs a trip through libuv's four threads, which made
+ * reading the ~1500 a process list needs take 60-80 ms instead of ~11 ms.
+ */
+function readKernelFile(file) {
+  try {
+    return readFileSync(file, 'utf8');
+  } catch {
+    return undefined;
+  }
+}
+
+function readKernelDir(dir) {
+  try {
+    return readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+}
+
+/**
  * Services and scopes, as paths relative to the cgroup root. A unit's own sub-groups (a
  * terminal's tabs, a container's payload) count toward it; only a user manager, which holds
  * slices of its own, is looked into.
  */
-async function leafGroups(dir = '') {
-  const entries = await readdir(path.join(CGROUP_ROOT, dir), { withFileTypes: true }).catch(() => []);
+function leafGroups(dir = '') {
+  const entries = readKernelDir(path.join(CGROUP_ROOT, dir));
   const children = entries.filter((e) => e.isDirectory() && /\.(slice|service|scope)$/.test(e.name));
   const isUnit = /\.(service|scope)$/.test(dir);
   if (isUnit && !children.some((c) => c.name.endsWith('.slice'))) return [dir];
   if (dir && !children.length) return [];
-  return (await Promise.all(children.map((c) => leafGroups(path.join(dir, c.name))))).flat();
+  return children.flatMap((c) => leafGroups(path.join(dir, c.name)));
 }
 
 function statFields(text) {
@@ -390,15 +411,14 @@ function statFields(text) {
   );
 }
 
-async function readGroup(dir) {
+function readGroup(dir) {
   const base = path.join(CGROUP_ROOT, dir);
-  const [current, memStat, cpuStat, ioStat] = await Promise.all([
-    readNumber(`${base}/memory.current`),
-    readFile(`${base}/memory.stat`, 'utf8').catch(() => ''),
-    readFile(`${base}/cpu.stat`, 'utf8').catch(() => ''),
-    readFile(`${base}/io.stat`, 'utf8').catch(() => ''),
-  ]);
-  if (current === undefined) return undefined;
+  const currentText = readKernelFile(`${base}/memory.current`);
+  if (currentText === undefined) return undefined;
+  const current = Number(currentText.trim());
+  const memStat = readKernelFile(`${base}/memory.stat`) ?? '';
+  const cpuStat = readKernelFile(`${base}/cpu.stat`) ?? '';
+  const ioStat = readKernelFile(`${base}/io.stat`) ?? '';
   const mem = statFields(memStat);
   const cpu = statFields(cpuStat);
   let read = 0;
@@ -453,7 +473,7 @@ let groupRates = new Map();
  */
 async function groupUsage() {
   const now = Date.now();
-  const groups = (await Promise.all((await leafGroups()).map(readGroup))).filter(Boolean);
+  const groups = leafGroups().map(readGroup).filter(Boolean);
   if (!lastGroups || now - lastGroups.at >= 1000) {
     if (lastGroups) {
       const secs = (now - lastGroups.at) / 1000;
@@ -567,36 +587,29 @@ let lastProcs;
 /** Processes using the most memory or CPU, with CPU measured since the previous call. */
 async function processes() {
   const now = Date.now();
-  const pids = (await readdir('/proc')).filter((p) => /^\d+$/.test(p));
-  const list = (
-    await Promise.all(
-      pids.map(async (pid) => {
-        try {
-          const [stat, cgroup, cmdline] = await Promise.all([
-            readFile(`/proc/${pid}/stat`, 'utf8'),
-            readFile(`/proc/${pid}/cgroup`, 'utf8'),
-            readFile(`/proc/${pid}/cmdline`, 'utf8'),
-          ]);
-          // The name sits in parentheses and can itself contain spaces or parentheses.
-          const close = stat.lastIndexOf(')');
-          const f = stat.slice(close + 2).split(' ');
-          const rss = Number(f[21]) * PAGE_SIZE;
-          if (!rss) return undefined; // Kernel threads.
-          return {
-            pid: Number(pid),
-            name: stat.slice(stat.indexOf('(') + 1, close),
-            command: cmdline.replace(/\0+$/, '').replace(/\0/g, ' ').slice(0, 300),
-            group: /^0::\/(.*)$/m.exec(cgroup)?.[1],
-            key: `${pid}:${f[19]}`,
-            ticks: Number(f[11]) + Number(f[12]),
-            rssBytes: rss,
-          };
-        } catch {
-          return undefined; // Exited while we looked.
-        }
-      }),
-    )
-  ).filter(Boolean);
+  const pids = readKernelDir('/proc').filter((e) => /^\d+$/.test(e.name)).map((e) => e.name);
+  const list = pids
+    .map((pid) => {
+      const stat = readKernelFile(`/proc/${pid}/stat`);
+      const cgroup = readKernelFile(`/proc/${pid}/cgroup`);
+      const cmdline = readKernelFile(`/proc/${pid}/cmdline`);
+      if (stat === undefined || cgroup === undefined || cmdline === undefined) return undefined; // Exited while we looked.
+      // The name sits in parentheses and can itself contain spaces or parentheses.
+      const close = stat.lastIndexOf(')');
+      const f = stat.slice(close + 2).split(' ');
+      const rss = Number(f[21]) * PAGE_SIZE;
+      if (!rss) return undefined; // Kernel threads.
+      return {
+        pid: Number(pid),
+        name: stat.slice(stat.indexOf('(') + 1, close),
+        command: cmdline.replace(/\0+$/, '').replace(/\0/g, ' ').slice(0, 300),
+        group: /^0::\/(.*)$/m.exec(cgroup)?.[1],
+        key: `${pid}:${f[19]}`,
+        ticks: Number(f[11]) + Number(f[12]),
+        rssBytes: rss,
+      };
+    })
+    .filter(Boolean);
 
   const prev = lastProcs && now - lastProcs.at < 5 * 60_000 ? lastProcs : undefined;
   lastProcs = { at: now, ticks: new Map(list.map((p) => [p.key, p.ticks])) };
@@ -702,41 +715,69 @@ const ENGINE_LABELS = { gfx: '3D', compute: 'Compute', dec: 'Video decode', enc:
 let lastGpuClients;
 
 /**
+ * Which files of which processes are the card, by pid. Finding them means looking at all ~5000
+ * open files on the machine (~25 ms), so only new processes are looked at each time, which
+ * catches a transcode as it starts, and all of them every CARD_FILES_RESCAN_MS, which catches
+ * a program that opens the card some time after starting.
+ */
+const CARD_FILES_RESCAN_MS = 30_000;
+let cardFilesAt = 0;
+let cardFilesByPid = new Map();
+
+function cardFiles() {
+  const full = Date.now() - cardFilesAt >= CARD_FILES_RESCAN_MS;
+  const next = new Map();
+  for (const e of readKernelDir('/proc')) {
+    const pid = e.name;
+    if (!/^\d+$/.test(pid)) continue;
+    if (!full && cardFilesByPid.has(pid)) {
+      next.set(pid, cardFilesByPid.get(pid));
+      continue;
+    }
+    const fds = [];
+    for (const fd of readKernelDir(`/proc/${pid}/fd`)) {
+      try {
+        if (readlinkSync(`/proc/${pid}/fd/${fd.name}`).startsWith('/dev/dri/')) fds.push(fd.name);
+      } catch {} // Closed while we looked.
+    }
+    next.set(pid, fds);
+  }
+  cardFilesByPid = next;
+  if (full) cardFilesAt = Date.now();
+  return [...next].filter(([, fds]) => fds.length);
+}
+
+/**
  * Programs with the card open, from the DRM fdinfo the kernel keeps per open file: the memory
  * each holds and the time each engine spent on its work, turned into a share since the previous
  * call. Only our own processes are readable, which covers the containers since they're rootless.
  */
 async function gpuClients(slot) {
   const now = Date.now();
-  const pids = (await readdir('/proc')).filter((p) => /^\d+$/.test(p));
   const clients = new Map();
-  await Promise.all(
-    pids.map(async (pid) => {
-      try {
-        const fds = await readdir(`/proc/${pid}/fd`);
-        const links = await Promise.all(fds.map((fd) => readlink(`/proc/${pid}/fd/${fd}`).catch(() => '')));
-        for (const [i, link] of links.entries()) {
-          if (!link.startsWith('/dev/dri/')) continue;
-          const info = await readFile(`/proc/${pid}/fdinfo/${fds[i]}`, 'utf8');
-          const fields = Object.fromEntries([...info.matchAll(/^([\w-]+):\s+(.*)$/gm)].map((m) => [m[1], m[2].trim()]));
-          const id = fields['drm-client-id'];
-          if (!id || fields['drm-pdev'] !== slot || clients.has(id)) continue;
-          const kib = (k) => Number.parseInt(fields[k] ?? '0', 10) * 1024;
-          const engines = {};
-          for (const [k, v] of Object.entries(fields)) {
-            const e = /^drm-engine-(?!capacity)(.+)$/.exec(k);
-            if (e) engines[e[1]] = Number.parseInt(v, 10) / (Number(fields[`drm-engine-capacity-${e[1]}`]) || 1);
-          }
-          clients.set(id, {
-            pid: Number(pid),
-            vramBytes: kib('drm-memory-vram') || kib('drm-total-vram'),
-            gttBytes: kib('drm-memory-gtt') || kib('drm-total-gtt'),
-            engines,
-          });
-        }
-      } catch {} // Exited, or someone else's.
-    }),
-  );
+  for (const [pid, fds] of cardFiles()) {
+    for (const fd of fds) {
+      // Gone if it exited or closed the card; someone else's isn't readable. An fd number taken
+      // since by another file has no client id.
+      const info = readKernelFile(`/proc/${pid}/fdinfo/${fd}`);
+      if (!info) continue;
+      const fields = Object.fromEntries([...info.matchAll(/^([\w-]+):\s+(.*)$/gm)].map((m) => [m[1], m[2].trim()]));
+      const id = fields['drm-client-id'];
+      if (!id || fields['drm-pdev'] !== slot || clients.has(id)) continue;
+      const kib = (k) => Number.parseInt(fields[k] ?? '0', 10) * 1024;
+      const engines = {};
+      for (const [k, v] of Object.entries(fields)) {
+        const e = /^drm-engine-(?!capacity)(.+)$/.exec(k);
+        if (e) engines[e[1]] = Number.parseInt(v, 10) / (Number(fields[`drm-engine-capacity-${e[1]}`]) || 1);
+      }
+      clients.set(id, {
+        pid: Number(pid),
+        vramBytes: kib('drm-memory-vram') || kib('drm-total-vram'),
+        gttBytes: kib('drm-memory-gtt') || kib('drm-total-gtt'),
+        engines,
+      });
+    }
+  }
 
   const prev = lastGpuClients && now - lastGpuClients.at < 5 * 60_000 ? lastGpuClients : undefined;
   lastGpuClients = { at: now, clients };
@@ -824,10 +865,20 @@ async function gpu() {
 
 const UNIT_PROPS = ['ActiveState', 'SubState', 'Result', 'ActiveEnterTimestamp', 'LastTriggerUSec', 'NextElapseUSecRealtime', 'NRestarts'];
 
+/** `systemctl show` readings by its arguments, since each takes ~10 ms. */
+const unitReadings = new Map();
+
 async function showUnits(units, system) {
   if (!units.length) return {};
   const args = [...(system ? [] : ['--user']), 'show', '--timestamp=unix', `--property=${UNIT_PROPS.join(',')}`, ...units];
-  const { stdout } = await run('systemctl', args);
+  const key = args.join(' ');
+  if (!unitReadings.has(key)) {
+    unitReadings.set(
+      key,
+      backgroundRefreshed(async () => (await run('systemctl', args)).stdout, { staleMs: 2000, maxAgeMs: 10_000, label: 'systemctl show' }),
+    );
+  }
+  const stdout = await unitReadings.get(key).get();
   // One block per unit, in the order asked, separated by blank lines.
   const blocks = stdout.trim().split(/\n\n+/);
   return Object.fromEntries(
@@ -872,13 +923,72 @@ async function quadlets() {
   );
 }
 
+/**
+ * A reading that's slow to take and asked for every few seconds. One younger than `staleMs` is
+ * answered as is, and one younger than `maxAgeMs` is answered while a fresh one is taken in the
+ * background. After changing what it reads, `expire` makes the next call wait for a fresh one.
+ */
+function backgroundRefreshed(take, { staleMs, maxAgeMs, label }) {
+  let value;
+  let at = 0;
+  let pending;
+  // Bumped on expiry, so a reading that started before a change isn't kept as fresh.
+  let generation = 0;
+
+  function refresh() {
+    if (pending) return pending;
+    const started = generation;
+    const reading = take()
+      .then((v) => {
+        if (started === generation) {
+          value = v;
+          at = Date.now();
+        }
+        return v;
+      })
+      .finally(() => {
+        if (pending === reading) pending = undefined;
+      });
+    pending = reading;
+    return reading;
+  }
+
+  return {
+    async get() {
+      const age = Date.now() - at;
+      if (age >= maxAgeMs) return refresh();
+      if (age >= staleMs) refresh().catch((e) => console.error(`${label} failed:`, e.message));
+      return value;
+    },
+    refresh,
+    expire() {
+      generation++;
+      at = 0;
+      pending = undefined;
+    },
+  };
+}
+
 /** The last list, for readings that need a container's process without asking Podman again. */
 let lastPods = [];
 
-async function containers() {
-  const { stdout } = await run('podman', ['ps', '--all', '--format', 'json']);
-  lastPods = JSON.parse(stdout || '[]');
-  return lastPods;
+/** `podman ps` takes ~60 ms, and most screens ask for it every few seconds. */
+const containerList = backgroundRefreshed(
+  async () => {
+    const { stdout } = await run('podman', ['ps', '--all', '--format', 'json']);
+    lastPods = JSON.parse(stdout || '[]');
+    return lastPods;
+  },
+  { staleMs: 2000, maxAgeMs: 10_000, label: 'podman ps' },
+);
+
+const containers = () => containerList.get();
+
+/** After starting or stopping something, so the next look waits for what it's doing now. */
+function expireServices() {
+  containerList.expire();
+  for (const c of unitReadings.values()) c.expire();
+  unitReadings.clear();
 }
 
 /** Everything the dashboard lists, with what each one can do. */
@@ -1001,10 +1111,18 @@ async function startContainerUnit(name, restart) {
 
 async function performAction(id, action) {
   intents.set(id, { by: 'you', at: Date.now() });
+  try {
+    await changeService(id, action);
+  } finally {
+    expireServices();
+  }
+}
+
+async function changeService(id, action) {
   const [kind, name] = [id.slice(0, id.indexOf(':')), id.slice(id.indexOf(':') + 1)];
   if (kind === 'container') {
     if (!['start', 'stop', 'restart'].includes(action)) throw new HttpError(400, `Can't ${action} a container`);
-    const pod = (await containers()).find((p) => p.Names?.includes(name));
+    const pod = (await containerList.refresh()).find((p) => p.Names?.includes(name));
     if (!pod) {
       // A stopped Quadlet container no longer exists; its unit creates it again.
       const q = (await quadlets()).find((x) => x.name === name);
@@ -2240,7 +2358,7 @@ let gameModeBusy = Promise.resolve();
 const GAME_MODE_UNIT_FILES = GAME_MODE_UNITS.map((u) => `${u}.service`);
 
 async function stopGameModeUnits() {
-  await run('systemctl', ['--user', 'stop', ...GAME_MODE_UNIT_FILES], { timeout: 180_000 });
+  await run('systemctl', ['--user', 'stop', ...GAME_MODE_UNIT_FILES], { timeout: 180_000 }).finally(expireServices);
   // Some exit with an error when stopped (gluetun with 1); that's not a failure worth showing.
   await run('systemctl', ['--user', 'reset-failed', ...GAME_MODE_UNIT_FILES]).catch(() => {});
 }
@@ -2605,22 +2723,28 @@ async function tdarr(apiPath, body) {
 
 const tdarrFile = (file) => ({ file: path.basename(file, path.extname(file)), show: file.startsWith('/data/Shows/') });
 
-/** The file list carries every file's full probe, so it's fetched at most every 15 s. */
+/**
+ * The file list carries every file's full probe and takes ~180 ms, so it's fetched at most every
+ * 15 s, in the background while the last one is under 5 minutes old.
+ */
 const TDARR_FILES_TTL_MS = 15_000;
-let tdarrFiles;
+const TDARR_FILES_MAX_AGE_MS = 5 * 60_000;
+const tdarrFiles = backgroundRefreshed(() => tdarr('cruddb', { data: { collection: 'FileJSONDB', mode: 'getAll' } }), {
+  staleMs: TDARR_FILES_TTL_MS,
+  maxAgeMs: TDARR_FILES_MAX_AGE_MS,
+  label: "Listing Tdarr's files",
+});
 
 async function conversions() {
-  if (!tdarrFiles || Date.now() - tdarrFiles.at > TDARR_FILES_TTL_MS) {
-    const files = await tdarr('cruddb', { data: { collection: 'FileJSONDB', mode: 'getAll' } });
-    tdarrFiles = { at: Date.now(), files };
-  }
+  // First, so game mode and an unreachable Tdarr fail here rather than in the background.
   const nodes = Object.values((await tdarr('get-nodes')) ?? {});
+  const files = await tdarrFiles.get();
 
   const counts = { queued: 0, done: 0, skipped: 0, failed: 0 };
   const done = [];
   const failed = [];
   let savedBytes = 0;
-  for (const f of tdarrFiles.files) {
+  for (const f of files) {
     const state = f.TranscodeDecisionMaker;
     if (state === 'Queued') counts.queued++;
     else if (state === 'Not required') counts.skipped++;
