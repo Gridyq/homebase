@@ -7,6 +7,7 @@ import { ThemedText } from '@/components/themed-text';
 import { Spacing } from '@/constants/theme';
 import { useGutter } from '@/hooks/use-gutter';
 import { useTheme } from '@/hooks/use-theme';
+import { errorText } from '@/utils/error-text';
 
 import {
   JellyfinError,
@@ -23,7 +24,6 @@ import { playOnDevice } from './remote-play';
 import { useIsAdmin, useJellyfin } from './session';
 import { useAsync } from './use-async';
 
-const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 /** Ask which playlist to add an item to (or to start a new one), then add it. */
 export async function addToPlaylist(client: JellyfinClient, item: BaseItem) {

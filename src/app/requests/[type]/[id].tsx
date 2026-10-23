@@ -5,10 +5,11 @@ import { ActionSheetIOS, Alert, Pressable, ScrollView, StyleSheet, useWindowDime
 
 import { Button } from '@/components/button';
 import { ThemedText } from '@/components/themed-text';
+import { Centered } from '@/components/centered';
 import { Spacing } from '@/constants/theme';
 import { useGutter } from '@/hooks/use-gutter';
 import { useTheme } from '@/hooks/use-theme';
-import { Centered } from '@/miniapps/jellyfin/components';
+
 import { useAsync } from '@/miniapps/jellyfin/use-async';
 import {
   details,
@@ -26,6 +27,7 @@ import { statusBadge, StatusPill } from '@/miniapps/requests/components';
 import type { Connection } from '@/miniapps/server/api';
 import { Card } from '@/miniapps/server/components';
 import { useServerConnection } from '@/miniapps/server/connection';
+import { errorText } from '@/utils/error-text';
 
 /** Seasons that are neither on the server nor already asked for. */
 const missing = (status: MediaStatus | undefined) =>
@@ -118,7 +120,7 @@ function useRequest(conn: Connection, item: Details, type: MediaType, onDone: ()
       setRequestedFrom(item);
       onDone();
     } catch (e) {
-      Alert.alert("Couldn't request it", e instanceof Error ? e.message : String(e));
+      Alert.alert("Couldn't request it", errorText(e));
     } finally {
       setSending(false);
     }

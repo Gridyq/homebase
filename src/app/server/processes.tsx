@@ -2,14 +2,16 @@ import { useState } from 'react';
 import { Alert, Pressable, ScrollView, StyleSheet, View } from 'react-native';
 
 import { ThemedText } from '@/components/themed-text';
+import { Centered } from '@/components/centered';
 import { Spacing } from '@/constants/theme';
 import { useGutter } from '@/hooks/use-gutter';
 import { useTheme } from '@/hooks/use-theme';
-import { Centered } from '@/miniapps/jellyfin/components';
+
 import { fetchProcesses, type ProcessInfo } from '@/miniapps/server/api';
-import { Card, formatBytes, formatCpu, Meter, Segmented, usePullToRefresh, useSeriesColors } from '@/miniapps/server/components';
+import { Card, Meter, Segmented, usePullToRefresh, useSeriesColors } from '@/miniapps/server/components';
 import { useServerConnection } from '@/miniapps/server/connection';
 import { usePolling } from '@/miniapps/server/use-polling';
+import { formatBytes, formatCpu } from '@/utils/format';
 
 const POLL_MS = 3000;
 const SHOWN = 30;

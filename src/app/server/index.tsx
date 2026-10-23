@@ -4,28 +4,17 @@ import { Alert, Pressable, RefreshControl, ScrollView, StyleSheet, Switch, View 
 
 import { Button } from '@/components/button';
 import { ThemedText } from '@/components/themed-text';
+import { Centered } from '@/components/centered';
 import { Spacing } from '@/constants/theme';
 import { useGutter } from '@/hooks/use-gutter';
 import { useTheme } from '@/hooks/use-theme';
-import { Centered } from '@/miniapps/jellyfin/components';
+
 import { fetchStatus, setGameMode, type Connection, type Status, type Stream } from '@/miniapps/server/api';
-import {
-  Card,
-  diskName,
-  formatBytes,
-  formatDuration,
-  formatPercent,
-  formatRate,
-  levelColor,
-  Meter,
-  NavRow,
-  Section,
-  ServiceRow,
-  StatTile,
-  StatusColors,
-} from '@/miniapps/server/components';
+import { Card, diskName, levelColor, Meter, NavRow, Section, ServiceRow, StatTile, StatusColors } from '@/miniapps/server/components';
 import { useServerConnection } from '@/miniapps/server/connection';
 import { useLive } from '@/miniapps/server/use-live';
+import { errorText } from '@/utils/error-text';
+import { formatBytes, formatDuration, formatPercent, formatRate } from '@/utils/format';
 
 const POLL_MS = 3000;
 const HOT_CELSIUS = 80;
@@ -291,7 +280,7 @@ function GameModeCard({ conn, status, onChanged }: { conn: Connection; status: S
       await setGameMode(conn, next);
       await onChanged();
     } catch (e) {
-      Alert.alert(`Couldn't turn game mode ${next ? 'on' : 'off'}`, e instanceof Error ? e.message : String(e));
+      Alert.alert(`Couldn't turn game mode ${next ? 'on' : 'off'}`, errorText(e));
     } finally {
       setPending(undefined);
     }

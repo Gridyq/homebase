@@ -4,10 +4,11 @@ import { ActionSheetIOS, ActivityIndicator, Alert, FlatList, RefreshControl, Scr
 
 import { Button } from '@/components/button';
 import { ThemedText } from '@/components/themed-text';
+import { Centered } from '@/components/centered';
 import { Spacing } from '@/constants/theme';
 import { useGutter } from '@/hooks/use-gutter';
 import { useTheme } from '@/hooks/use-theme';
-import { Centered, SectionTitle, usePosterGrid, useRowCardWidth } from '@/miniapps/jellyfin/components';
+import { SectionTitle, usePosterGrid, useRowCardWidth } from '@/miniapps/jellyfin/components';
 import { useAsync } from '@/miniapps/jellyfin/use-async';
 import {
   checkDownloads,
@@ -36,6 +37,7 @@ import { fetchGameMode, setGameMode, type Connection, type GameMode } from '@/mi
 import { Card } from '@/miniapps/server/components';
 import { useServerConnection } from '@/miniapps/server/connection';
 import { usePolling } from '@/miniapps/server/use-polling';
+import { errorText } from '@/utils/error-text';
 
 const QUEUE_POLL_MS = 5000;
 /** Conversions move slowly; the Conversions screen itself updates live. */
@@ -239,7 +241,7 @@ function Overview({ conn, data }: { conn: Connection; data: ReturnType<typeof us
           }
         } catch (e) {
           const failed = choice === 'Import anyway' ? 'import' : choice === 'Check again' ? 'check' : 'remove';
-          Alert.alert(`Couldn't ${failed} ${d.title}`, e instanceof Error ? e.message : String(e));
+          Alert.alert(`Couldn't ${failed} ${d.title}`, errorText(e));
         }
         await queue.refresh();
         setWorking((w) => {
@@ -268,7 +270,7 @@ function Overview({ conn, data }: { conn: Connection; data: ReturnType<typeof us
         try {
           await setSpeedLimit(conn, next);
         } catch (e) {
-          Alert.alert("Couldn't change the speed limit", e instanceof Error ? e.message : String(e));
+          Alert.alert("Couldn't change the speed limit", errorText(e));
         }
         await limit.refresh();
       },
@@ -306,7 +308,7 @@ function Overview({ conn, data }: { conn: Connection; data: ReturnType<typeof us
                   : { stopWhenDone: false },
           );
         } catch (e) {
-          Alert.alert("Couldn't change seeding", e instanceof Error ? e.message : String(e));
+          Alert.alert("Couldn't change seeding", errorText(e));
         }
         await seed.refresh();
       },
@@ -462,7 +464,7 @@ function GameModeNotice({ conn, gameMode, onOff }: { conn: Connection; gameMode:
       await setGameMode(conn, false);
       await onOff();
     } catch (e) {
-      Alert.alert("Couldn't turn game mode off", e instanceof Error ? e.message : String(e));
+      Alert.alert("Couldn't turn game mode off", errorText(e));
     } finally {
       setBusy(false);
     }

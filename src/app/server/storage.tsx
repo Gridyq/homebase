@@ -2,24 +2,16 @@ import { router } from 'expo-router';
 import { ScrollView, StyleSheet, View } from 'react-native';
 
 import { ThemedText } from '@/components/themed-text';
+import { Centered } from '@/components/centered';
 import { Spacing } from '@/constants/theme';
 import { useGutter } from '@/hooks/use-gutter';
 import { useTheme } from '@/hooks/use-theme';
-import { Centered } from '@/miniapps/jellyfin/components';
+
 import { fetchStorage, type StorageCategory } from '@/miniapps/server/api';
-import {
-  Card,
-  formatBytes,
-  LegendItem,
-  Meter,
-  NavRow,
-  Section,
-  StackedBar,
-  usePullToRefresh,
-  useSeriesColors,
-} from '@/miniapps/server/components';
+import { Card, LegendItem, Meter, NavRow, Section, StackedBar, usePullToRefresh, useSeriesColors } from '@/miniapps/server/components';
 import { useServerConnection } from '@/miniapps/server/connection';
 import { usePolling } from '@/miniapps/server/use-polling';
+import { formatBytes } from '@/utils/format';
 
 // Sizes change slowly, and each reading walks the whole drive.
 const POLL_MS = 60_000;

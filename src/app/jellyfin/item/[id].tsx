@@ -7,26 +7,20 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Button } from '@/components/button';
 import { ThemedText } from '@/components/themed-text';
+import { Centered } from '@/components/centered';
+import { Chip } from '@/components/chip';
 import { Spacing } from '@/constants/theme';
 import { useGutter } from '@/hooks/use-gutter';
 import { useTheme } from '@/hooks/use-theme';
 import { useReloadAfterChanges } from '@/miniapps/jellyfin/changes';
 import { TICKS_PER_SECOND, type BaseItem, type Person, type UserData } from '@/miniapps/jellyfin/api';
-import {
-  Centered,
-  Chip,
-  formatRuntime,
-  ItemRow,
-  PosterCard,
-  SectionTitle,
-  usePosterGrid,
-  useRowCardWidth,
-} from '@/miniapps/jellyfin/components';
+import { formatRuntime, ItemRow, PosterCard, SectionTitle, usePosterGrid, useRowCardWidth } from '@/miniapps/jellyfin/components';
 import { addToPlaylist, PlaylistEntries } from '@/miniapps/jellyfin/playlists';
 import { playOnDevice } from '@/miniapps/jellyfin/remote-play';
 import { useIsAdmin, useJellyfin } from '@/miniapps/jellyfin/session';
 import { defaultSubtitleIndex, subtitleLabel, subtitleStreams, SUBTITLES_OFF } from '@/miniapps/jellyfin/subtitles';
 import { useAsync } from '@/miniapps/jellyfin/use-async';
+import { errorText } from '@/utils/error-text';
 
 export default function ItemDetail() {
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -67,7 +61,7 @@ export default function ItemDetail() {
       const data = await change(item.UserData ?? {});
       setUserData((prev) => ({ base, data: { ...(prev?.base === base ? prev.data : {}), ...data } }));
     } catch (e) {
-      Alert.alert("Couldn't update", e instanceof Error ? e.message : String(e));
+      Alert.alert("Couldn't update", errorText(e));
     }
   };
   const played = !!item.UserData?.Played;

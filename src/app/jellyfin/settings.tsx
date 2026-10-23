@@ -3,14 +3,16 @@ import { Alert, ScrollView, StyleSheet, View } from 'react-native';
 
 import { Button } from '@/components/button';
 import { ThemedText } from '@/components/themed-text';
+import { Chip } from '@/components/chip';
 import { Spacing } from '@/constants/theme';
 import { useGutter } from '@/hooks/use-gutter';
 import { useTheme } from '@/hooks/use-theme';
 import type { User } from '@/miniapps/jellyfin/api';
-import { Chip } from '@/miniapps/jellyfin/components';
+
 import { useIsAdmin, useJellyfin, useJellyfinSession } from '@/miniapps/jellyfin/session';
 import { BITRATE_OPTIONS, useJellyfinSettings } from '@/miniapps/jellyfin/settings';
 import { useAsync } from '@/miniapps/jellyfin/use-async';
+import { errorText } from '@/utils/error-text';
 
 export default function JellyfinSettings() {
   const client = useJellyfin();
@@ -99,7 +101,7 @@ function AutoplaySection() {
     try {
       await Promise.all(targets.map((u) => client.setAutoplay(u, enabled)));
     } catch (e) {
-      Alert.alert("Couldn't change autoplay", e instanceof Error ? e.message : String(e));
+      Alert.alert("Couldn't change autoplay", errorText(e));
     }
     reload();
   };

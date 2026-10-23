@@ -1,16 +1,14 @@
 import { ScrollView, StyleSheet, View } from 'react-native';
 
 import { ThemedText } from '@/components/themed-text';
+import { Centered } from '@/components/centered';
 import { Spacing } from '@/constants/theme';
 import { useGutter } from '@/hooks/use-gutter';
 import { useTheme } from '@/hooks/use-theme';
-import { Centered } from '@/miniapps/jellyfin/components';
+
 import { fetchGpu, fetchHistory, type GpuClient, type GpuReport } from '@/miniapps/server/api';
 import {
   Card,
-  formatBytes,
-  formatCpu,
-  formatPercent,
   levelColor,
   Meter,
   Section,
@@ -23,6 +21,7 @@ import {
 import { useServerConnection } from '@/miniapps/server/connection';
 import { HistoryNote, RANGES, TrendCard } from '@/miniapps/server/trends';
 import { usePolling, useRangedPolling } from '@/miniapps/server/use-polling';
+import { formatBytes, formatCpu, formatPercent } from '@/utils/format';
 
 const POLL_MS = 3000;
 const HISTORY_POLL_MS = 30_000;

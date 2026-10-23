@@ -1,16 +1,8 @@
-import { router, Stack } from 'expo-router';
+import { Stack } from 'expo-router';
 
-import { Centered } from '@/miniapps/jellyfin/components';
+import { backToLauncher } from '@/components/back-to-launcher';
+import { Centered } from '@/components/centered';
 import { useServerConnection } from '@/miniapps/server/connection';
-
-// See src/app/jellyfin/_layout.tsx: a native toolbar button renders as a round Liquid Glass icon.
-const backToLauncher = (
-  <Stack.Toolbar placement="left">
-    <Stack.Toolbar.Button icon="chevron.left" onPress={() => router.dismissTo('/')}>
-      Apps
-    </Stack.Toolbar.Button>
-  </Stack.Toolbar>
-);
 
 // Drop goes through the home server's status service, so this shares the Server mini-app's
 // connection.

@@ -9,9 +9,10 @@ import { useGutter } from '@/hooks/use-gutter';
 import { useTheme } from '@/hooks/use-theme';
 import { assistantState, deleteChat, listChats, newChatId, type ChatSummary } from '@/miniapps/assistant/api';
 import { type Connection } from '@/miniapps/server/api';
-import { Card, formatWhen, PollStatus } from '@/miniapps/server/components';
+import { Card, PollStatus } from '@/miniapps/server/components';
 import { useServerConnection } from '@/miniapps/server/connection';
 import { usePolling } from '@/miniapps/server/use-polling';
+import { formatWhen } from '@/utils/format';
 
 const POLL_MS = 10_000;
 

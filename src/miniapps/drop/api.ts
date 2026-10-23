@@ -2,6 +2,7 @@ import { requireOptionalNativeModule } from 'expo';
 import { Directory, File, Paths } from 'expo-file-system';
 
 import { refused, request, unreachable, type Connection } from '@/miniapps/server/api';
+import { errorText } from '@/utils/error-text';
 
 /**
  * The status server's Drop endpoints. Files sent from the phone land in a folder on the PC
@@ -29,7 +30,6 @@ export function deleteDropFile(conn: Connection, name: string) {
 
 const fileUrl = (name: string) => `/api/drop/files/${encodeURIComponent(name)}`;
 const auth = (conn: Connection) => ({ Authorization: `Bearer ${conn.token}` });
-const reason = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 /** Resolves to the name it was saved under, which gets " (2)" when the name was taken. */
 export async function uploadFile(conn: Connection, file: File, name: string, onProgress: (fraction: number) => void) {
@@ -42,7 +42,7 @@ export async function uploadFile(conn: Connection, file: File, name: string, onP
       onProgress: ({ bytesSent, totalBytes }) => totalBytes > 0 && onProgress(Number(bytesSent) / Number(totalBytes)),
     });
   } catch (e) {
-    throw unreachable(conn, reason(e));
+    throw unreachable(conn, errorText(e));
   }
   let body: { name?: string; error?: string } | undefined;
   try {
@@ -64,7 +64,7 @@ export async function downloadFile(conn: Connection, name: string, onProgress: (
         totalBytes > 0 && onProgress(Number(bytesWritten) / Number(totalBytes)),
     });
   } catch (e) {
-    throw new Error(`Couldn't download ${name} (${reason(e)}).`);
+    throw new Error(`Couldn't download ${name} (${errorText(e)}).`);
   }
 }
 

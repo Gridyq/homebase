@@ -23,6 +23,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Button } from '@/components/button';
 import { ThemedText } from '@/components/themed-text';
+import { Centered } from '@/components/centered';
 import { Spacing } from '@/constants/theme';
 import { useGutter } from '@/hooks/use-gutter';
 import { useTheme } from '@/hooks/use-theme';
@@ -43,9 +44,10 @@ import {
 } from '@/miniapps/assistant/api';
 import { Markdown } from '@/miniapps/assistant/markdown';
 import { sendText } from '@/miniapps/drop/api';
-import { Centered } from '@/miniapps/jellyfin/components';
+
 import { type Connection } from '@/miniapps/server/api';
 import { useServerConnection } from '@/miniapps/server/connection';
+import { errorText } from '@/utils/error-text';
 
 /** How often to look again while the server writes an answer this screen isn't streaming. */
 const CATCH_UP_MS = 1000;
@@ -216,7 +218,7 @@ function ChatView({ conn, id }: { conn: Connection; id: string }) {
         if (!saved) setChat(before);
         setText(question);
         setAttachments(unsent);
-        Alert.alert('Couldn’t ask', e instanceof Error ? e.message : String(e));
+        Alert.alert('Couldn’t ask', errorText(e));
       }
     } finally {
       setStatus(undefined);

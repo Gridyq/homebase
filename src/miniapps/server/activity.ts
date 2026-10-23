@@ -1,7 +1,8 @@
 import type { Activity } from '@/miniapps/registry';
+import { formatPercent } from '@/utils/format';
 
 import { fetchStatus } from './api';
-import { diskName, formatPercent } from './components';
+import { diskName } from './components';
 import { loadConnection } from './connection';
 
 const DISK_WARN = 0.9;

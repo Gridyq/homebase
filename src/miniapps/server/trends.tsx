@@ -3,9 +3,10 @@ import { StyleSheet, View } from 'react-native';
 
 import { ThemedText } from '@/components/themed-text';
 import { Spacing } from '@/constants/theme';
+import { formatWhen } from '@/utils/format';
 
 import type { History, Series } from './api';
-import { Card, formatWhen, TimeChart, type ChartMarker } from './components';
+import { Card, TimeChart, type ChartMarker } from './components';
 
 const DAY = 24 * 3600;
 

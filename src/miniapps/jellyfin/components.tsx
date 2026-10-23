@@ -1,9 +1,8 @@
 import { Image } from 'expo-image';
 import { router } from 'expo-router';
 import { memo } from 'react';
-import { ActivityIndicator, FlatList, PixelRatio, Pressable, StyleSheet, useWindowDimensions, View } from 'react-native';
+import { FlatList, PixelRatio, Pressable, StyleSheet, useWindowDimensions, View } from 'react-native';
 
-import { Button } from '@/components/button';
 import { ThemedText } from '@/components/themed-text';
 import { Spacing } from '@/constants/theme';
 import { useGutter } from '@/hooks/use-gutter';
@@ -152,34 +151,6 @@ export function SectionTitle({ title }: { title: string }) {
   return <ThemedText style={[styles.rowTitle, gutter]}>{title}</ThemedText>;
 }
 
-export function Centered({ loading, error, onRetry }: { loading?: boolean; error?: Error; onRetry?: () => void }) {
-  const theme = useTheme();
-  return (
-    <View style={[styles.centered, { backgroundColor: theme.background }]}>
-      {loading ? <ActivityIndicator /> : null}
-      {error ? (
-        <>
-          <ThemedText themeColor="textSecondary" style={{ textAlign: 'center' }}>
-            {error.message}
-          </ThemedText>
-          {onRetry ? <Button title="Try again" onPress={onRetry} /> : null}
-        </>
-      ) : null}
-    </View>
-  );
-}
-
-export function Chip({ label, selected, onPress }: { label: string; selected: boolean; onPress: () => void }) {
-  const theme = useTheme();
-  return (
-    <Pressable onPress={onPress} style={[styles.chip, { backgroundColor: selected ? theme.accent : theme.backgroundElement }]}>
-      <ThemedText type="smallBold" style={{ color: selected ? '#fff' : theme.text }}>
-        {label}
-      </ThemedText>
-    </Pressable>
-  );
-}
-
 const styles = StyleSheet.create({
   art: {
     borderRadius: 8,
@@ -219,17 +190,5 @@ const styles = StyleSheet.create({
   },
   rowContent: {
     gap: Spacing.two + Spacing.one,
-  },
-  centered: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: Spacing.four,
-    gap: Spacing.three,
-  },
-  chip: {
-    paddingVertical: 10,
-    paddingHorizontal: Spacing.three,
-    borderRadius: 999,
   },
 });

@@ -3,26 +3,16 @@ import { memo, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, View } from 'react-native';
 
 import { ThemedText } from '@/components/themed-text';
+import { Centered } from '@/components/centered';
 import { Spacing } from '@/constants/theme';
 import { useGutter } from '@/hooks/use-gutter';
 import { useTheme } from '@/hooks/use-theme';
-import { Centered } from '@/miniapps/jellyfin/components';
+
 import { fetchUsage, type Group, type GroupCategory } from '@/miniapps/server/api';
-import {
-  Card,
-  formatBytes,
-  formatCpu,
-  formatPercent,
-  LegendItem,
-  Meter,
-  Section,
-  Segmented,
-  StackedBar,
-  usePullToRefresh,
-  useSeriesColors,
-} from '@/miniapps/server/components';
+import { Card, LegendItem, Meter, Section, Segmented, StackedBar, usePullToRefresh, useSeriesColors } from '@/miniapps/server/components';
 import { useServerConnection } from '@/miniapps/server/connection';
 import { usePolling } from '@/miniapps/server/use-polling';
+import { formatBytes, formatCpu, formatPercent } from '@/utils/format';
 
 const POLL_MS = 5000;
 const SHOWN = 15;

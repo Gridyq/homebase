@@ -3,12 +3,13 @@ import { useEffect, useState } from 'react';
 import { ActivityIndicator, RefreshControl, ScrollView, StyleSheet } from 'react-native';
 
 import { ThemedText } from '@/components/themed-text';
+import { Centered } from '@/components/centered';
 import { Spacing } from '@/constants/theme';
 import { useGutter } from '@/hooks/use-gutter';
 import { useTheme } from '@/hooks/use-theme';
 import { useReloadAfterChanges } from '@/miniapps/jellyfin/changes';
 import type { BaseItem } from '@/miniapps/jellyfin/api';
-import { Centered, ItemRow } from '@/miniapps/jellyfin/components';
+import { ItemRow } from '@/miniapps/jellyfin/components';
 import { useJellyfin } from '@/miniapps/jellyfin/session';
 import { useAsync } from '@/miniapps/jellyfin/use-async';
 

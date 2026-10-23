@@ -3,7 +3,8 @@ import { ActionSheetIOS, Alert } from 'react-native';
 import type { BaseItem, JellyfinClient, RemoteSession } from './api';
 import { episodeLabel } from './components';
 
-const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
+import { errorText } from '@/utils/error-text';
+
 
 const sessionLabel = (s: RemoteSession) => [s.UserName, s.DeviceName ?? s.Client].filter(Boolean).join(' · ');
 

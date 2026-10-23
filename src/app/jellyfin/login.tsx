@@ -9,6 +9,7 @@ import { useGutter } from '@/hooks/use-gutter';
 import { useTheme } from '@/hooks/use-theme';
 import { normalizeServerUrl } from '@/miniapps/jellyfin/api';
 import { LAST_LOGIN_KEY, useJellyfinSession } from '@/miniapps/jellyfin/session';
+import { errorText } from '@/utils/error-text';
 
 export default function Login() {
   const theme = useTheme();
@@ -44,7 +45,7 @@ export default function Login() {
       // On success the layout's guard swaps this screen for the home screen.
       await signIn(normalizeServerUrl(server), username.trim(), password);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(errorText(e));
       setBusy(false);
     }
   };

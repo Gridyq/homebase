@@ -2,16 +2,18 @@ import { Stack, useLocalSearchParams } from 'expo-router';
 import { ScrollView, StyleSheet } from 'react-native';
 
 import { ThemedText } from '@/components/themed-text';
+import { Centered } from '@/components/centered';
 import { Spacing } from '@/constants/theme';
 import { useGutter } from '@/hooks/use-gutter';
 import { useTheme } from '@/hooks/use-theme';
-import { Centered } from '@/miniapps/jellyfin/components';
+
 import { fetchDriveHistory } from '@/miniapps/server/api';
-import { formatBytes, formatPercent, Segmented, usePullToRefresh, useSeriesColors } from '@/miniapps/server/components';
+import { Segmented, usePullToRefresh, useSeriesColors } from '@/miniapps/server/components';
 import { useServerConnection } from '@/miniapps/server/connection';
 import { useEventMarkers } from '@/miniapps/server/events';
 import { HistoryNote, RANGES, rangeName, TrendCard } from '@/miniapps/server/trends';
 import { useRangedPolling } from '@/miniapps/server/use-polling';
+import { formatBytes, formatPercent } from '@/utils/format';
 
 const POLL_MS = 30_000;
 const formatSpeed = (bytesPerSec: number) => `${formatBytes(bytesPerSec)}/s`;

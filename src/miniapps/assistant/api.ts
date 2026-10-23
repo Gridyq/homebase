@@ -4,6 +4,7 @@ import { fetch } from 'expo/fetch';
 
 import { loadImagePicker } from '@/miniapps/drop/api';
 import { refused, request, ServerError, unreachable, type Connection } from '@/miniapps/server/api';
+import { errorText } from '@/utils/error-text';
 
 /**
  * The status server's Assistant endpoints. Chats are kept on the server and answered by a model
@@ -117,7 +118,7 @@ export async function ask(
       signal,
     });
   } catch (e) {
-    throw unreachable(conn, e instanceof Error ? e.message : String(e));
+    throw unreachable(conn, errorText(e));
   }
   if (!res.ok) throw refused(res.status, await res.json().catch(() => undefined));
   const reader = res.body!.getReader();
@@ -148,7 +149,7 @@ export async function uploadPhoto(conn: Connection, uri: string) {
       headers: { Authorization: `Bearer ${conn.token}` },
     });
   } catch (e) {
-    throw unreachable(conn, e instanceof Error ? e.message : String(e));
+    throw unreachable(conn, errorText(e));
   }
   let body: { id?: string; error?: string } | undefined;
   try {

@@ -21,9 +21,11 @@ import {
 } from '@/miniapps/drop/api';
 import { dismissUpload, retryUpload, startUploads, useUploads, type Upload } from '@/miniapps/drop/uploads';
 import { type Connection } from '@/miniapps/server/api';
-import { Card, formatBytes, formatWhen, Meter, PollStatus, Section, StatusColors } from '@/miniapps/server/components';
+import { Card, Meter, PollStatus, Section, StatusColors } from '@/miniapps/server/components';
 import { useServerConnection } from '@/miniapps/server/connection';
 import { usePolling } from '@/miniapps/server/use-polling';
+import { errorText } from '@/utils/error-text';
+import { formatBytes, formatWhen } from '@/utils/format';
 
 const FOLDER_POLL_MS = 10_000;
 
@@ -68,7 +70,7 @@ function Drop({ conn }: { conn: Connection }) {
       setText('');
       Alert.alert(action === 'opened' ? 'Opened on the PC' : 'Copied to the PC’s clipboard');
     } catch (e) {
-      Alert.alert('Couldn’t send', e instanceof Error ? e.message : String(e));
+      Alert.alert('Couldn’t send', errorText(e));
     } finally {
       setSending(false);
     }
@@ -89,7 +91,7 @@ function Drop({ conn }: { conn: Connection }) {
       const picked = await pick();
       if (picked.length) startUploads(conn, picked);
     } catch (e) {
-      Alert.alert('Couldn’t pick', e instanceof Error ? e.message : String(e));
+      Alert.alert('Couldn’t pick', errorText(e));
     }
   };
 
@@ -125,7 +127,7 @@ function Drop({ conn }: { conn: Connection }) {
       // The viewer's share button saves it to Photos or Files.
       await File.preview(local, { title: file.name });
     } catch (e) {
-      Alert.alert('Couldn’t open', e instanceof Error ? e.message : String(e));
+      Alert.alert('Couldn’t open', errorText(e));
     } finally {
       openingNow.current = false;
       setOpening(undefined);

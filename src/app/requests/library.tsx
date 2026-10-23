@@ -3,15 +3,19 @@ import { useState } from 'react';
 import { ActionSheetIOS, Alert, FlatList, Pressable, RefreshControl, StyleSheet, View } from 'react-native';
 
 import { ThemedText } from '@/components/themed-text';
+import { Centered } from '@/components/centered';
+import { Chip } from '@/components/chip';
 import { Spacing } from '@/constants/theme';
 import { useGutter } from '@/hooks/use-gutter';
 import { useTheme } from '@/hooks/use-theme';
-import { Centered, Chip } from '@/miniapps/jellyfin/components';
+
 import { useAsync } from '@/miniapps/jellyfin/use-async';
 import { deleteFromLibrary, deleteSeason, library, mediaDisk, type LibraryItem } from '@/miniapps/requests/api';
 import { Poster, titleHref } from '@/miniapps/requests/components';
-import { Card, formatBytes, Meter, StatusColors } from '@/miniapps/server/components';
+import { Card, Meter, StatusColors } from '@/miniapps/server/components';
 import { useServerConnection } from '@/miniapps/server/connection';
+import { errorText } from '@/utils/error-text';
+import { formatBytes } from '@/utils/format';
 
 type Filter = 'all' | 'sonarr' | 'radarr';
 
@@ -60,7 +64,7 @@ export default function Library() {
             }
           } catch (e) {
             setBusy(undefined);
-            Alert.alert(`Couldn't delete ${what}`, e instanceof Error ? e.message : String(e));
+            Alert.alert(`Couldn't delete ${what}`, errorText(e));
           }
           reload();
         },

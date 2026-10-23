@@ -5,7 +5,8 @@ import { Pressable, StyleSheet, View } from 'react-native';
 import { ThemedText } from '@/components/themed-text';
 import { Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
-import { formatBytes, formatRate, formatWhen, Meter, StatusColors } from '@/miniapps/server/components';
+import { Meter, StatusColors } from '@/miniapps/server/components';
+import { formatBytes, formatRate, formatWhen } from '@/utils/format';
 
 import { MediaStatus, type Conversions, type Download, type MediaType, type Seeding, type SpeedLimit, type Upcoming } from './api';
 

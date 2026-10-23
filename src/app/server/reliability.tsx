@@ -3,25 +3,18 @@ import { useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, View } from 'react-native';
 
 import { ThemedText } from '@/components/themed-text';
+import { Centered } from '@/components/centered';
 import { Spacing } from '@/constants/theme';
 import { useGutter } from '@/hooks/use-gutter';
 import { useTheme } from '@/hooks/use-theme';
-import { Centered } from '@/miniapps/jellyfin/components';
+
 import { fetchReliability, type ServiceReliability } from '@/miniapps/server/api';
-import {
-  Card,
-  formatPercent,
-  formatWhen,
-  Section,
-  Segmented,
-  StatTile,
-  StatusColors,
-  usePullToRefresh,
-} from '@/miniapps/server/components';
+import { Card, Section, Segmented, StatTile, StatusColors, usePullToRefresh } from '@/miniapps/server/components';
 import { useServerConnection } from '@/miniapps/server/connection';
 import { EventRow } from '@/miniapps/server/events';
 import { LONG_RANGES, rangeName } from '@/miniapps/server/trends';
 import { useRangedPolling } from '@/miniapps/server/use-polling';
+import { formatPercent, formatWhen } from '@/utils/format';
 
 const POLL_MS = 30_000;
 const TROUBLE = new Set(['crashed', 'failed', 'oom', 'problem', 'boot']);

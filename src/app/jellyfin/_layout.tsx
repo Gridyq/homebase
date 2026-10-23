@@ -1,19 +1,9 @@
-import { router, Stack } from 'expo-router';
+import { Stack } from 'expo-router';
 
-import { Centered } from '@/miniapps/jellyfin/components';
+import { backToLauncher } from '@/components/back-to-launcher';
+import { Centered } from '@/components/centered';
 import { useJellyfinSession } from '@/miniapps/jellyfin/session';
 import { JellyfinSettingsProvider } from '@/miniapps/jellyfin/settings';
-
-// A native toolbar button renders as a round Liquid Glass icon; a custom headerLeft view gets
-// stretched into a pill around its text. An element, not a component: Stack.Screen only picks up a
-// Stack.Toolbar that is its direct child.
-const backToLauncher = (
-  <Stack.Toolbar placement="left">
-    <Stack.Toolbar.Button icon="chevron.left" onPress={() => router.dismissTo('/')}>
-      Apps
-    </Stack.Toolbar.Button>
-  </Stack.Toolbar>
-);
 
 function JellyfinStack() {
   const { loading, client } = useJellyfinSession();

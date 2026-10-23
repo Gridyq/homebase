@@ -4,10 +4,11 @@ import { Alert, ScrollView, StyleSheet, View } from 'react-native';
 
 import { Button } from '@/components/button';
 import { ThemedText } from '@/components/themed-text';
+import { Centered } from '@/components/centered';
 import { Spacing } from '@/constants/theme';
 import { useGutter } from '@/hooks/use-gutter';
 import { useTheme } from '@/hooks/use-theme';
-import { Centered } from '@/miniapps/jellyfin/components';
+
 import {
   fetchServiceHistory,
   fetchStatus,
@@ -17,9 +18,6 @@ import {
 } from '@/miniapps/server/api';
 import {
   Card,
-  formatBytes,
-  formatCpu,
-  formatRate,
   NavRow,
   Section,
   Segmented,
@@ -34,6 +32,8 @@ import { EventRow, useEventMarkers } from '@/miniapps/server/events';
 import { HistoryNote, RANGES, rangeName, TrendCard } from '@/miniapps/server/trends';
 import { useLive } from '@/miniapps/server/use-live';
 import { useRangedPolling } from '@/miniapps/server/use-polling';
+import { errorText } from '@/utils/error-text';
+import { formatBytes, formatCpu, formatRate } from '@/utils/format';
 
 const POLL_MS = 3000;
 const HISTORY_POLL_MS = 30_000;
@@ -99,7 +99,7 @@ export default function ServiceScreen() {
     try {
       await runAction(conn, s.id, action);
     } catch (e) {
-      Alert.alert(`Couldn't ${ACTION_LABELS[action].toLowerCase()} ${s.name}`, e instanceof Error ? e.message : String(e));
+      Alert.alert(`Couldn't ${ACTION_LABELS[action].toLowerCase()} ${s.name}`, errorText(e));
     }
     await status.refresh();
     setBusy(undefined);

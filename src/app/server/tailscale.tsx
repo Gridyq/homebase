@@ -1,14 +1,16 @@
 import { Alert, Pressable, ScrollView, StyleSheet, View } from 'react-native';
 
 import { ThemedText } from '@/components/themed-text';
+import { Centered } from '@/components/centered';
 import { Spacing } from '@/constants/theme';
 import { useGutter } from '@/hooks/use-gutter';
 import { useTheme } from '@/hooks/use-theme';
-import { Centered } from '@/miniapps/jellyfin/components';
+
 import { fetchTailscale, type TailscaleDevice } from '@/miniapps/server/api';
-import { Card, formatBytes, formatDuration, formatWhen, Section, StatusColors, usePullToRefresh } from '@/miniapps/server/components';
+import { Card, Section, StatusColors, usePullToRefresh } from '@/miniapps/server/components';
 import { useServerConnection } from '@/miniapps/server/connection';
 import { usePolling } from '@/miniapps/server/use-polling';
+import { formatBytes, formatDuration, formatWhen } from '@/utils/format';
 
 const POLL_MS = 5000;
 /** Warn this long before a device's key runs out and it drops off the tailnet. */

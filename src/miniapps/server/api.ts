@@ -1,3 +1,5 @@
+import { errorText } from '@/utils/error-text';
+
 /** Talks to the status server (`status-server-rs/`) on the home server. */
 
 export type Connection = {
@@ -311,7 +313,7 @@ export async function request<T>(
       signal: controller.signal,
     });
   } catch (e) {
-    throw unreachable(conn, controller.signal.aborted ? 'timed out' : e instanceof Error ? e.message : String(e));
+    throw unreachable(conn, controller.signal.aborted ? 'timed out' : errorText(e));
   } finally {
     clearTimeout(timer);
   }

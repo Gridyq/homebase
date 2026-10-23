@@ -2,6 +2,7 @@ import { useSyncExternalStore } from 'react';
 
 import type { Activity } from '@/miniapps/registry';
 import type { Connection } from '@/miniapps/server/api';
+import { errorText } from '@/utils/error-text';
 
 import { uploadFile, type Picked } from './api';
 
@@ -47,7 +48,7 @@ async function run() {
       finished++;
       set(uploads.filter((u) => u.id !== id));
     } catch (e) {
-      update(id, { error: e instanceof Error ? e.message : String(e) });
+      update(id, { error: errorText(e) });
     }
   }
   running = false;

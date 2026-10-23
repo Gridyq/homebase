@@ -1,16 +1,8 @@
-import { router, Stack } from 'expo-router';
+import { Stack } from 'expo-router';
 
-import { Centered } from '@/miniapps/jellyfin/components';
+import { backToLauncher } from '@/components/back-to-launcher';
+import { Centered } from '@/components/centered';
 import { useJellyfinSession } from '@/miniapps/jellyfin/session';
-
-// See src/app/jellyfin/_layout.tsx: a native toolbar button renders as a round Liquid Glass icon.
-const backToLauncher = (
-  <Stack.Toolbar placement="left">
-    <Stack.Toolbar.Button icon="chevron.left" onPress={() => router.dismissTo('/')}>
-      Apps
-    </Stack.Toolbar.Button>
-  </Stack.Toolbar>
-);
 
 // History comes from Jellyfin, so this shares the Jellyfin mini-app's sign-in.
 export default function HistoryLayout() {

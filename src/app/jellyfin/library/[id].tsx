@@ -3,10 +3,12 @@ import { useCallback, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, FlatList, RefreshControl, ScrollView, StyleSheet, View } from 'react-native';
 
 import { ThemedText } from '@/components/themed-text';
+import { Centered } from '@/components/centered';
+import { Chip } from '@/components/chip';
 import { Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 import { DEFAULT_LIBRARY_QUERY, type BaseItem, type ItemsResponse, type LibraryQuery, type LibrarySort } from '@/miniapps/jellyfin/api';
-import { Centered, Chip, PosterCard, usePosterGrid } from '@/miniapps/jellyfin/components';
+import { PosterCard, usePosterGrid } from '@/miniapps/jellyfin/components';
 import { useJellyfin } from '@/miniapps/jellyfin/session';
 import { useAsync } from '@/miniapps/jellyfin/use-async';
 

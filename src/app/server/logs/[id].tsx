@@ -3,10 +3,11 @@ import { useRef, useState } from 'react';
 import { FlatList, type NativeScrollEvent, type NativeSyntheticEvent, Share, StyleSheet, View } from 'react-native';
 
 import { ThemedText } from '@/components/themed-text';
+import { Centered } from '@/components/centered';
 import { Fonts, Spacing } from '@/constants/theme';
 import { useGutter } from '@/hooks/use-gutter';
 import { useTheme } from '@/hooks/use-theme';
-import { Centered } from '@/miniapps/jellyfin/components';
+
 import { fetchServiceLogs, type LogLine, type LogReport } from '@/miniapps/server/api';
 import { Segmented, StatusColors } from '@/miniapps/server/components';
 import { useServerConnection } from '@/miniapps/server/connection';

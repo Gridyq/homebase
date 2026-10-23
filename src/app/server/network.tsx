@@ -2,27 +2,17 @@ import { router } from 'expo-router';
 import { Pressable, ScrollView, StyleSheet, View } from 'react-native';
 
 import { ThemedText } from '@/components/themed-text';
+import { Centered } from '@/components/centered';
 import { Spacing } from '@/constants/theme';
 import { useGutter } from '@/hooks/use-gutter';
 import { useTheme } from '@/hooks/use-theme';
-import { Centered } from '@/miniapps/jellyfin/components';
+
 import { fetchNetwork } from '@/miniapps/server/api';
-import {
-  Card,
-  formatBytes,
-  formatRate,
-  formatWhen,
-  Section,
-  Segmented,
-  StackedBar,
-  StatTile,
-  StatusColors,
-  usePullToRefresh,
-  useSeriesColors,
-} from '@/miniapps/server/components';
+import { Card, Section, Segmented, StackedBar, StatTile, StatusColors, usePullToRefresh, useSeriesColors } from '@/miniapps/server/components';
 import { useServerConnection } from '@/miniapps/server/connection';
 import { RANGES, rangeName } from '@/miniapps/server/trends';
 import { useRangedPolling } from '@/miniapps/server/use-polling';
+import { formatBytes, formatRate, formatWhen } from '@/utils/format';
 
 const POLL_MS = 15_000;
 

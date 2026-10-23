@@ -5,10 +5,11 @@ import { PixelRatio, Pressable, RefreshControl, ScrollView, StyleSheet, View } f
 
 import { Button } from '@/components/button';
 import { ThemedText } from '@/components/themed-text';
+import { Centered } from '@/components/centered';
 import { Spacing } from '@/constants/theme';
 import { useGutter } from '@/hooks/use-gutter';
 import { useTheme } from '@/hooks/use-theme';
-import { Centered, itemHref } from '@/miniapps/jellyfin/components';
+import { itemHref } from '@/miniapps/jellyfin/components';
 import { useJellyfinSession } from '@/miniapps/jellyfin/session';
 import { useAsync } from '@/miniapps/jellyfin/use-async';
 import {
@@ -20,7 +21,8 @@ import {
   type RecentPlay,
   type Title,
 } from '@/miniapps/history/stats';
-import { Card, formatWhen, Meter, Section, Segmented, StatTile, TimeChart } from '@/miniapps/server/components';
+import { Card, Meter, Section, Segmented, StatTile, TimeChart } from '@/miniapps/server/components';
+import { formatWhen } from '@/utils/format';
 
 const PERIODS: { value: Period; label: string }[] = [
   { value: 'week', label: 'Week' },

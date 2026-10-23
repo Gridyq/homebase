@@ -4,10 +4,11 @@ import { ActionSheetIOS, ActivityIndicator, Alert, Pressable, ScrollView, StyleS
 
 import { Button } from '@/components/button';
 import { ThemedText } from '@/components/themed-text';
+import { Centered } from '@/components/centered';
 import { Spacing } from '@/constants/theme';
 import { useGutter } from '@/hooks/use-gutter';
 import { useTheme } from '@/hooks/use-theme';
-import { Centered } from '@/miniapps/jellyfin/components';
+
 import {
   changeContainerUpdates,
   fetchContainerUpdates,
@@ -16,9 +17,11 @@ import {
   type ContainerUpdates,
   type ImageBuild,
 } from '@/miniapps/server/api';
-import { Card, formatWhen, Section, StatusColors, usePullToRefresh } from '@/miniapps/server/components';
+import { Card, Section, StatusColors, usePullToRefresh } from '@/miniapps/server/components';
 import { useServerConnection } from '@/miniapps/server/connection';
 import { usePolling } from '@/miniapps/server/use-polling';
+import { errorText } from '@/utils/error-text';
+import { formatWhen } from '@/utils/format';
 
 const POLL_MS = 30_000;
 const BUSY_POLL_MS = 2_000;
@@ -70,7 +73,7 @@ export default function UpdatesScreen() {
       setAnswer(next);
       setPollMs(BUSY_POLL_MS);
     } catch (e) {
-      Alert.alert("Couldn't do that", e instanceof Error ? e.message : String(e));
+      Alert.alert("Couldn't do that", errorText(e));
     } finally {
       setBusy(false);
     }

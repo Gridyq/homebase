@@ -2,6 +2,8 @@ import Constants from 'expo-constants';
 
 import { noteChange } from './changes';
 
+import { errorText } from '@/utils/error-text';
+
 /** Jellyfin counts time in ticks of 100ns. */
 export const TICKS_PER_SECOND = 10_000_000;
 
@@ -215,7 +217,7 @@ async function request<T>(
       signal: controller.signal,
     });
   } catch (e) {
-    const reason = controller.signal.aborted ? 'timed out' : e instanceof Error ? e.message : String(e);
+    const reason = controller.signal.aborted ? 'timed out' : errorText(e);
     throw new JellyfinError(
       `Couldn't reach ${serverUrl}. Check the address and your network.\n(${reason})`,
     );

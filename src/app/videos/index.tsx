@@ -10,17 +10,7 @@ import { Spacing } from '@/constants/theme';
 import { useGutter } from '@/hooks/use-gutter';
 import { useTheme } from '@/hooks/use-theme';
 import { type Connection } from '@/miniapps/server/api';
-import {
-  Card,
-  formatBytes,
-  formatDuration,
-  formatWhen,
-  Meter,
-  PollStatus,
-  Section,
-  Segmented,
-  StatusColors,
-} from '@/miniapps/server/components';
+import { Card, Meter, PollStatus, Section, Segmented, StatusColors } from '@/miniapps/server/components';
 import { useServerConnection } from '@/miniapps/server/connection';
 import { usePolling } from '@/miniapps/server/use-polling';
 import {
@@ -32,6 +22,8 @@ import {
   type VideoJob,
   type VideoQuality,
 } from '@/miniapps/videos/api';
+import { errorText } from '@/utils/error-text';
+import { formatBytes, formatDuration, formatWhen } from '@/utils/format';
 
 const ACTIVE_POLL_MS = 2000;
 const IDLE_POLL_MS = 15_000;
@@ -91,7 +83,7 @@ function Videos({ conn }: { conn: Connection }) {
       setUrl('');
       await list.refresh();
     } catch (e) {
-      Alert.alert('Couldn’t start the download', e instanceof Error ? e.message : String(e));
+      Alert.alert('Couldn’t start the download', errorText(e));
     } finally {
       setSaving(false);
     }

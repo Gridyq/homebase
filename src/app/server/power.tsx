@@ -3,25 +3,19 @@ import { Alert, KeyboardAvoidingView, ScrollView, StyleSheet, TextInput, View } 
 
 import { Button } from '@/components/button';
 import { ThemedText } from '@/components/themed-text';
+import { Centered } from '@/components/centered';
 import { Fonts, Spacing } from '@/constants/theme';
 import { useGutter } from '@/hooks/use-gutter';
 import { useTheme } from '@/hooks/use-theme';
-import { Centered } from '@/miniapps/jellyfin/components';
+
 import { fetchGpu, fetchHistory, fetchPower, savePower, type PowerSettings } from '@/miniapps/server/api';
-import {
-  Card,
-  formatEnergy,
-  Section,
-  Segmented,
-  StatTile,
-  StatusColors,
-  usePullToRefresh,
-  useSeriesColors,
-} from '@/miniapps/server/components';
+import { Card, Section, Segmented, StatTile, StatusColors, usePullToRefresh, useSeriesColors } from '@/miniapps/server/components';
 import { useServerConnection } from '@/miniapps/server/connection';
 import { useEventMarkers } from '@/miniapps/server/events';
 import { HistoryNote, LONG_RANGES, rangeName, TrendCard } from '@/miniapps/server/trends';
 import { usePolling, useRangedPolling } from '@/miniapps/server/use-polling';
+import { errorText } from '@/utils/error-text';
+import { formatEnergy } from '@/utils/format';
 
 const LIVE_POLL_MS = 5000;
 const HISTORY_POLL_MS = 60_000;
@@ -165,7 +159,7 @@ function PriceForm({ settings, onSaved }: { settings: PowerSettings; onSaved: ()
       });
       await onSaved();
     } catch (e) {
-      Alert.alert("Couldn't save", e instanceof Error ? e.message : String(e));
+      Alert.alert("Couldn't save", errorText(e));
     }
     setBusy(false);
   };

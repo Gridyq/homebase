@@ -3,15 +3,18 @@ import { Alert, RefreshControl, ScrollView, StyleSheet, View } from 'react-nativ
 
 import { Button } from '@/components/button';
 import { ThemedText } from '@/components/themed-text';
+import { Centered } from '@/components/centered';
 import { Spacing } from '@/constants/theme';
 import { useGutter } from '@/hooks/use-gutter';
 import { useTheme } from '@/hooks/use-theme';
-import { Centered } from '@/miniapps/jellyfin/components';
+
 import { conversions, retryConversions, setConversionsPaused, type Conversions } from '@/miniapps/requests/api';
 import { displayName, formatEta } from '@/miniapps/requests/components';
-import { Card, formatBytes, formatWhen, Meter, Section, StatTile, StatusColors } from '@/miniapps/server/components';
+import { Card, Meter, Section, StatTile, StatusColors } from '@/miniapps/server/components';
 import { useServerConnection } from '@/miniapps/server/connection';
 import { useLive } from '@/miniapps/server/use-live';
+import { errorText } from '@/utils/error-text';
+import { formatBytes, formatWhen } from '@/utils/format';
 
 const POLL_MS = 5000;
 
@@ -45,7 +48,7 @@ export default function ConversionsScreen() {
       await refresh();
       setOverride(next);
     } catch (e) {
-      Alert.alert(`Couldn't ${shown.paused ? 'resume' : 'pause'}`, e instanceof Error ? e.message : String(e));
+      Alert.alert(`Couldn't ${shown.paused ? 'resume' : 'pause'}`, errorText(e));
     } finally {
       setBusy(false);
     }
@@ -58,7 +61,7 @@ export default function ConversionsScreen() {
       await refresh();
       setOverride(next);
     } catch (e) {
-      Alert.alert('Couldn’t retry', e instanceof Error ? e.message : String(e));
+      Alert.alert('Couldn’t retry', errorText(e));
     } finally {
       setRetrying(false);
     }

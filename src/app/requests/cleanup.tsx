@@ -2,14 +2,16 @@ import { useState } from 'react';
 import { RefreshControl, ScrollView, StyleSheet, View } from 'react-native';
 
 import { ThemedText } from '@/components/themed-text';
+import { Centered } from '@/components/centered';
 import { Spacing } from '@/constants/theme';
 import { useGutter } from '@/hooks/use-gutter';
 import { useTheme } from '@/hooks/use-theme';
-import { Centered } from '@/miniapps/jellyfin/components';
+
 import { cleanup, type Cleanup, type Strikes } from '@/miniapps/requests/api';
-import { Card, formatWhen, Meter, Section, StatTile, StatusColors } from '@/miniapps/server/components';
+import { Card, Meter, Section, StatTile, StatusColors } from '@/miniapps/server/components';
 import { useServerConnection } from '@/miniapps/server/connection';
 import { usePolling } from '@/miniapps/server/use-polling';
+import { formatWhen } from '@/utils/format';
 
 /** The server checks the queues every 5 minutes, so there's no point asking more often than this. */
 const POLL_MS = 30_000;

@@ -4,9 +4,10 @@ import { StyleSheet, View } from 'react-native';
 import { ThemedText } from '@/components/themed-text';
 import { Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
+import { formatWhen } from '@/utils/format';
 
 import type { ServerEvent } from './api';
-import { formatWhen, StatusColors, type ChartMarker } from './components';
+import { StatusColors, type ChartMarker } from './components';
 
 const BY: Record<NonNullable<ServerEvent['by']>, string> = {
   you: 'by you',

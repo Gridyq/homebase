@@ -9,6 +9,7 @@ import { useGutter } from '@/hooks/use-gutter';
 import { useTheme } from '@/hooks/use-theme';
 import { DEFAULT_URL, fetchStatus, normalizeUrl, redeemPairingCode } from '@/miniapps/server/api';
 import { useServerConnection } from '@/miniapps/server/connection';
+import { errorText } from '@/utils/error-text';
 
 /**
  * Also opened by the pairing link `homebase://server/connect?url=…&code=…`. The code is traded
@@ -45,7 +46,7 @@ export default function Connect() {
       await save(next);
       router.dismissTo('/server');
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(errorText(e));
       setBusy(false);
     }
   };

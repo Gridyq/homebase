@@ -2,25 +2,17 @@ import { router } from 'expo-router';
 import { ScrollView, StyleSheet, View } from 'react-native';
 
 import { ThemedText } from '@/components/themed-text';
+import { Centered } from '@/components/centered';
 import { Spacing } from '@/constants/theme';
 import { useGutter } from '@/hooks/use-gutter';
 import { useTheme } from '@/hooks/use-theme';
-import { Centered } from '@/miniapps/jellyfin/components';
+
 import { fetchDrives, type Drive } from '@/miniapps/server/api';
-import {
-  Card,
-  formatBytes,
-  formatPercent,
-  formatWhen,
-  Meter,
-  NavRow,
-  Section,
-  StatusColors,
-  usePullToRefresh,
-} from '@/miniapps/server/components';
+import { Card, Meter, NavRow, Section, StatusColors, usePullToRefresh } from '@/miniapps/server/components';
 import { useServerConnection } from '@/miniapps/server/connection';
 import { driveHealthColor, driveHealthLabel, driveKindLabel, driveName, formatPowerOn } from '@/miniapps/server/drives';
 import { usePolling } from '@/miniapps/server/use-polling';
+import { formatBytes, formatPercent, formatWhen } from '@/utils/format';
 
 const POLL_MS = 5000;
 

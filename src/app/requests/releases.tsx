@@ -3,15 +3,19 @@ import { useState } from 'react';
 import { ActionSheetIOS, ActivityIndicator, Alert, FlatList, Pressable, ScrollView, StyleSheet, View } from 'react-native';
 
 import { ThemedText } from '@/components/themed-text';
+import { Centered } from '@/components/centered';
+import { Chip } from '@/components/chip';
 import { Spacing } from '@/constants/theme';
 import { useGutter } from '@/hooks/use-gutter';
 import { useTheme } from '@/hooks/use-theme';
-import { Centered, Chip } from '@/miniapps/jellyfin/components';
+
 import { useAsync } from '@/miniapps/jellyfin/use-async';
 import { grabRelease, removeDownload, searchReleases, type Arr, type Release } from '@/miniapps/requests/api';
 import { formatAge } from '@/miniapps/requests/components';
-import { formatBytes, StatusColors } from '@/miniapps/server/components';
+import { StatusColors } from '@/miniapps/server/components';
 import { useServerConnection } from '@/miniapps/server/connection';
+import { errorText } from '@/utils/error-text';
+import { formatBytes } from '@/utils/format';
 
 const GB = 1e9;
 const RESOLUTIONS = ['2160p', '1080p', '720p'] as const;
@@ -115,14 +119,14 @@ export default function Releases() {
               await removeDownload(conn, { arr: app, queueIds }, true, false).catch((e) =>
                 Alert.alert(
                   'Downloading the new release',
-                  `But the old download couldn't be removed: ${e instanceof Error ? e.message : String(e)}`,
+                  `But the old download couldn't be removed: ${errorText(e)}`,
                 ),
               );
             }
             // Left meanwhile, going back would close whatever screen is showing now.
             if (screen.isFocused()) router.back();
           } catch (e) {
-            Alert.alert("Couldn't start the download", e instanceof Error ? e.message : String(e));
+            Alert.alert("Couldn't start the download", errorText(e));
           } finally {
             setGrabbing(undefined);
           }
