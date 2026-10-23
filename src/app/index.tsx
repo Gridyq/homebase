@@ -1,7 +1,14 @@
 import { Link, router, useFocusEffect } from 'expo-router';
 import * as SecureStore from 'expo-secure-store';
 import { useCallback, useEffect, useState, type ComponentProps } from 'react';
-import { Pressable, ScrollView, StyleSheet, View, type GestureResponderEvent } from 'react-native';
+import {
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  useWindowDimensions,
+  View,
+  type GestureResponderEvent,
+} from 'react-native';
 
 import { ThemedText } from '@/components/themed-text';
 import { describeRelease, Release } from '@/constants/release';
@@ -15,10 +22,13 @@ import { usePolling } from '@/miniapps/server/use-polling';
 const SEEN_UPDATE_KEY = 'homebase.seenUpdate';
 const ORDER_KEY = 'launcher.order';
 const ACTIVITY_POLL_MS = 10_000;
+const TILE_MIN_WIDTH = 104;
+const TILE_GAP = Spacing.three;
 
 export default function Launcher() {
   const theme = useTheme();
   const gutter = useGutter();
+  const { width } = useWindowDimensions();
   const shortcuts = useShortcuts();
   const [apps, moveToStart] = useAppOrder();
   const activity = usePolling(() => loadActivity(apps), ACTIVITY_POLL_MS, apps.map((a) => a.id).join());
@@ -32,12 +42,13 @@ export default function Launcher() {
       {activity.data?.length ? <NowList items={activity.data} /> : null}
       <View style={[styles.grid, gutter]}>
         {apps.map((app, i) => (
-          <AppTile
-            key={app.id}
-            app={app}
-            shortcuts={shortcuts[app.id] ?? []}
-            onMoveToStart={i > 0 ? () => moveToStart(app.id) : undefined}
-          />
+          <View key={app.id} style={{ width: tileWidth(width - gutter.paddingLeft - gutter.paddingRight) }}>
+            <AppTile
+              app={app}
+              shortcuts={shortcuts[app.id] ?? []}
+              onMoveToStart={i > 0 ? () => moveToStart(app.id) : undefined}
+            />
+          </View>
         ))}
       </View>
       <Pressable onPress={() => router.push('/whats-new')} style={[styles.footer, gutter]}>
@@ -47,6 +58,15 @@ export default function Launcher() {
       </Pressable>
     </ScrollView>
   );
+}
+
+/**
+ * Tiles sit in fixed columns that fill the row. Link wraps each tile in a native view whose size
+ * we don't control, so the column box, not the tile, sets the layout and keeps rows lined up.
+ */
+function tileWidth(available: number) {
+  const columns = Math.max(1, Math.floor((available + TILE_GAP) / (TILE_MIN_WIDTH + TILE_GAP)));
+  return Math.floor((available - TILE_GAP * (columns - 1)) / columns);
 }
 
 type LiveActivity = Activity & { app: MiniApp };
@@ -256,10 +276,10 @@ const styles = StyleSheet.create({
   grid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: Spacing.three,
+    gap: TILE_GAP,
   },
   tile: {
-    width: 110,
+    width: '100%',
     alignItems: 'center',
     gap: Spacing.one,
   },
