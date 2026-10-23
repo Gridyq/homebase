@@ -13,7 +13,16 @@ pub struct Output {
 }
 
 pub async fn output(program: &str, args: &[String], limit: Duration) -> Result<Output, String> {
-    let child = Command::new(program).args(args).kill_on_drop(true).output();
+    output_in(program, args, limit, None).await
+}
+
+/// Like `output`, run in `dir`.
+pub async fn output_in(program: &str, args: &[String], limit: Duration, dir: Option<&std::path::Path>) -> Result<Output, String> {
+    let mut command = Command::new(program);
+    if let Some(dir) = dir {
+        command.current_dir(dir);
+    }
+    let child = command.args(args).kill_on_drop(true).output();
     let out = tokio::time::timeout(limit, child)
         .await
         .map_err(|_| format!("{program} took longer than {}s", limit.as_secs()))?

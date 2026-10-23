@@ -12,7 +12,7 @@ use serde_json::json;
 use subtle::ConstantTimeEq;
 
 use crate::Config;
-use crate::proxy::Upstream;
+use crate::client::Upstream;
 
 #[derive(Clone)]
 pub struct State {
@@ -23,23 +23,42 @@ pub struct State {
     pub gpu: Arc<crate::gpu::Gpu>,
     pub services: Arc<crate::services::Services>,
     pub sampler: Arc<crate::status::Sampler>,
+    pub recorder: Arc<crate::recorder::Recorder>,
+    pub machine: Arc<crate::machine::Machine>,
+    pub game_mode: Arc<crate::gamemode::GameMode>,
+    pub media: Arc<crate::media::Media>,
+    pub videos: Arc<crate::videos::Videos>,
+    pub assistant: Arc<crate::assistant::Assistant>,
 }
 
 impl State {
     pub fn new(config: Arc<Config>) -> Self {
+        let upstream = Upstream::new();
         Self {
-            upstream: Upstream::new(),
+            upstream: upstream.clone(),
             usage: Arc::new(crate::usage::Usage::new()),
             processes: Default::default(),
             gpu: Default::default(),
             services: Default::default(),
             sampler: Default::default(),
+            recorder: Arc::new(crate::recorder::Recorder::new(data_dir(&config))),
+            machine: Arc::new(crate::machine::Machine::new(data_dir(&config))),
+            game_mode: Arc::new(crate::gamemode::GameMode::new(data_dir(&config))),
+            media: Arc::new(crate::media::Media::new(upstream.clone())),
+            videos: Arc::new(crate::videos::Videos::new(data_dir(&config))),
+            assistant: Arc::new(crate::assistant::Assistant::new(data_dir(&config))),
             config,
         }
     }
 }
 
+/// Where the server keeps its files: next to the token, in `status-server/`.
+pub fn data_dir(config: &Config) -> &std::path::Path {
+    config.token_path.parent().unwrap_or(std::path::Path::new("."))
+}
+
 /// An error the app shows as is, like the Node server's `HttpError`.
+#[derive(Debug)]
 pub struct HttpError(pub StatusCode, pub String);
 
 impl HttpError {
@@ -59,6 +78,10 @@ pub fn json_response(status: StatusCode, body: serde_json::Value) -> Response {
     res.headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     res
+}
+
+pub async fn not_found() -> Response {
+    HttpError(StatusCode::NOT_FOUND, "Not found".into()).into_response()
 }
 
 pub async fn health() -> Response {
@@ -87,7 +110,7 @@ pub async fn require_allowed_peer(ConnectInfo(peer): ConnectInfo<SocketAddr>, re
     next.run(req).await
 }
 
-/// The token is read each time, so a new one from the Node server counts straight away.
+/// The token is read each time, so a new one counts straight away.
 pub async fn require_token(AxumState(state): AxumState<State>, req: Request, next: Next) -> Response {
     let Ok(expected) = tokio::fs::read_to_string(&state.config.token_path).await else {
         return HttpError::internal("The server has no token yet").into_response();

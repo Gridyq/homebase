@@ -76,7 +76,7 @@ struct ProcessOut {
 pub struct ProcessesOut {
     processes: Vec<ProcessOut>,
     count: usize,
-    at: u64,
+    at: i64,
 }
 
 pub async fn handler(AxumState(state): AxumState<State>) -> Result<Json<ProcessesOut>, HttpError> {

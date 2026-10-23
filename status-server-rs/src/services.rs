@@ -2,8 +2,8 @@
 //! stopped (Quadlet removes a container when it stops), and the systemd units in `UNITS`, each with
 //! its state, what can be done to it, and what it's using.
 //!
-//! Starting and stopping still happens in the Node server; when it has, the proxy calls
-//! `Services::expire` so the next look waits for what they're doing now.
+//! After starting or stopping something, `Services::expire` makes the next look wait for what
+//! it's doing now.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -147,38 +147,38 @@ fn image_name(image: &str) -> String {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServiceUsage {
-    used_bytes: i64,
-    cache_bytes: u64,
+    pub used_bytes: i64,
+    pub cache_bytes: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
-    cpu: Option<f64>,
+    pub cpu: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    read_per_sec: Option<f64>,
+    pub read_per_sec: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    write_per_sec: Option<f64>,
+    pub write_per_sec: Option<f64>,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Service {
-    id: String,
-    name: String,
+    pub id: String,
+    pub name: String,
     kind: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
-    detail: Option<String>,
-    state: &'static str,
+    pub detail: Option<String>,
+    pub state: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     health: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    since: Option<i64>,
+    pub since: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    restarts: Option<u64>,
+    pub restarts: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     last_run: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     next_run: Option<i64>,
     actions: Vec<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    usage: Option<ServiceUsage>,
+    pub usage: Option<ServiceUsage>,
 }
 
 impl Service {
@@ -334,9 +334,9 @@ pub async fn list(services: &Services, usage: &Usage) -> Result<Vec<Service>, Ht
             s.usage = Some(ServiceUsage {
                 used_bytes: g.used_bytes,
                 cache_bytes: g.cache_bytes,
-                cpu: rates.map(|r| r.cpu),
-                read_per_sec: rates.map(|r| r.read_per_sec),
-                write_per_sec: rates.map(|r| r.write_per_sec),
+                cpu: rates.as_ref().map(|r| r.cpu),
+                read_per_sec: rates.as_ref().map(|r| r.read_per_sec),
+                write_per_sec: rates.as_ref().map(|r| r.write_per_sec),
             });
         }
     }

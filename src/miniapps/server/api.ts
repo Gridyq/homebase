@@ -1,4 +1,4 @@
-/** Talks to `status-server/server.mjs` on the home server. */
+/** Talks to the status server (`status-server-rs/`) on the home server. */
 
 export type Connection = {
   url: string;

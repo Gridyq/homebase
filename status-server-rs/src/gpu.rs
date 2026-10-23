@@ -186,9 +186,9 @@ async fn card_name(gpu: &Gpu, dir: &Path, slot: &str) -> String {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct Temperature {
-    label: String,
-    celsius: f64,
+pub struct Temperature {
+    pub label: String,
+    pub celsius: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     critical_celsius: Option<f64>,
 }
@@ -204,8 +204,8 @@ struct Clock {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct Power {
-    watts: f64,
+pub struct Power {
+    pub watts: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     cap_watts: Option<f64>,
 }
@@ -220,11 +220,11 @@ struct Fan {
 
 #[derive(Serialize, Default)]
 #[serde(rename_all = "camelCase")]
-struct Sensors {
-    temperatures: Vec<Temperature>,
+pub struct Sensors {
+    pub temperatures: Vec<Temperature>,
     clocks: Vec<Clock>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    power: Option<Power>,
+    pub power: Option<Power>,
     #[serde(skip_serializing_if = "Option::is_none")]
     fan: Option<Fan>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -243,7 +243,7 @@ fn max_clock(file: &Path) -> Option<f64> {
 }
 
 /// Sensors from the card's hwmon: temperatures, power, fan, clocks and voltage.
-fn sensors(dir: &Path) -> Sensors {
+pub fn sensors(dir: &Path) -> Sensors {
     let mut out = Sensors::default();
     let Some(hwmon) = kernel::names(dir.join("hwmon")).into_iter().next() else {
         return out;
@@ -358,7 +358,7 @@ pub struct GpuOut {
     #[serde(skip_serializing_if = "Option::is_none")]
     engines: Option<Vec<Engine>>,
     clients: Vec<ClientOut>,
-    at: u64,
+    at: i64,
 }
 
 fn engine_list(engines: &Engines) -> Vec<Engine> {

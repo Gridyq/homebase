@@ -17,7 +17,8 @@ use crate::http::{HttpError, State};
 
 const CGROUP_ROOT: &str = "/sys/fs/cgroup";
 
-/// systemd units shown besides the containers; the same list as `UNITS` in the Node server.
+/// systemd units shown besides the containers. `system` ones are shown read-only, and a timer's
+/// actions run the service it triggers instead of starting and stopping the timer.
 pub struct Unit {
     pub id: &'static str,
     pub name: &'static str,
@@ -81,6 +82,7 @@ pub struct Pod {
     /// Unix seconds.
     pub started_at: Option<f64>,
     pub exited_at: Option<f64>,
+    pub pid: Option<i64>,
 }
 
 impl Pod {
@@ -122,13 +124,17 @@ pub struct GroupReading {
     cpu_usec: u64,
     read_bytes: u64,
     written_bytes: u64,
+    /// Bytes read and written per drive, by "major:minor".
+    devices: Vec<(String, u64, u64)>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct Rates {
     pub cpu: f64,
     pub read_per_sec: f64,
     pub write_per_sec: f64,
+    /// Read and write bytes/s per drive, by "major:minor".
+    pub device_rates: Vec<(String, f64, f64)>,
 }
 
 /// Services and scopes, as paths relative to the cgroup root. A unit's own sub-groups (a
@@ -168,14 +174,17 @@ fn read_group(dir: String) -> Option<GroupReading> {
     let (mem, cpu, io) = (read("memory.stat"), read("cpu.stat"), read("io.stat"));
 
     let (mut read_bytes, mut written_bytes) = (0, 0);
+    let mut devices = Vec::new();
     // "8:0 rbytes=1 wbytes=2 rios=..." per drive.
     for line in io.lines() {
-        let mut fields = line.split(' ').skip(1);
+        let mut fields = line.split(' ');
+        let device = fields.next().unwrap_or_default();
         let rbytes = fields.next().and_then(|f| f.strip_prefix("rbytes=")?.parse::<u64>().ok());
         let wbytes = fields.next().and_then(|f| f.strip_prefix("wbytes=")?.parse::<u64>().ok());
         if let (Some(r), Some(w)) = (rbytes, wbytes) {
             read_bytes += r;
             written_bytes += w;
+            devices.push((device.to_owned(), r, w));
         }
     }
     // File pages are cache the kernel can take back, except shared memory, which counts as file.
@@ -189,11 +198,12 @@ fn read_group(dir: String) -> Option<GroupReading> {
         cpu_usec: stat_field(&cpu, "usage_usec").unwrap_or(0),
         read_bytes,
         written_bytes,
+        devices,
     })
 }
 
 /// "app-org.kde.konsole-3158.scope" → "konsole", "session-c10.scope" → "Login session c10".
-fn group_label(unit: &str) -> String {
+pub fn group_label(unit: &str) -> String {
     if let Some(id) = unit.strip_prefix("session-").and_then(|s| s.strip_suffix(".scope"))
         && !id.is_empty()
         && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
@@ -312,15 +322,18 @@ fn memory_breakdown(info: &HashMap<String, i64>) -> MemoryBreakdown {
     }
 }
 
-/// Share of the last minute something waited on the CPU, memory or disk.
-fn pressure() -> serde_json::Map<String, serde_json::Value> {
+/// Share of the last `window` seconds (10, 60 or 300) something waited on the CPU, memory or disk.
+pub fn pressure(window: u32) -> serde_json::Map<String, serde_json::Value> {
     let mut out = serde_json::Map::new();
     for kind in ["cpu", "memory", "io"] {
         let text = fs::read_to_string(format!("/proc/pressure/{kind}")).unwrap_or_default();
         let avg = text
             .lines()
             .find(|l| l.starts_with("some "))
-            .and_then(|l| l.split(' ').find_map(|f| f.strip_prefix("avg60=")))
+            .and_then(|l| {
+                l.split(' ')
+                    .find_map(|f| f.strip_prefix(&format!("avg{window}=")).map(str::to_owned))
+            })
             .and_then(|v| v.parse::<f64>().ok());
         if let Some(avg) = avg {
             out.insert(kind.into(), (avg / 100.0).into());
@@ -334,8 +347,8 @@ fn pressure() -> serde_json::Map<String, serde_json::Value> {
 
 type PodList = Refreshed<Vec<Pod>, fn() -> std::pin::Pin<Box<dyn Future<Output = Result<Vec<Pod>, String>> + Send>>>;
 
-/// CPU time, bytes read and bytes written per cgroup at the last reading, for the rates.
-type GroupCounters = HashMap<String, (u64, u64, u64)>;
+/// CPU time, bytes read and written, and those per drive, per cgroup at the last reading.
+type GroupCounters = HashMap<String, (u64, u64, u64, Vec<(String, u64, u64)>)>;
 
 pub struct Usage {
     /// `podman ps` takes ~60 ms, and most screens ask for it every few seconds.
@@ -377,13 +390,22 @@ impl Usage {
                 *rates = groups
                     .iter()
                     .filter_map(|g| {
-                        let &(cpu, read, written) = prev.get(&g.dir)?;
+                        let (cpu, read, written, devices) = prev.get(&g.dir)?;
+                        let (cpu, read, written) = (*cpu, *read, *written);
                         Some((
                             g.dir.clone(),
                             Rates {
                                 cpu: per_sec(g.cpu_usec, cpu) / 1e6 / cores,
                                 read_per_sec: per_sec(g.read_bytes, read),
                                 write_per_sec: per_sec(g.written_bytes, written),
+                                device_rates: g
+                                    .devices
+                                    .iter()
+                                    .map(|(dev, r, w)| {
+                                        let (pr, pw) = devices.iter().find(|(d, ..)| d == dev).map_or((*r, *w), |(_, pr, pw)| (*pr, *pw));
+                                        (dev.clone(), per_sec(*r, pr), per_sec(*w, pw))
+                                    })
+                                    .collect(),
                             },
                         ))
                     })
@@ -393,14 +415,14 @@ impl Usage {
                 now,
                 groups
                     .iter()
-                    .map(|g| (g.dir.clone(), (g.cpu_usec, g.read_bytes, g.written_bytes)))
+                    .map(|g| (g.dir.clone(), (g.cpu_usec, g.read_bytes, g.written_bytes, g.devices.clone())))
                     .collect(),
             ));
         }
         Ok(groups
             .into_iter()
             .map(|g| {
-                let r = rates.get(&g.dir).copied();
+                let r = rates.get(&g.dir).cloned();
                 (g, r)
             })
             .collect())
@@ -431,7 +453,7 @@ pub struct UsageOut {
     memory: MemoryBreakdown,
     pressure: serde_json::Map<String, serde_json::Value>,
     groups: Vec<GroupOut>,
-    at: u64,
+    at: i64,
 }
 
 pub async fn handler(AxumState(state): AxumState<State>) -> Result<Json<UsageOut>, HttpError> {
@@ -507,9 +529,9 @@ async fn read(usage: &Usage) -> Result<UsageOut, HttpError> {
                 service_id,
                 used_bytes: g.used_bytes,
                 cache_bytes: g.cache_bytes,
-                cpu: rates.map(|r| r.cpu),
-                read_per_sec: rates.map(|r| r.read_per_sec),
-                write_per_sec: rates.map(|r| r.write_per_sec),
+                cpu: rates.as_ref().map(|r| r.cpu),
+                read_per_sec: rates.as_ref().map(|r| r.read_per_sec),
+                write_per_sec: rates.as_ref().map(|r| r.write_per_sec),
             }
         })
         .collect();
@@ -517,14 +539,14 @@ async fn read(usage: &Usage) -> Result<UsageOut, HttpError> {
 
     Ok(UsageOut {
         memory: memory_breakdown(&meminfo()),
-        pressure: pressure(),
+        pressure: pressure(60),
         groups: out,
         at: now_ms(),
     })
 }
 
-pub fn now_ms() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
+pub fn now_ms() -> i64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64)
 }
 
 #[cfg(test)]

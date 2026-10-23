@@ -1,0 +1,129 @@
+//! The token every request needs, and pairing: `homebase-status pair` sends a link to the phone
+//! through ntfy that fills in the app's connection settings. The link carries a one-time code
+//! rather than the token, since ntfy keeps messages for days. Also the app's crash reports.
+
+use std::path::Path;
+use std::time::Duration;
+
+use axum::Json;
+use axum::body::Bytes;
+use axum::extract::{ConnectInfo, State as AxumState};
+use axum::http::StatusCode;
+use serde_json::{Value, json};
+use subtle::ConstantTimeEq;
+
+use crate::client::form;
+use crate::encoding::{base64url, random_bytes};
+use crate::http::{HttpError, State, data_dir};
+use crate::usage::now_ms;
+
+const PAIRING_TTL_MS: i64 = 10 * 60_000;
+
+/// Makes the token on first start.
+pub fn ensure_token(path: &Path) {
+    if path.exists() {
+        return;
+    }
+    let token = base64url(&random_bytes(24));
+    match crate::files::write_private(path, format!("{token}\n").as_bytes()) {
+        Ok(()) => println!("Created a new token in {}", path.display()),
+        Err(e) => eprintln!("Couldn't create a token in {}: {e}", path.display()),
+    }
+}
+
+/// Address the phone uses, sent in the pairing link.
+fn public_url() -> String {
+    std::env::var("PUBLIC_URL").unwrap_or_else(|_| {
+        format!(
+            "http://fedora.tail27f991.ts.net:{}",
+            std::env::var("PORT").unwrap_or_else(|_| "8788".into())
+        )
+    })
+}
+
+/// `homebase-status pair`: saves a one-time code and sends the link through ntfy.
+pub async fn pair(config: &crate::Config) {
+    let code = base64url(&random_bytes(24));
+    let pending = json!({ "code": code, "expires": now_ms() + PAIRING_TTL_MS }).to_string();
+    if let Err(e) = crate::files::write_private(&data_dir(config).join("pairing"), pending.as_bytes()) {
+        eprintln!("Couldn't save the pairing code: {e}");
+        return;
+    }
+    let link = format!("homebase://server/connect?{}", form(&[("url", &public_url()), ("code", &code)]));
+    println!("Pairing link: {link}");
+    let url = std::env::var("NTFY_URL").unwrap_or_else(|_| "http://localhost:2586/Homebase".into());
+    let headers = [
+        ("Title", "Connect Homebase to this server".to_owned()),
+        ("Tags", "link".to_owned()),
+        ("Click", link),
+    ];
+    let body = Bytes::from("Tap to fill in the Server mini-app settings. The link works once, within 10 minutes.");
+    let client = crate::client::Upstream::new();
+    match crate::client::call(
+        &client,
+        axum::http::Method::POST,
+        &url,
+        &headers,
+        Some(body),
+        Duration::from_secs(10),
+    )
+    .await
+    {
+        Ok(r) if r.status.is_success() => println!("Sent through ntfy."),
+        Ok(r) => println!("Couldn't send through ntfy: {}", r.status.canonical_reason().unwrap_or_default()),
+        Err(e) => println!("Couldn't send through ntfy: {e}"),
+    }
+}
+
+/// Trades the code from a pairing link for the token. Each code works once.
+pub async fn redeem(
+    AxumState(state): AxumState<State>,
+    ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
+    body: Bytes,
+) -> Result<Json<Value>, HttpError> {
+    let given = crate::machine::json_body(&body)?.get("code").cloned();
+    let path = data_dir(&state.config).join("pairing");
+    let pending = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok());
+    let now = now_ms();
+    let expired = pending.as_ref().is_some_and(|p| p["expires"].as_i64().is_none_or(|e| e <= now));
+    let ok = match (
+        given.as_ref().and_then(Value::as_str),
+        pending.as_ref().and_then(|p| p["code"].as_str()),
+    ) {
+        (Some(g), Some(code)) if !expired && g.len() == code.len() => bool::from(g.as_bytes().ct_eq(code.as_bytes())),
+        _ => false,
+    };
+    println!("{} pairing {}", peer.ip().to_canonical(), if ok { "accepted" } else { "refused" });
+    if pending.is_some() && (ok || expired) {
+        let _ = std::fs::remove_file(&path);
+    }
+    if !ok {
+        return Err(HttpError(
+            StatusCode::FORBIDDEN,
+            "This pairing link has expired or was already used. Run pair again.".into(),
+        ));
+    }
+    let token = std::fs::read_to_string(&state.config.token_path).map_err(|e| HttpError::internal(e.to_string()))?;
+    Ok(Json(json!({ "token": token.trim() })))
+}
+
+/// The JS error behind the app's last crash, which iOS's own report leaves out.
+pub async fn crash(ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>, body: Bytes) -> Result<Json<Value>, HttpError> {
+    let report = crate::machine::json_body(&body)?.get("report").cloned();
+    // String(report), as the Node server wrote it.
+    let text = match report {
+        None => "undefined".to_owned(),
+        Some(Value::String(s)) => s,
+        Some(Value::Null) => "null".to_owned(),
+        Some(Value::Object(_)) => "[object Object]".to_owned(),
+        Some(v) => v.to_string(),
+    };
+    println!(
+        "{} app crash report:\n{}",
+        peer.ip().to_canonical(),
+        crate::assistant_tools::js_slice(&text, 8000)
+    );
+    Ok(Json(json!({ "ok": true })))
+}

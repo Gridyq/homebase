@@ -66,8 +66,9 @@ npm run publish-update
 ## Server mini-app
 
 Shows CPU, memory, GPU, network, temperatures, disks, and the Podman containers and systemd units
-on the home server, and can start, stop and restart them. The data comes from `status-server/`,
-which also sends an ntfy message when a disk passes 90%, a sensor passes 90°C, a service fails,
+on the home server, and can start, stop and restart them. The data comes from the status server,
+a Rust program in `status-server-rs/` that keeps its files in `status-server/`. It also serves the
+Requests, Drop, Videos and Assistant mini-apps, and sends an ntfy message when a disk passes 90%, a sensor passes 90°C, a service fails,
 crashes or is killed for memory, or a drive's SMART health turns bad (and again when it recovers).
 
 Analytics: Memory breaks RAM into programs, kernel and cache and lists every service and app by
@@ -93,15 +94,18 @@ every few hours.
   (CVE-2020-8694). In `/etc/udev/rules.d/99-homebase-rapl.rules`:
   `SUBSYSTEM=="powercap", KERNEL=="intel-rapl:0", RUN+="/bin/sh -c 'chgrp leonidas /sys%p/energy_uj && chmod 0440 /sys%p/energy_uj'"`
   (it takes effect at the next boot, or run the `chgrp` and `chmod` once by hand).
-- It runs as a systemd user service: `systemctl --user status homebase-status`. It listens on
-  port 8788; open it on the tailnet zone once with
+- It runs as a systemd user service: `systemctl --user status homebase-status`, running
+  `~/.local/bin/homebase-status`. To deploy a change: `cargo build --release` in
+  `status-server-rs/` (its build output goes to `~/.cache/homebase-status-rs`, outside the project
+  so Metro doesn't crawl it), copy `release/homebase-status` from there to `~/.local/bin/`, and
+  `systemctl --user restart homebase-status`. It listens on port 8788; open it on the tailnet zone once with
   `sudo firewall-cmd --zone=tailnet --add-port=8788/tcp --permanent && sudo firewall-cmd --reload`.
 - Every request needs the token in `status-server/token` (git-ignored, created on first start).
   `npm run status-server -- pair` sends a link through ntfy; tapping it on the phone fills in the
   app's connection settings. The link holds a one-time code (good for 10 minutes), not the token.
 - Both servers only answer loopback and Tailscale addresses.
 - Containers are found on their own; Quadlet ones are controlled through their systemd unit.
-  Other units to show are listed in `UNITS` at the top of `status-server/server.mjs`.
+  Other units to show are listed in `UNITS` in `status-server-rs/src/usage.rs`.
 
 ## Jellyfin notes
 

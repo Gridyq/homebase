@@ -51,7 +51,7 @@ export default function ServerDashboard() {
         {header}
         <ThemedText type="smallBold">Not connected</ThemedText>
         <ThemedText type="small" themeColor="textSecondary" style={styles.center}>
-          Run `node status-server/server.mjs pair` on the server and tap the notification, or enter the
+          Run `npm run status-server -- pair` on the server and tap the notification, or enter the
           address and token yourself.
         </ThemedText>
         <Button title="Set up connection" onPress={() => router.push('/server/connect')} />

@@ -52,7 +52,7 @@
     "lint": "expo lint",
     "publish-update": "node scripts/publish-update.mjs",
     "update-server": "node update-server/server.mjs",
-    "status-server": "node status-server/server.mjs"
+    "status-server": "cd status-server-rs && cargo run --release -q --"
   },
   "private": true
 }

@@ -44,10 +44,8 @@ pub async fn handler(
         return Err(not_found("Not found".into()));
     }
     println!("{} {action} {id}", peer.ip().to_canonical());
-    // The Node server keeps the events log; this lets it put what follows down to you.
-    if let Err(e) = crate::proxy::post_json(&state, "/api/intents", json!({ "id": id })).await {
-        eprintln!("Couldn't tell the Node server about {action} {id}: {e}");
-    }
+    // So the events log can put what follows down to you.
+    state.recorder.events.lock().unwrap().note_intent(&id, now_ms());
     let result = change(&state, &id, &action).await;
     state.services.expire(&state.usage);
     result?;
@@ -103,18 +101,12 @@ async fn change(state: &State, id: &str, action: &str) -> Result<(), HttpError> 
         if action != "restart" {
             return Err(bad_request("The status server can only be restarted".into()));
         }
-        // Both halves, after answering, since this one goes down with it. --no-block, as systemd
-        // stops the systemctl call itself along with this server.
+        // After answering, since this server goes down with it. --no-block, as systemd stops the
+        // systemctl call itself along with this server.
         tokio::spawn(async {
             tokio::time::sleep(Duration::from_millis(500)).await;
-            let both = args![
-                "--user",
-                "restart",
-                "--no-block",
-                "homebase-status.service",
-                "homebase-status-rs.service"
-            ];
-            if let Err(e) = run("systemctl", &both, QUICK).await {
+            let restart = args!["--user", "restart", "--no-block", "homebase-status.service"];
+            if let Err(e) = run("systemctl", &restart, QUICK).await {
                 eprintln!("Restarting the status server failed: {e}");
             }
         });
@@ -203,17 +195,17 @@ pub struct LogQuery {
 
 #[derive(Serialize)]
 pub struct LogLine {
-    at: i64,
+    pub at: i64,
     priority: i64,
-    text: String,
+    pub text: String,
 }
 
 #[derive(Serialize)]
 pub struct Logs {
-    lines: Vec<LogLine>,
+    pub lines: Vec<LogLine>,
     #[serde(skip_serializing_if = "Option::is_none")]
     cursor: Option<String>,
-    at: u64,
+    at: i64,
 }
 
 /// Messages that aren't valid UTF-8 come as arrays of bytes.
@@ -248,19 +240,55 @@ pub async fn logs(
     {
         return Err(bad_request("Bad cursor".into()));
     }
-    let mut args = log_source(&state, &id).await?;
+    let window = LogWindow {
+        after,
+        errors: query.errors.as_deref() == Some("1"),
+        since: None,
+        until: None,
+        lines: LOG_LINES,
+    };
+    Ok(Json(read_logs(&state, &id, window).await?))
+}
+
+/// Which of a service's log lines to read.
+pub struct LogWindow {
+    /// The cursor from an earlier read: only what came since.
+    pub after: Option<String>,
+    /// Only lines that mention an error, failure or warning.
+    pub errors: bool,
+    pub since: Option<i64>,
+    pub until: Option<i64>,
+    pub lines: u32,
+}
+
+/// The last lines a service wrote within the window, cleaned of colors and secrets.
+pub async fn read_logs(state: &State, id: &str, window: LogWindow) -> Result<Logs, HttpError> {
+    let LogWindow {
+        after,
+        errors,
+        since,
+        until,
+        lines: count,
+    } = window;
+    let mut args = log_source(state, id).await?;
     args.extend(args![
         "--no-pager",
         "-o",
         "json",
         "--output-fields=MESSAGE,PRIORITY",
         "-n",
-        LOG_LINES.to_string()
+        count.to_string()
     ]);
     if let Some(after) = &after {
         args.push(format!("--after-cursor={after}"));
     }
-    if query.errors.as_deref() == Some("1") {
+    if let Some(since) = since {
+        args.push(format!("--since=@{}", since.div_euclid(1000)));
+    }
+    if let Some(until) = until {
+        args.push(format!("--until=@{}", (until + 999).div_euclid(1000)));
+    }
+    if errors {
         args.extend(args![format!("--grep={LOG_ERRORS}"), "--case-sensitive=false"]);
     }
     let out = command::output("journalctl", &args, Duration::from_secs(15))
@@ -293,11 +321,11 @@ pub async fn logs(
             text,
         });
     }
-    Ok(Json(Logs {
+    Ok(Logs {
         lines,
         cursor,
         at: now_ms(),
-    }))
+    })
 }
 
 #[cfg(test)]
