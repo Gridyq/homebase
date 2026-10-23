@@ -16,6 +16,7 @@ import {
   formatDuration,
   formatWhen,
   Meter,
+  PollStatus,
   Section,
   Segmented,
   StatusColors,
@@ -154,7 +155,7 @@ function Videos({ conn }: { conn: Connection }) {
           keyboardType="url"
           textContentType="URL"
           returnKeyType="go"
-          onSubmitEditing={() => url.trim() && save()}
+          onSubmitEditing={() => url.trim() && !saving && save()}
         />
         <Segmented options={QUALITIES} value={quality} onChange={setQuality} />
         <ThemedText type="small" themeColor="textSecondary" style={styles.caption}>
@@ -165,17 +166,16 @@ function Videos({ conn }: { conn: Connection }) {
       </Section>
 
       <Section title="Downloads">
-        {list.error && !jobs ? (
-          <ThemedText themeColor="textSecondary">{list.error.message}</ThemedText>
-        ) : jobs?.length ? (
+        <PollStatus error={list.error} loaded={!!jobs} onRetry={list.refresh} />
+        {!jobs ? null : jobs.length ? (
           <Card>
             {jobs.map((job, i) => (
               <JobRow key={job.id} job={job} first={i === 0} onPress={() => showActions(job)} />
             ))}
           </Card>
-        ) : jobs ? (
+        ) : (
           <ThemedText themeColor="textSecondary">Nothing downloaded yet.</ThemedText>
-        ) : null}
+        )}
       </Section>
     </ScrollView>
   );

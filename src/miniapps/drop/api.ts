@@ -48,7 +48,7 @@ export async function uploadFile(conn: Connection, file: File, name: string, onP
   try {
     body = JSON.parse(result.body);
   } catch {}
-  if (result.status === 401) throw new Error('The server rejected the token. Check it in Settings.');
+  if (result.status === 401) throw new Error('The server rejected the token. Pair again under Connection (the gear button).');
   if (result.status < 200 || result.status >= 300) throw new Error(body?.error ?? `The server answered ${result.status}.`);
   return body?.name ?? name;
 }

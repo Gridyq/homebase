@@ -65,9 +65,14 @@ export default function HistoryHome() {
       contentInsetAdjustmentBehavior="automatic"
       style={{ backgroundColor: theme.background }}
       contentContainerStyle={[styles.content, gutter]}
-      // Also spins while another period loads, since the last one's numbers stay up meanwhile.
+      // Only for a reload: another period starts blank and shows its own spinner.
       refreshControl={<RefreshControl refreshing={loading && !!data} onRefresh={reload} />}>
       <Segmented options={PERIODS} value={period} onChange={setPeriod} />
+      {data && error ? (
+        <ThemedText type="small" style={{ color: theme.danger }}>
+          Couldn&apos;t refresh. {error.message}
+        </ThemedText>
+      ) : null}
       {data ? (
         <Stats history={data} period={period} />
       ) : error ? (

@@ -1,6 +1,6 @@
 import { File } from 'expo-file-system';
 import { router } from 'expo-router';
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { ActionSheetIOS, Alert, Pressable, RefreshControl, ScrollView, StyleSheet, TextInput, View } from 'react-native';
 
 import { Button } from '@/components/button';
@@ -21,13 +21,14 @@ import {
   type Picked,
 } from '@/miniapps/drop/api';
 import { type Connection } from '@/miniapps/server/api';
-import { Card, formatBytes, formatWhen, Meter, Section, StatusColors } from '@/miniapps/server/components';
+import { Card, formatBytes, formatWhen, Meter, PollStatus, Section, StatusColors } from '@/miniapps/server/components';
 import { useServerConnection } from '@/miniapps/server/connection';
 import { usePolling } from '@/miniapps/server/use-polling';
 
 const FOLDER_POLL_MS = 10_000;
 
-type Transfer = { id: string; name: string; progress: number; error?: string };
+/** `picked` is kept on an upload so a failed one can be tried again. */
+type Transfer = { id: string; name: string; progress: number; error?: string; picked?: Picked };
 
 export default function DropHome() {
   const { connection } = useServerConnection();
@@ -58,6 +59,8 @@ function Drop({ conn }: { conn: Connection }) {
   const [uploads, setUploads] = useState<Transfer[]>([]);
   // The file being fetched for opening, and how far along it is.
   const [opening, setOpening] = useState<Transfer>();
+  // Set straight away, so a second tap can't start another download before the first re-renders.
+  const openingNow = useRef(false);
 
   const updateUpload = (id: string, change: Partial<Transfer>) =>
     setUploads((list) => list.map((u) => (u.id === id ? { ...u, ...change } : u)));
@@ -78,7 +81,7 @@ function Drop({ conn }: { conn: Connection }) {
   // One at a time, so a big video doesn't hold up the photos picked with it for long.
   const upload = async (picked: Picked[]) => {
     const batch = picked.map((p, i) => ({ ...p, id: `${Date.now()}-${i}` }));
-    setUploads((list) => [...list, ...batch.map(({ id, name }) => ({ id, name, progress: 0 }))]);
+    setUploads((list) => [...list, ...batch.map(({ id, name, file }) => ({ id, name, progress: 0, picked: { file, name } }))]);
     for (const { id, file, name } of batch) {
       try {
         await uploadFile(conn, file, name, (progress) => updateUpload(id, { progress }));
@@ -107,7 +110,25 @@ function Drop({ conn }: { conn: Connection }) {
     choose(pickPhotos);
   };
 
+  const failedUpload = (u: Transfer) =>
+    ActionSheetIOS.showActionSheetWithOptions(
+      {
+        title: u.name,
+        message: u.error,
+        options: [...(u.picked ? ['Try again'] : []), 'Dismiss', 'Cancel'],
+        cancelButtonIndex: u.picked ? 2 : 1,
+      },
+      (i) => {
+        const choice = (u.picked ? ['retry', 'dismiss'] : ['dismiss'])[i];
+        if (!choice) return;
+        setUploads((list) => list.filter((x) => x.id !== u.id));
+        if (choice === 'retry' && u.picked) upload([u.picked]);
+      },
+    );
+
   const open = async (file: DropFile) => {
+    if (openingNow.current) return;
+    openingNow.current = true;
     setOpening({ id: file.name, name: file.name, progress: 0 });
     try {
       const local = await downloadFile(conn, file.name, (progress) =>
@@ -122,6 +143,7 @@ function Drop({ conn }: { conn: Connection }) {
     } catch (e) {
       Alert.alert('Couldn’t open', e instanceof Error ? e.message : String(e));
     } finally {
+      openingNow.current = false;
       setOpening(undefined);
     }
   };
@@ -192,7 +214,7 @@ function Drop({ conn }: { conn: Connection }) {
                 key={u.id}
                 transfer={u}
                 first={i === 0}
-                onPress={u.error ? () => setUploads((list) => list.filter((x) => x.id !== u.id)) : undefined}
+                onPress={u.error ? () => failedUpload(u) : undefined}
               />
             ))}
           </Card>
@@ -208,17 +230,16 @@ function Drop({ conn }: { conn: Connection }) {
             <TransferRow transfer={opening} first />
           </Card>
         ) : null}
-        {folder.error && !files ? (
-          <ThemedText themeColor="textSecondary">{folder.error.message}</ThemedText>
-        ) : files?.length ? (
+        <PollStatus error={folder.error} loaded={!!files} onRetry={folder.refresh} />
+        {!files ? null : files.length ? (
           <Card>
             {files.map((f, i) => (
               <FileRow key={f.name} file={f} first={i === 0} onPress={() => showActions(f)} />
             ))}
           </Card>
-        ) : files ? (
+        ) : (
           <ThemedText themeColor="textSecondary">Nothing there yet.</ThemedText>
-        ) : null}
+        )}
       </Section>
     </ScrollView>
   );
@@ -260,7 +281,7 @@ function TransferRow({ transfer, first, onPress }: { transfer: Transfer; first: 
       </ThemedText>
       {transfer.error ? (
         <ThemedText type="small" style={[styles.caption, { color: theme.danger }]}>
-          {transfer.error} Tap to dismiss.
+          {transfer.error} Tap for options.
         </ThemedText>
       ) : (
         <Meter fraction={transfer.progress} color={StatusColors.good} />
