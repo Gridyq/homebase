@@ -256,8 +256,11 @@ async fn watch(state: &State) {
         }
     };
     let drives = Arc::clone(&state.recorder.drives.lock().unwrap().0);
-    let current = problems(&status, &drives);
-    let notices = state.recorder.events.lock().unwrap().note_problems(current, now_ms());
+    let now = now_ms();
+    let mut current = problems(&status, &drives);
+    current.extend(state.cleanup.problems(now));
+    current.extend(crate::conversions::problems(state, now));
+    let notices = state.recorder.events.lock().unwrap().note_problems(current, now);
     send(state, notices).await;
 }
 

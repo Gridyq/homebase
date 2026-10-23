@@ -39,6 +39,8 @@ const STRIKES_LAPSE_MS: i64 = 24 * 3600 * 1000;
 const BLOCKLIST_URL: &str = "https://cleanuparr.pages.dev/static/blacklist";
 const BLOCKLIST_EVERY_MS: i64 = 6 * 3600 * 1000;
 const REMOVED_KEPT: usize = 100;
+/// How long the queue check can fail before it's reported, so a restart of an app doesn't count.
+const FAILING_REPORTED_MS: i64 = 15 * 60 * 1000;
 /// qBittorrent's categories for each app's downloads.
 const APPS: &[(&str, &str)] = &[("sonarr", "tv"), ("radarr", "movies")];
 const METADATA_STATES: &[&str] = &["metaDL", "forcedMetaDL"];
@@ -80,6 +82,8 @@ pub struct Cleanup {
     blocklist_fetched: Mutex<i64>,
     /// Torrents whose files have been checked since the server started.
     checked: Mutex<HashSet<String>>,
+    /// Since when the queue check has failed, and why.
+    failing: Mutex<Option<(i64, String)>>,
     dry_run: bool,
 }
 
@@ -99,6 +103,7 @@ impl Cleanup {
             blocklist: Mutex::new(blocklist),
             blocklist_fetched: Mutex::new(0),
             checked: Mutex::default(),
+            failing: Mutex::default(),
             dry_run: std::env::var("CLEANUP_DRY_RUN").is_ok_and(|v| v == "1"),
         }
     }
@@ -110,6 +115,26 @@ impl Cleanup {
         if let Err(e) = result {
             eprintln!("Couldn't save cleanup: {e}");
         }
+    }
+
+    /// Notes how the queue check went: `None` when it worked.
+    fn went(&self, trouble: Option<String>) {
+        let mut failing = self.failing.lock().unwrap();
+        match (trouble, failing.as_mut()) {
+            (None, _) => *failing = None,
+            (Some(why), Some((_, was))) => *was = why,
+            (Some(why), None) => *failing = Some((now_ms(), why)),
+        }
+    }
+
+    /// The queue check failing for a while, for the server's problem notifications.
+    pub fn problems(&self, now: i64) -> Vec<(String, String)> {
+        let failing = self.failing.lock().unwrap();
+        failing
+            .iter()
+            .filter(|(since, _)| now - since >= FAILING_REPORTED_MS)
+            .map(|(_, why)| ("cleanup:failing".to_owned(), format!("Download cleanup isn't working: {why}")))
+            .collect()
     }
 }
 
@@ -280,9 +305,11 @@ fn strike(s: &mut Strikes, t: &Value, items: &[Value], now: i64) -> Option<&'sta
 /// Hands out this round's strikes and removes the downloads that have run out.
 async fn check_queues(state: &State) {
     if state.game_mode.active() {
+        state.cleanup.went(None);
         return;
     }
     let Ok(torrents) = qbit(state, "torrents/info", None).await else {
+        state.cleanup.went(Some("it can't reach qBittorrent".into()));
         return;
     };
     let torrents: HashMap<String, &Value> = torrents
@@ -293,11 +320,13 @@ async fn check_queues(state: &State) {
         .collect();
     let now = now_ms();
     let mut out_of_strikes = Vec::new();
+    let mut trouble = None;
     for (app, _) in APPS {
         let downloads = match queue(state, app).await {
             Ok(d) => d,
             Err(e) => {
                 eprintln!("cleanup: {e}");
+                trouble = Some(format!("it can't read {}'s queue", if *app == "sonarr" { "Sonarr" } else { "Radarr" }));
                 continue;
             }
         };
@@ -316,6 +345,7 @@ async fn check_queues(state: &State) {
         }
         state.cleanup.save(&saved);
     }
+    state.cleanup.went(trouble);
     for (app, items, title, reason) in out_of_strikes {
         remove(state, app, &items, &title, reason).await;
     }

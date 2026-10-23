@@ -62,6 +62,10 @@ const TEXT_SUBTITLES: &[&str] = &["subrip", "srt", "ass", "ssa", "webvtt", "mov_
 const HDR_TRANSFERS: &[&str] = &["smpte2084", "arib-std-b67"];
 /// How often a running job checks whether game mode wants the GPU.
 const GAME_CHECK: Duration = Duration::from_secs(5);
+/// A job that hasn't moved in this long, while nothing's holding it, is reported as stuck.
+const STUCK_MS: i64 = 30 * 60 * 1000;
+/// Failures in a row that are reported, since one bad file is normal and a run of them isn't.
+const FAILURES_REPORTED: usize = 3;
 
 fn ffmpeg() -> String {
     std::env::var("FFMPEG").unwrap_or_else(|_| "ffmpeg".into())
@@ -135,6 +139,8 @@ struct Job {
     fps: f64,
     speed: f64,
     written: u64,
+    /// When ffmpeg last got further, or was last let go on.
+    progressed_at: i64,
     /// Paused while Jellyfin transcodes for this user.
     held_for: Option<String>,
 }
@@ -149,6 +155,8 @@ pub struct Conversions {
     rescan: Notify,
     /// Something in the libraries changed; a scan follows once it has settled.
     changed: Notify,
+    /// Why each file since the last one that worked failed.
+    failures: Mutex<Vec<String>>,
 }
 
 impl Conversions {
@@ -169,6 +177,7 @@ impl Conversions {
             work: Notify::new(),
             rescan: Notify::new(),
             changed: Notify::new(),
+            failures: Mutex::default(),
         }
     }
 
@@ -511,7 +520,7 @@ async fn run_ffmpeg(state: &State, args: Vec<String>) -> Result<(), RunError> {
                     // SAFETY: signals the child this owns, which kill_on_drop reaps.
                     unsafe { libc::kill(pid, if held { libc::SIGSTOP } else { libc::SIGCONT }) };
                     if let Some(job) = state.conversions.job.lock().unwrap().as_mut() {
-                        job.held_for = hold;
+                        (job.held_for, job.progressed_at) = (hold, now_ms());
                     }
                 }
             },
@@ -537,7 +546,13 @@ fn on_progress(state: &State, line: &str) {
         return;
     };
     match key {
-        "out_time_us" => job.done = value.parse::<f64>().unwrap_or(0.0).max(0.0) / 1e6,
+        "out_time_us" => {
+            let done = value.parse::<f64>().unwrap_or(0.0).max(0.0) / 1e6;
+            if done > job.done {
+                job.progressed_at = now_ms();
+            }
+            job.done = done;
+        }
         "fps" => job.fps = value.parse().unwrap_or(0.0),
         "speed" => job.speed = value.trim_end_matches('x').trim().parse().unwrap_or(0.0),
         "total_size" => job.written = value.parse().unwrap_or(0),
@@ -602,13 +617,14 @@ async fn convert(state: &State, path: &str) -> Outcome {
         fps: 0.0,
         speed: 0.0,
         written: 0,
+        progressed_at: now_ms(),
         held_for: None,
     });
     println!("Converting ({action:?}) {path}");
     let mut gpu_decode = gpu_decodes(&video);
     let outcome = loop {
         if let Some(job) = state.conversions.job.lock().unwrap().as_mut() {
-            (job.done, job.written) = (0.0, 0);
+            (job.done, job.written, job.progressed_at) = (0.0, 0, now_ms());
         }
         match run_ffmpeg(state, ffmpeg_args(path, &made_str, &probe, action, gpu_decode)).await {
             Err(RunError::Stopped) => break Outcome::Stopped,
@@ -659,6 +675,11 @@ fn library_of(path: &str) -> Option<(&'static str, &'static str)> {
 async fn record(state: &State, path: &str, outcome: Outcome) {
     let now = now_ms();
     let mut rescan = None;
+    match &outcome {
+        Outcome::Failed(why) => state.conversions.failures.lock().unwrap().push(why.clone()),
+        Outcome::Done { .. } | Outcome::Skipped(_) => state.conversions.failures.lock().unwrap().clear(),
+        Outcome::Stopped | Outcome::Forget => {}
+    }
     {
         let mut saved = state.conversions.saved.lock().unwrap();
         match outcome {
@@ -836,6 +857,25 @@ pub fn start(state: State) {
             }
         }
     });
+}
+
+/// What's wrong with the conversions, for the server's problem notifications: a file that's stopped
+/// getting anywhere, or a run of failures (as when an update breaks ffmpeg or the GPU driver).
+pub fn problems(state: &State, now: i64) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    if let Some(job) = state.conversions.job.lock().unwrap().as_ref()
+        && job.held_for.is_none()
+        && now - job.progressed_at >= STUCK_MS
+    {
+        let file = describe(&job.path)["file"].as_str().unwrap_or_default().to_owned();
+        out.push(("conversions:stuck".into(), format!("Converting {file} has stopped making progress")));
+    }
+    let failures = state.conversions.failures.lock().unwrap();
+    if failures.len() >= FAILURES_REPORTED {
+        let why = &failures[FAILURES_REPORTED - 1];
+        out.push(("conversions:failing".into(), format!("Conversions keep failing: {why}")));
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------------------------
