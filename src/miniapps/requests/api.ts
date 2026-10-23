@@ -163,6 +163,8 @@ export type Download = {
   arrId?: number;
   /** The season it's for, or the first one when it spans several. */
   seasonNumber?: number;
+  /** Every season it covers. */
+  seasons: number[];
   title: string;
   /** "Season 3", "S03E04", or the year for a movie. */
   subtitle: string;
@@ -242,6 +244,7 @@ async function queueOf(conn: Connection, app: Arr) {
       downloadId: r.downloadId,
       arrId: r.seriesId ?? r.movieId ?? r.series?.id ?? r.movie?.id,
       seasonNumber: seasons[0] ?? r.seasonNumber,
+      seasons: seasons.length ? seasons : r.seasonNumber !== undefined ? [r.seasonNumber] : [],
       title: r.series?.title ?? r.movie?.title ?? r.title,
       subtitle,
       release: r.title,
@@ -582,6 +585,42 @@ export async function mediaDisk(conn: Connection) {
   const disks = await arr<{ path: string; freeSpace: number; totalSpace: number }[]>(conn, 'sonarr/diskspace');
   const disk = disks.find((d) => d.path === '/data');
   return disk && { free: disk.freeSpace, total: disk.totalSpace };
+}
+
+/**
+ * Remove a download and stop wanting what it was for, so it isn't grabbed again and stops showing
+ * as requested: the seasons it covered that have nothing on disk or downloading stop being
+ * monitored, and a show or movie left with nothing at all is taken out of Sonarr or Radarr and
+ * forgotten by Seerr (which never moves a title back from requested on its own).
+ */
+export async function dropDownload(conn: Connection, download: Download) {
+  await removeDownload(conn, download, false);
+  if (download.arrId === undefined) return;
+  const include = download.arr === 'sonarr' ? 'includeEpisode=true' : 'includeMovie=true';
+  const queue = await arr<{ records: QueueRecord[] }>(conn, `${download.arr}/queue?pageSize=1000&${include}`);
+  const left = queue.records.filter((r) => (r.seriesId ?? r.movieId) === download.arrId);
+
+  if (download.arr === 'radarr') {
+    const movie = await arr<MovieResource & { hasFile?: boolean }>(conn, `radarr/movie/${download.arrId}`);
+    if (movie.hasFile || left.length) return;
+    await arr(conn, `radarr/movie/${movie.id}?deleteFiles=false&addImportExclusion=false`, { method: 'DELETE' });
+    await forgetInSeerr(conn, 'movie', movie.tmdbId);
+    return;
+  }
+
+  const series = await arr<SeriesResource>(conn, `sonarr/series/${download.arrId}`);
+  const downloading = new Set(left.flatMap((r) => r.episode?.seasonNumber ?? r.seasonNumber ?? []));
+  const seasons = series.seasons.map((s) =>
+    download.seasons.includes(s.seasonNumber) && !s.statistics?.episodeFileCount && !downloading.has(s.seasonNumber)
+      ? { ...s, monitored: false }
+      : s,
+  );
+  if (!series.statistics?.episodeFileCount && !left.length && !seasons.some((s) => s.monitored)) {
+    await arr(conn, `sonarr/series/${series.id}?deleteFiles=false&addImportListExclusion=false`, { method: 'DELETE' });
+    await forgetInSeerr(conn, 'tv', series.tmdbId);
+  } else if (seasons.some((s, i) => s !== series.seasons[i])) {
+    await arr(conn, `sonarr/series/${series.id}`, { method: 'PUT', body: JSON.stringify({ ...series, seasons }) });
+  }
 }
 
 /** Lets the title be asked for again in Seerr, instead of it still showing as available. */

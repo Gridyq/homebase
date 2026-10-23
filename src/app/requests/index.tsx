@@ -14,6 +14,7 @@ import {
   conversions,
   details,
   downloads,
+  dropDownload,
   importAnyway,
   recentRequests,
   removeDownload,
@@ -226,9 +227,12 @@ function Overview({ conn, data }: { conn: Connection; data: ReturnType<typeof us
             );
           } else if (choice === 'Check again') {
             await checkDownloads(conn, d.arr);
-          } else {
+          } else if (choice === 'Remove and find another') {
             // Blocklisting the release makes Sonarr or Radarr search for a different one.
-            await removeDownload(conn, d, choice === 'Remove and find another');
+            await removeDownload(conn, d, true);
+          } else {
+            await dropDownload(conn, d);
+            requested.reload();
           }
         } catch (e) {
           const failed = choice === 'Import anyway' ? 'import' : choice === 'Check again' ? 'check' : 'remove';
