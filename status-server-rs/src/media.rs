@@ -1,13 +1,14 @@
-//! Media: the Requests mini-app talks to Seerr, Sonarr and Radarr through here, so their API keys
-//! stay on this machine. Keys are read from each app's own config on every call, so a rotated key
-//! just works. Only the calls the app makes are let through. Seerr only runs while it's used.
+//! Media: the Requests mini-app talks to Sonarr and Radarr through here, so their API keys stay
+//! on this machine. Keys are read from each app's own config on every call, so a rotated key just
+//! works. Only the calls the app makes are let through. Calls to Seerr, which this server took
+//! over, go to requests.rs.
 //! qBittorrent's speed limit and seeding have a small client of their own, since it logs in
 //! rather than taking a key.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{LazyLock, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use axum::Json;
 use axum::body::Bytes;
@@ -17,19 +18,13 @@ use axum::response::{IntoResponse, Response};
 use regex::Regex;
 use serde_json::{Value, json};
 
-use crate::args;
-use crate::client::Upstream;
 use crate::client::{Reply, call, form};
-use crate::command::run;
 use crate::http::{HttpError, State};
 use crate::machine::json_body;
 
 /// A release search asks every indexer, some through FlareSolverr, so it can take a while.
 const ARR_TIMEOUT: Duration = Duration::from_secs(180);
 const MAX_BODY: usize = 64 * 1024;
-const SEERR_UNIT: &str = "seerr.service";
-const SEERR_IDLE: Duration = Duration::from_secs(30 * 60);
-const SEERR_START_TIMEOUT: Duration = Duration::from_secs(90);
 
 fn arr_dir() -> PathBuf {
     std::env::var("ARR_DIR").map_or_else(
@@ -65,7 +60,7 @@ fn reply_value(r: &Reply) -> Value {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Seerr, Sonarr and Radarr
+// Sonarr and Radarr
 
 struct App {
     label: &'static str,
@@ -73,15 +68,6 @@ struct App {
     routes: &'static [(&'static str, &'static str)],
 }
 
-const SEERR: App = App {
-    label: "Seerr",
-    base: "http://localhost:5055/api/v1",
-    routes: &[
-        ("GET", r"^(search|movie/\d+|tv/\d+|request)$"),
-        ("POST", r"^request$"),
-        ("DELETE", r"^media/\d+$"),
-    ],
-};
 const SONARR: App = App {
     label: "Sonarr",
     base: "http://localhost:8989/api/v3",
@@ -110,7 +96,7 @@ const ARR_COMMANDS: &[&str] = &["ManualImport", "RefreshMonitoredDownloads"];
 
 static ROUTES: LazyLock<HashMap<(&'static str, &'static str), Regex>> = LazyLock::new(|| {
     let mut m = HashMap::new();
-    for (name, app) in [("seerr", &SEERR), ("sonarr", &SONARR), ("radarr", &RADARR)] {
+    for (name, app) in [("sonarr", &SONARR), ("radarr", &RADARR)] {
         for (method, pattern) in app.routes {
             m.insert((name, *method), Regex::new(pattern).unwrap());
         }
@@ -120,7 +106,6 @@ static ROUTES: LazyLock<HashMap<(&'static str, &'static str), Regex>> = LazyLock
 
 fn app(name: &str) -> Option<(&'static str, &'static App)> {
     match name {
-        "seerr" => Some(("seerr", &SEERR)),
         "sonarr" => Some(("sonarr", &SONARR)),
         "radarr" => Some(("radarr", &RADARR)),
         _ => None,
@@ -129,10 +114,6 @@ fn app(name: &str) -> Option<(&'static str, &'static App)> {
 
 fn api_key(name: &str) -> Option<String> {
     let dir = arr_dir().join(name);
-    if name == "seerr" {
-        let settings: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("settings.json")).ok()?).ok()?;
-        return settings["main"]["apiKey"].as_str().map(str::to_owned);
-    }
     let xml = std::fs::read_to_string(dir.join("config.xml")).ok()?;
     let start = xml.find("<ApiKey>")? + "<ApiKey>".len();
     let end = start + xml[start..].find('<')?;
@@ -140,75 +121,33 @@ fn api_key(name: &str) -> Option<String> {
 }
 
 pub struct Media {
-    seerr_last_used: Mutex<Instant>,
-    seerr_starting: tokio::sync::Mutex<()>,
     qbit_cookie: Mutex<Option<String>>,
 }
 
 impl Media {
     pub fn new() -> Self {
         Self {
-            seerr_last_used: Mutex::new(Instant::now()),
-            seerr_starting: Default::default(),
             qbit_cookie: Mutex::new(None),
         }
     }
 }
 
-async fn seerr_answers(upstream: &Upstream) -> bool {
-    call(
-        upstream,
-        Method::GET,
-        &format!("{}/status", SEERR.base),
-        &[],
-        None,
-        Duration::from_secs(2),
-    )
-    .await
-    .is_ok_and(|r| r.status.is_success())
-}
-
-/// Starts Seerr if it isn't running, and waits until it answers.
-async fn wake_seerr(state: &State) -> Result<(), HttpError> {
-    *state.media.seerr_last_used.lock().unwrap() = Instant::now();
-    if seerr_answers(&state.upstream).await {
-        return Ok(());
-    }
-    // Whoever comes second waits for the first start rather than starting it again.
-    let _starting = state.media.seerr_starting.lock().await;
-    if seerr_answers(&state.upstream).await {
-        return Ok(());
-    }
-    println!("Starting Seerr for the Requests app");
-    run("systemctl", &args!["--user", "start", SEERR_UNIT], Duration::from_secs(120))
-        .await
-        .map_err(HttpError::internal)?;
-    let deadline = Instant::now() + SEERR_START_TIMEOUT;
-    while !seerr_answers(&state.upstream).await {
-        if Instant::now() > deadline {
-            return Err(status(504, "Seerr is taking too long to start. Try again in a minute."));
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
-    Ok(())
-}
-
-/// Seerr stops after half an hour without calls; its unit isn't started at boot.
-async fn stop_idle_seerr(state: &State) {
-    let Ok(_starting) = state.media.seerr_starting.try_lock() else {
-        return;
-    };
-    if state.media.seerr_last_used.lock().unwrap().elapsed() < SEERR_IDLE {
-        return;
-    }
-    let active = crate::command::output("systemctl", &args!["--user", "is-active", SEERR_UNIT], Duration::from_secs(30)).await;
-    if !active.is_ok_and(|o| o.stdout.trim() == "active") {
-        return;
-    }
-    println!("Stopping Seerr, unused for half an hour");
-    if let Err(e) = run("systemctl", &args!["--user", "stop", SEERR_UNIT], Duration::from_secs(120)).await {
-        eprintln!("Couldn't stop Seerr: {e}");
-    }
+/// Why Sonarr or Radarr said no: the reason in `message`, or a list of validation failures.
+fn failure(name: &str, reply: &Reply) -> String {
+    let message = serde_json::from_slice::<Value>(&reply.body).ok().and_then(|v| match &v {
+        Value::Array(failures) => Some(
+            failures
+                .iter()
+                .filter_map(|f| f["errorMessage"].as_str())
+                .filter(|m| !m.is_empty())
+                .collect::<Vec<_>>()
+                .join(" "),
+        ),
+        _ => v["message"].as_str().map(str::to_owned),
+    });
+    message
+        .filter(|m| !m.is_empty())
+        .unwrap_or_else(|| format!("{name} answered {}", reply.status.as_u16()))
 }
 
 fn json_reply(body: Bytes) -> Response {
@@ -220,6 +159,22 @@ fn json_reply(body: Bytes) -> Response {
     res
 }
 
+/// `/api/requests/{path}`, and Seerr's old `/api/arr/seerr/{path}`: see requests.rs.
+pub async fn requests(AxumState(state): AxumState<State>, req: Request) -> Result<Response, HttpError> {
+    let (parts, body) = req.into_parts();
+    let path = parts.uri.path();
+    let path = path
+        .strip_prefix("/api/requests/")
+        .or_else(|| path.strip_prefix("/api/arr/seerr/"))
+        .unwrap_or_default();
+    let body = axum::body::to_bytes(body, MAX_BODY)
+        .await
+        .map_err(|_| status(413, "Request body too large"))?;
+    let query = parts.uri.query().unwrap_or_default();
+    let value = crate::requests::handle(&state, &parts.method, path, query, &body).await?;
+    Ok(json_reply(Bytes::from(value.to_string())))
+}
+
 /// `/api/arr/{app}/{path}`: passes an allowed call on with the app's key.
 pub async fn arr(AxumState(state): AxumState<State>, req: Request) -> Result<Response, HttpError> {
     let (parts, body) = req.into_parts();
@@ -229,15 +184,15 @@ pub async fn arr(AxumState(state): AxumState<State>, req: Request) -> Result<Res
     if api_path.is_empty() || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
         return Err(not_found());
     }
+    if name == "seerr" {
+        return requests(AxumState(state), Request::from_parts(parts, body)).await;
+    }
     let (name, app) = app(name).ok_or_else(not_found)?;
     let method = parts.method.as_str();
     if !ROUTES.get(&(name, method)).is_some_and(|r| r.is_match(api_path)) {
         return Err(not_found());
     }
     state.game_mode.error(app.label)?;
-    if name == "seerr" {
-        wake_seerr(&state).await?;
-    }
     let key = api_key(name).ok_or_else(|| status(503, format!("{name} isn't set up on the server")))?;
     if method != "GET" {
         println!("{method} {name}/{api_path}");
@@ -275,22 +230,7 @@ pub async fn arr(AxumState(state): AxumState<State>, req: Request) -> Result<Res
     .await
     .map_err(|e| didnt_answer(name, &e))?;
     if !reply.status.is_success() {
-        // Seerr and the *arrs put the reason in `message`, or in a list of validation failures.
-        let message = serde_json::from_slice::<Value>(&reply.body).ok().and_then(|v| match &v {
-            Value::Array(failures) => Some(
-                failures
-                    .iter()
-                    .filter_map(|f| f["errorMessage"].as_str())
-                    .filter(|m| !m.is_empty())
-                    .collect::<Vec<_>>()
-                    .join(" "),
-            ),
-            _ => v["message"].as_str().map(str::to_owned),
-        });
-        let message = message
-            .filter(|m| !m.is_empty())
-            .unwrap_or_else(|| format!("{name} answered {}", reply.status.as_u16()));
-        return Err(HttpError(reply.status, message));
+        return Err(HttpError(reply.status, failure(name, &reply)));
     }
     Ok(json_reply(if reply.body.is_empty() {
         Bytes::from_static(b"null")
@@ -581,7 +521,7 @@ pub async fn arr_call(state: &State, name: &str, method: Method, path: &str, bod
         .await
         .map_err(|e| format!("{} didn't answer ({e})", app.label))?;
     if !reply.status.is_success() {
-        return Err(format!("{} answered {}", app.label, reply.status.as_u16()));
+        return Err(failure(app.label, &reply));
     }
     if reply.body.is_empty() {
         return Ok(Value::Null);
@@ -627,13 +567,12 @@ pub async fn rescan(state: &State, name: &str, file: &str) -> Result<(), String>
     Ok(())
 }
 
-/// Seerr's idle stop and the TV queue's order, every minute.
+/// The TV queue's order, every minute.
 pub fn start(state: State) {
     tokio::spawn(async move {
         let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + Duration::from_secs(60), Duration::from_secs(60));
         loop {
             tick.tick().await;
-            stop_idle_seerr(&state).await;
             let _ = sort_tv_queue(&state).await;
         }
     });

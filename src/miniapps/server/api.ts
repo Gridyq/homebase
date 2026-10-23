@@ -196,7 +196,7 @@ export type DeviceSeries = 'rx' | 'tx';
 
 /**
  * Something that happened on the server. `by` says who stopped or started a service when the
- * server knows: 'you' from the app, 'game mode', or 'on demand' (Seerr and the assistant's models).
+ * server knows: 'you' from the app, 'game mode', or 'on demand' (the assistant's models).
  */
 export type ServerEvent = {
   t: number;

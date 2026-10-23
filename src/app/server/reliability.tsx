@@ -91,7 +91,7 @@ export default function ReliabilityScreen() {
         <ThemedText type="small" themeColor="textSecondary" style={styles.note}>
           {partial ? `Counted since ${formatWhen(data.oldest!)}, when the server started keeping track. ` : ''}
           Up is the share of the time it was running, including stops on purpose (game mode, on demand
-          or by you), so Seerr and the assistant are low by design.
+          or by you), so the assistant is low by design.
         </ThemedText>
       </Section>
 

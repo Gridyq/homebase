@@ -61,5 +61,6 @@ example
 /status-server/videos.json
 /status-server/conversions.json
 /status-server/cleanup.json
+/status-server/requests.json
 /status-server/blocklist.txt
 /status-server/assistant/

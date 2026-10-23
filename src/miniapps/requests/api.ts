@@ -1,13 +1,14 @@
 /**
- * Seerr (search and requests), Sonarr (TV) and Radarr (movies), reached through the status
- * server's `/api/arr/` proxy so their API keys stay on the server.
+ * Search and requests (the status server's own, in Seerr's shape since it took over from Seerr),
+ * and Sonarr (TV) and Radarr (movies) through the server's `/api/arr/` proxy, so their API keys
+ * stay on the server.
  */
 import { request, type Connection } from '@/miniapps/server/api';
 
 export type MediaType = 'movie' | 'tv';
 export type Arr = 'sonarr' | 'radarr';
 
-/** Seerr's status for a title as a whole, or for one season. */
+/** A title's status as a whole, or one season's, as Seerr numbered them. */
 export enum MediaStatus {
   Unknown = 1,
   Pending = 2,
@@ -19,7 +20,6 @@ export enum MediaStatus {
 }
 
 export type MediaInfo = {
-  /** Seerr's own id for the title, not TMDB's. */
   id: number;
   status: MediaStatus;
   /** Sonarr series id or Radarr movie id, once it's been sent there. */
@@ -60,7 +60,7 @@ export type Details = {
   mediaInfo?: MediaInfo;
 };
 
-export type SeerrRequest = {
+export type TitleRequest = {
   id: number;
   type: MediaType;
   status: number;
@@ -69,14 +69,14 @@ export type SeerrRequest = {
   media: { tmdbId: number; status: MediaStatus };
 };
 
-/** Seerr is stopped while unused; the server starts it on the first call, which takes a few seconds. */
-const SEERR_TIMEOUT_MS = 30_000;
-
 const arr = <T>(conn: Connection, path: string, init?: Parameters<typeof request>[2]) =>
-  request<T>(conn, `/api/arr/${path}`, path.startsWith('seerr/') ? { timeoutMs: SEERR_TIMEOUT_MS, ...init } : init);
+  request<T>(conn, `/api/arr/${path}`, init);
+
+const requests = <T>(conn: Connection, path: string, init?: Parameters<typeof request>[2]) =>
+  request<T>(conn, `/api/requests/${path}`, init);
 
 // ---------------------------------------------------------------------------------------------
-// Seerr
+// Search and requests
 
 export function titleOf(item: { title?: string; name?: string }) {
   return item.title ?? item.name ?? '';
@@ -86,23 +86,24 @@ export function yearOf(item: { releaseDate?: string; firstAirDate?: string }) {
   return (item.releaseDate ?? item.firstAirDate)?.slice(0, 4);
 }
 
+/** TMDB's images come as a path to size; TheTVDB's (shows) as a whole address. */
 export function tmdbImage(path: string | null | undefined, size: 'w185' | 'w342' | 'w780' | 'w1280') {
-  return path ? `https://image.tmdb.org/t/p/${size}${path}` : undefined;
+  if (!path) return undefined;
+  return path.startsWith('https://') ? path : `https://image.tmdb.org/t/p/${size}${path}`;
 }
 
 export async function search(conn: Connection, query: string) {
-  // Seerr wants spaces as %20; URLSearchParams would send "+", which it rejects.
-  const res = await arr<{ results: SearchResult[] }>(conn, `seerr/search?query=${encodeURIComponent(query)}&page=1`);
+  const res = await requests<{ results: SearchResult[] }>(conn, `search?query=${encodeURIComponent(query)}`);
   return res.results.filter((r): r is SearchResult & { mediaType: MediaType } => r.mediaType !== 'person');
 }
 
 export function details(conn: Connection, type: MediaType, id: number) {
-  return arr<Details>(conn, `seerr/${type}/${id}`);
+  return requests<Details>(conn, `${type}/${id}`);
 }
 
 /**
- * Ask for a movie, or for some seasons of a show. Seerr sends it on to Sonarr or Radarr, with
- * the given quality profile or else the one set in Seerr.
+ * Ask for a movie, or for some seasons of a show. The server adds it to Radarr or Sonarr and
+ * searches, with the given quality profile or else its default.
  */
 let requestCount = 0;
 
@@ -110,7 +111,7 @@ let requestCount = 0;
 export const requestsMade = () => requestCount;
 
 export async function requestMedia(conn: Connection, type: MediaType, id: number, seasons?: number[], profileId?: number) {
-  const result = await arr<SeerrRequest>(conn, 'seerr/request', {
+  const result = await requests<TitleRequest>(conn, 'request', {
     method: 'POST',
     body: JSON.stringify({ mediaType: type, mediaId: id, ...(type === 'tv' ? { seasons } : {}), ...(profileId ? { profileId } : {}) }),
   });
@@ -119,7 +120,7 @@ export async function requestMedia(conn: Connection, type: MediaType, id: number
 }
 
 export async function recentRequests(conn: Connection, take = 10) {
-  const res = await arr<{ results: SeerrRequest[] }>(conn, `seerr/request?take=${take}&sort=added`);
+  const res = await requests<{ results: TitleRequest[] }>(conn, `request?take=${take}`);
   return res.results;
 }
 
@@ -590,8 +591,7 @@ export async function mediaDisk(conn: Connection) {
 /**
  * Remove a download and stop wanting what it was for, so it isn't grabbed again and stops showing
  * as requested: the seasons it covered that have nothing on disk or downloading stop being
- * monitored, and a show or movie left with nothing at all is taken out of Sonarr or Radarr and
- * forgotten by Seerr (which never moves a title back from requested on its own).
+ * monitored, and a show or movie left with nothing at all is taken out of Sonarr or Radarr.
  */
 export async function dropDownload(conn: Connection, download: Download) {
   await removeDownload(conn, download, false);
@@ -604,7 +604,6 @@ export async function dropDownload(conn: Connection, download: Download) {
     const movie = await arr<MovieResource & { hasFile?: boolean }>(conn, `radarr/movie/${download.arrId}`);
     if (movie.hasFile || left.length) return;
     await arr(conn, `radarr/movie/${movie.id}?deleteFiles=false&addImportExclusion=false`, { method: 'DELETE' });
-    await forgetInSeerr(conn, 'movie', movie.tmdbId);
     return;
   }
 
@@ -617,17 +616,9 @@ export async function dropDownload(conn: Connection, download: Download) {
   );
   if (!series.statistics?.episodeFileCount && !left.length && !seasons.some((s) => s.monitored)) {
     await arr(conn, `sonarr/series/${series.id}?deleteFiles=false&addImportListExclusion=false`, { method: 'DELETE' });
-    await forgetInSeerr(conn, 'tv', series.tmdbId);
   } else if (seasons.some((s, i) => s !== series.seasons[i])) {
     await arr(conn, `sonarr/series/${series.id}`, { method: 'PUT', body: JSON.stringify({ ...series, seasons }) });
   }
-}
-
-/** Lets the title be asked for again in Seerr, instead of it still showing as available. */
-async function forgetInSeerr(conn: Connection, type: MediaType, tmdbId: number | undefined) {
-  if (!tmdbId) return;
-  const mediaId = (await details(conn, type, tmdbId).catch(() => undefined))?.mediaInfo?.id;
-  if (mediaId) await arr(conn, `seerr/media/${mediaId}`, { method: 'DELETE' }).catch(() => undefined);
 }
 
 /** Delete a whole show or movie, files and all. */
@@ -637,7 +628,6 @@ export async function deleteFromLibrary(conn: Connection, item: LibraryItem) {
       ? `sonarr/series/${item.id}?deleteFiles=true&addImportListExclusion=false`
       : `radarr/movie/${item.id}?deleteFiles=true&addImportExclusion=false`;
   await arr(conn, path, { method: 'DELETE' });
-  await forgetInSeerr(conn, item.arr === 'sonarr' ? 'tv' : 'movie', item.tmdbId);
 }
 
 /** Delete one season's files and stop Sonarr watching for it, so it isn't downloaded again. */

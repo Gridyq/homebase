@@ -531,7 +531,7 @@ async fn run_tool(state: &State, name: &str, args: &Value) -> Result<(String, St
                 ));
             }
             lines.push(
-                "Services that only start on demand (llama, seerr) or stop in game mode run less than all the time by design.".into(),
+                "Services that only start on demand (llama) or stop in game mode run less than all the time by design.".into(),
             );
             Ok((format!("Reliability over {} days", js(days)), lines.join("\n")))
         }

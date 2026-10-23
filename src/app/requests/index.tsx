@@ -120,7 +120,7 @@ const OVERVIEW_STALE_MS = 5 * 60_000;
 
 function useOverview(conn: Connection) {
   const game = usePolling(() => fetchGameMode(conn), QUEUE_POLL_MS, conn.url);
-  // Nothing else is asked for while game mode is on: Seerr would start up on the first call.
+  // Nothing else is asked for while game mode is on: Sonarr and Radarr are stopped then.
   // An older status server without game mode answers with an error; carry on then.
   const ready = !!game.error || game.data?.on === false;
   const queue = usePolling(() => downloads(conn), QUEUE_POLL_MS, conn.url, { enabled: ready });
@@ -133,8 +133,8 @@ function useOverview(conn: Connection) {
     `requested:${ready}`,
   );
 
-  // Pick up requests made on a title page, and refresh now and then, without asking Seerr for a
-  // dozen titles every time the screen comes back.
+  // Pick up requests made on a title page, and refresh now and then, without asking the server
+  // for a dozen titles every time the screen comes back.
   const loaded = useRef<{ at: number; requests: number }>(undefined);
   const reloadTitles = useCallback(() => {
     loaded.current = { at: Date.now(), requests: requestsMade() };
@@ -572,21 +572,10 @@ function SearchResults({ conn, term, typing }: { conn: Connection; term: string;
   );
 }
 
-/** Seerr is stopped when idle, and the first search after that waits for it to start. */
 function Searching() {
-  const [slow, setSlow] = useState(false);
-  useEffect(() => {
-    const timer = setTimeout(() => setSlow(true), 3000);
-    return () => clearTimeout(timer);
-  }, []);
   return (
     <View style={styles.searching}>
       <ActivityIndicator />
-      {slow ? (
-        <ThemedText type="small" themeColor="textSecondary" style={styles.center}>
-          Waking Seerr up. The first search takes a few seconds.
-        </ThemedText>
-      ) : null}
     </View>
   );
 }

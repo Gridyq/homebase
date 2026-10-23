@@ -32,11 +32,10 @@ pub const GAME_MODE_UNITS: &[&str] = &[
     "radarr",
     "recyclarr",
     "bazarr",
-    "seerr",
     "llama",
 ];
 /// Units that only run while something uses them, so game mode doesn't start them again.
-pub const ON_DEMAND_UNITS: &[&str] = &["seerr.service", "llama.service"];
+pub const ON_DEMAND_UNITS: &[&str] = &["llama.service"];
 pub const GAME_CHECK_INTERVAL: Duration = Duration::from_secs(10);
 /// How long after a game closes before the services come back, so restarting a game doesn't
 /// bounce them.

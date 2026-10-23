@@ -1,5 +1,5 @@
 //! Status server for Homebase's mini-apps: the Server app's stats, services, history, drives and
-//! logs; game mode; the Requests app's Seerr, Sonarr and Radarr calls, qBittorrent, clearing stuck downloads and converting the library;
+//! logs; game mode; the Requests app's searches and requests, its Sonarr and Radarr calls, qBittorrent, clearing stuck downloads and converting the library;
 //! Drop; Videos; and the Assistant's chats with a local model. Replaced the Node server that was
 //! in `status-server/server.mjs`, and keeps its files in that folder: the token, history, events,
 //! chats and settings.
@@ -34,6 +34,7 @@ mod media;
 mod pairing;
 mod processes;
 mod recorder;
+mod requests;
 mod services;
 mod status;
 mod usage;
@@ -87,6 +88,7 @@ async fn main() {
         // /api/tdarr is what the app called it while Tdarr did the converting.
         .route("/api/conversions", get(conversions::get).post(conversions::set))
         .route("/api/tdarr", get(conversions::get).post(conversions::set))
+        .route("/api/requests/{*rest}", any(media::requests))
         .route("/api/arr/{*rest}", any(media::arr))
         .route("/api/cleanup", get(cleanup::get))
         .route("/api/drop", get(drop::list))

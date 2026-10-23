@@ -98,7 +98,7 @@ export default function TitlePage() {
 }
 
 function realSeasons(item: Details) {
-  // Season 0 holds specials, which Seerr can't request.
+  // Season 0 holds specials, which can't be requested.
   return (item.seasons ?? []).filter((s) => s.seasonNumber > 0);
 }
 
@@ -160,7 +160,7 @@ function QualityRow({
     ActionSheetIOS.showActionSheetWithOptions(
       {
         title: 'Quality',
-        message: 'Lower resolutions take far less space. The default is the one set in Seerr.',
+        message: 'Lower resolutions take far less space. The default is the server’s.',
         options: [...labels, 'Cancel'],
         cancelButtonIndex: labels.length,
       },
@@ -251,7 +251,7 @@ function SeasonPicker({ conn, item, onChange }: { conn: Connection; item: Detail
           onPress={() => send(chosen)}
         />
       ) : null}
-      {/* Seerr only uses the profile when it first adds the show to Sonarr. */}
+      {/* The profile only counts when the show is first added to Sonarr. */}
       {requestable.length && !sonarrId ? (
         <QualityRow conn={conn} type="tv" profileId={profileId} onChange={setProfileId} />
       ) : null}
