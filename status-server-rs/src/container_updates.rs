@@ -7,7 +7,7 @@
 //!   the new build. The image it was on is kept as `localhost/homebase-previous/<name>:previous`,
 //!   so it survives the prune and can be gone back to from the app.
 //! - A restart that fails (the units wait for the container to report healthy) goes back to the
-//!   previous image by itself.
+//!   previous image by itself, and holds the container so the bad build isn't tried every night.
 //! - Containers can be held, which the nightly run skips; going back holds the container, so the
 //!   next night doesn't update it again.
 //! - Jellyfin isn't restarted while someone's watching; it's tried again every 10 minutes.
@@ -302,8 +302,18 @@ fn change_line(c: &Change) -> String {
     }
 }
 
-/// Updates the containers named, or all but the held ones; `scheduled` for the nightly run.
-async fn update(state: &State, only: Option<Vec<String>>, scheduled: bool) {
+#[derive(Clone, Copy, PartialEq)]
+enum Run {
+    Nightly,
+    /// Jellyfin restarts put off because someone was watching.
+    Retry,
+    /// Asked for from the app.
+    ByHand,
+}
+
+/// Updates the containers named, or all but the held ones. Only an update asked for by hand
+/// touches a held container.
+async fn update(state: &State, only: Option<Vec<String>>, run: Run) {
     let cu = &state.container_updates;
     let _busy = cu.busy.lock().await;
     let what = match &only {
@@ -316,10 +326,14 @@ async fn update(state: &State, only: Option<Vec<String>>, scheduled: bool) {
     let mut errors = Vec::new();
     for (q, image) in managed().await {
         let wanted = match &only {
-            Some(names) => names.contains(&q.name),
+            Some(names) if run == Run::ByHand => names.contains(&q.name),
+            Some(names) => names.contains(&q.name) && !held.contains(&q.name),
             None => !held.contains(&q.name),
         };
         if !wanted {
+            if held.contains(&q.name) {
+                cu.waiting.lock().unwrap().retain(|n| n != &q.name);
+            }
             continue;
         }
         match update_one(state, &q, &image).await {
@@ -348,14 +362,18 @@ async fn update(state: &State, only: Option<Vec<String>>, scheduled: bool) {
     }
     {
         let mut saved = cu.saved.lock().unwrap();
-        if scheduled {
+        if run == Run::Nightly {
             saved.last_run = Some(now_ms());
         }
         let updated: Vec<&str> = changes.iter().filter(|c| c.outcome == "updated").map(|c| c.name.as_str()).collect();
         saved.available.retain(|n| !updated.contains(&n.as_str()));
         // A container updated by hand isn't held any more.
-        if let Some(names) = &only {
+        if let (Run::ByHand, Some(names)) = (run, &only) {
             saved.held.retain(|n, _| !names.contains(n));
+        }
+        // The bad build would otherwise be pulled and tried again every night.
+        for c in changes.iter().filter(|c| c.outcome == "rolledBack") {
+            saved.held.insert(c.name.clone(), Hold { at: now_ms(), reason: "The new build didn't start, so it went back".into() });
         }
         saved.errors = errors.clone();
         saved.history.extend(changes.iter().cloned());
@@ -432,10 +450,10 @@ pub fn start(state: State) {
             };
             let waiting = state.container_updates.waiting.lock().unwrap().clone();
             if due(last_run, now) {
-                update(&state, None, true).await;
+                update(&state, None, Run::Nightly).await;
                 check_now(&state).await;
             } else if !waiting.is_empty() {
-                update(&state, Some(waiting), false).await;
+                update(&state, Some(waiting), Run::Retry).await;
             } else if checked_at.is_none_or(|t| now - t >= CHECK_EVERY_MS) {
                 check_now(&state).await;
             }
@@ -542,6 +560,7 @@ async fn revert(state: &State, name: String) {
         let mut saved = cu.saved.lock().unwrap();
         match &result {
             Ok(change) => {
+                cu.waiting.lock().unwrap().retain(|w| w != &name);
                 saved.history.push(change.clone());
                 saved.held.insert(name.clone(), Hold { at: now_ms(), reason: "Gone back to the earlier build".into() });
                 // The build it came back from is still the newest.
@@ -581,6 +600,8 @@ pub async fn set(AxumState(state): AxumState<State>, body: Bytes) -> Result<Json
         println!("container updates: hold {n} {held}");
         let mut saved = cu.saved.lock().unwrap();
         if held {
+            // Nor restarted on a build already pulled.
+            cu.waiting.lock().unwrap().retain(|w| w != &n);
             saved.held.insert(n, Hold { at: now_ms(), reason: "Held from the app".into() });
         } else {
             saved.held.remove(&n);
@@ -612,7 +633,7 @@ pub async fn set(AxumState(state): AxumState<State>, body: Bytes) -> Result<Json
             let only = name("name").map(|n| vec![n]);
             println!("container updates: update {}", only.as_ref().map_or("all", |n| n[0].as_str()));
             *cu.running.lock().unwrap() = Some(Running { what: "Updating".into(), step: "Starting".into(), since: now_ms() });
-            tokio::spawn(async move { update(&s, only, false).await });
+            tokio::spawn(async move { update(&s, only, Run::ByHand).await });
         }
     } else {
         return Err(bad_request(

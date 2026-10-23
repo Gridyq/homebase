@@ -138,6 +138,9 @@ pub async fn require_token(AxumState(state): AxumState<State>, req: Request, nex
         .and_then(|v| v.strip_prefix("Bearer "))
         .unwrap_or("");
     let expected = expected.trim();
+    if expected.len() < crate::pairing::MIN_TOKEN_LEN {
+        return HttpError::internal("The server's token file is empty; restart the server to make a new one").into_response();
+    }
     if given.len() != expected.len() || !bool::from(given.as_bytes().ct_eq(expected.as_bytes())) {
         return HttpError(StatusCode::UNAUTHORIZED, "Wrong or missing token".into()).into_response();
     }

@@ -54,17 +54,15 @@ fn is_machine_key(key: &str) -> bool {
 /// Key names, stored once; rows refer to them by number.
 #[derive(Default)]
 pub struct Keys {
-    names: Vec<String>,
+    /// A map rather than a list: a key the database couldn't save gets an id far past the rest.
+    names: HashMap<u32, String>,
     ids: HashMap<String, u32>,
 }
 
 impl Keys {
     fn add(&mut self, id: u32, name: String) {
-        if self.names.len() <= id as usize {
-            self.names.resize(id as usize + 1, String::new());
-        }
         self.ids.insert(name.clone(), id);
-        self.names[id as usize] = name;
+        self.names.insert(id, name);
     }
 
     pub fn find(&self, name: &str) -> Option<u32> {
@@ -72,7 +70,7 @@ impl Keys {
     }
 
     pub fn name(&self, id: u32) -> &str {
-        &self.names[id as usize]
+        self.names.get(&id).map_or("", String::as_str)
     }
 }
 
@@ -131,20 +129,12 @@ pub fn read_json_lines(file: &Path) -> Vec<Value> {
 }
 
 pub fn write_json_lines(file: &Path, lines: impl Iterator<Item = Value>) -> std::io::Result<()> {
-    let tmp = file.with_extension("jsonl.tmp");
-    let mut out = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&tmp)?;
     let mut text = String::new();
     for line in lines {
         text.push_str(&line.to_string());
         text.push('\n');
     }
-    out.write_all(text.as_bytes())?;
-    std::fs::rename(tmp, file)
+    crate::files::write_private(file, text.as_bytes())
 }
 
 pub fn append_json_line(file: &Path, line: &Value) -> std::io::Result<()> {

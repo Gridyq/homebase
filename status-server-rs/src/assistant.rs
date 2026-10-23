@@ -168,9 +168,7 @@ impl Assistant {
         std::fs::create_dir_all(&self.dir).map_err(|e| e.to_string())?;
         let id = chat.get("id").and_then(Value::as_str).unwrap_or_default();
         let file = self.chat_path(id).map_err(|e| e.1)?;
-        let tmp = file.with_extension("json.tmp");
-        crate::files::write_private(&tmp, Value::Object(chat.clone()).to_string().as_bytes()).map_err(|e| e.to_string())?;
-        std::fs::rename(tmp, file).map_err(|e| e.to_string())
+        crate::files::write_private(&file, Value::Object(chat.clone()).to_string().as_bytes()).map_err(|e| e.to_string())
     }
 }
 

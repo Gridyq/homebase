@@ -91,19 +91,15 @@ impl Pod {
     }
 }
 
+/// Timed, since the cache that calls this holds its lock meanwhile: a podman that hangs would
+/// otherwise hold up the status, history and alerts until a restart.
 async fn podman_ps() -> Result<Vec<Pod>, String> {
-    let out = tokio::process::Command::new("podman")
-        .args(["ps", "--all", "--format", "json"])
-        .output()
-        .await
-        .map_err(|e| e.to_string())?;
-    if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).trim().to_owned());
-    }
-    if out.stdout.iter().all(u8::is_ascii_whitespace) {
+    let ps = crate::args!["ps", "--all", "--format", "json"];
+    let stdout = crate::command::run("podman", &ps, Duration::from_secs(10)).await?;
+    if stdout.trim().is_empty() {
         return Ok(Vec::new());
     }
-    serde_json::from_slice(&out.stdout).map_err(|e| e.to_string())
+    serde_json::from_str(&stdout).map_err(|e| e.to_string())
 }
 
 // ---------------------------------------------------------------------------------------------

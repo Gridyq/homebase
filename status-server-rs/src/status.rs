@@ -68,8 +68,10 @@ fn cpu_times() -> Option<(CpuTimes, Vec<Option<CpuTimes>>)> {
     Some((all, cores))
 }
 
+/// iowait counts as idle and can go backwards, so idle can fall between readings.
 fn busy_between(a: CpuTimes, b: CpuTimes) -> Option<f64> {
-    (b.total > a.total).then(|| 1.0 - (b.idle - a.idle) as f64 / (b.total - a.total) as f64)
+    (b.total > a.total)
+        .then(|| (1.0 - b.idle.saturating_sub(a.idle) as f64 / (b.total - a.total) as f64).clamp(0.0, 1.0))
 }
 
 /// Physical interfaces only: lo, tailscale0 and container bridges have no `device` link.
@@ -476,7 +478,16 @@ pub async fn read(state: &State) -> Result<StatusOut, HttpError> {
 
 #[cfg(test)]
 mod tests {
-    use super::hidden_mount;
+    use super::{CpuTimes, busy_between, hidden_mount};
+
+    #[test]
+    fn busy() {
+        let t = |idle, total| CpuTimes { idle, total };
+        assert_eq!(busy_between(t(50, 100), t(100, 200)), Some(0.5));
+        // Idle went backwards: fully busy, not a wrapped number.
+        assert_eq!(busy_between(t(100, 100), t(90, 200)), Some(1.0));
+        assert_eq!(busy_between(t(0, 100), t(0, 100)), None);
+    }
 
     #[test]
     fn hidden_mounts() {

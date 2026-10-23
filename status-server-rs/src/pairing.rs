@@ -18,10 +18,13 @@ use crate::http::{HttpError, State, data_dir};
 use crate::usage::now_ms;
 
 const PAIRING_TTL_MS: i64 = 10 * 60_000;
+/// Shorter than this (made ones are 32) and the token file is treated as broken, since an empty
+/// one would match a request with no token at all.
+pub const MIN_TOKEN_LEN: usize = 16;
 
-/// Makes the token on first start.
+/// Makes the token on first start, or again if the file has lost it.
 pub fn ensure_token(path: &Path) {
-    if path.exists() {
+    if std::fs::read_to_string(path).is_ok_and(|t| t.trim().len() >= MIN_TOKEN_LEN) {
         return;
     }
     let token = base64url(&random_bytes(24));
@@ -92,7 +95,7 @@ pub async fn redeem(
         given.as_ref().and_then(Value::as_str),
         pending.as_ref().and_then(|p| p["code"].as_str()),
     ) {
-        (Some(g), Some(code)) if !expired && g.len() == code.len() => bool::from(g.as_bytes().ct_eq(code.as_bytes())),
+        (Some(g), Some(code)) if !expired && !code.is_empty() && g.len() == code.len() => bool::from(g.as_bytes().ct_eq(code.as_bytes())),
         _ => false,
     };
     println!("{} pairing {}", peer.ip().to_canonical(), if ok { "accepted" } else { "refused" });
@@ -106,6 +109,9 @@ pub async fn redeem(
         ));
     }
     let token = std::fs::read_to_string(&state.config.token_path).map_err(|e| HttpError::internal(e.to_string()))?;
+    if token.trim().len() < MIN_TOKEN_LEN {
+        return Err(HttpError::internal("The server's token file is empty; restart the server to make a new one"));
+    }
     Ok(Json(json!({ "token": token.trim() })))
 }
 

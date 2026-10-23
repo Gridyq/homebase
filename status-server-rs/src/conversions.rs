@@ -560,6 +560,25 @@ fn on_progress(state: &State, line: &str) {
     }
 }
 
+/// Whether the converted file holds the whole video: ffmpeg can exit cleanly on a damaged source
+/// and leave a cut-short file, which would then replace the original.
+fn check_output(source: &Probe, made: &Probe) -> Result<(), String> {
+    if made.video().is_none() {
+        return Err("it has no video".into());
+    }
+    let audio = |p: &Probe| p.streams.iter().filter(|s| s.kind == "audio").count();
+    if audio(made) != audio(source) {
+        return Err(format!("it has {} audio tracks instead of {}", audio(made), audio(source)));
+    }
+    if made.duration <= 0.0 {
+        return Err("its length can't be read".into());
+    }
+    if source.duration > 0.0 && (made.duration - source.duration).abs() > (source.duration * 0.01).max(2.0) {
+        return Err(format!("it's {:.0} s long instead of {:.0} s", made.duration, source.duration));
+    }
+    Ok(())
+}
+
 /// Moves `made` into the original's place as an MP4, unless the original changed meanwhile.
 fn replace(original: &Path, made: &Path, seen: (u64, i64)) -> Result<PathBuf, Outcome> {
     let Ok(meta) = std::fs::metadata(original) else {
@@ -645,6 +664,13 @@ async fn convert(state: &State, path: &str) -> Outcome {
                         continue;
                     }
                     break Outcome::Skipped(format!("Converting it came to {:.0}% of its size, so it's kept as it is", ratio * 100.0));
+                }
+                let checked = match self::probe(&made_str).await {
+                    Ok(p) => check_output(&probe, &p),
+                    Err(e) => Err(e),
+                };
+                if let Err(why) = checked {
+                    break Outcome::Failed(format!("The converted file didn't check out, so the original is kept: {why}"));
                 }
                 break match replace(original, &made, seen) {
                     Ok(target) => Outcome::Done {
@@ -1025,6 +1051,20 @@ mod tests {
 
     fn probe_of(streams: Vec<Stream>) -> Probe {
         Probe { duration: 60.0, streams }
+    }
+
+    #[test]
+    fn output_checks() {
+        let source = probe_of(vec![stream(0, "video", "h264"), stream(1, "audio", "aac"), stream(2, "audio", "dts")]);
+        let good = probe_of(vec![stream(0, "video", "hevc"), stream(1, "audio", "aac"), stream(2, "audio", "eac3")]);
+        assert_eq!(check_output(&source, &good), Ok(()));
+        let short = Probe { duration: 30.0, ..probe_of(good.streams.clone()) };
+        assert!(check_output(&source, &short).is_err());
+        let close = Probe { duration: 61.5, ..probe_of(good.streams.clone()) };
+        assert_eq!(check_output(&source, &close), Ok(()));
+        let one_audio = probe_of(vec![stream(0, "video", "hevc"), stream(1, "audio", "aac")]);
+        assert!(check_output(&source, &one_audio).is_err());
+        assert!(check_output(&source, &probe_of(vec![stream(0, "audio", "aac"), stream(1, "audio", "aac")])).is_err());
     }
 
     #[test]
