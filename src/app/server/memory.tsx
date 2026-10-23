@@ -1,5 +1,5 @@
 import { router } from 'expo-router';
-import { useState } from 'react';
+import { memo, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, View } from 'react-native';
 
 import { ThemedText } from '@/components/themed-text';
@@ -211,19 +211,25 @@ function PressureTile({ label, value }: { label: string; value?: number }) {
   );
 }
 
-function GroupRow({
-  group,
-  first,
-  value,
-  fraction,
-  color,
-}: {
+type GroupRowProps = {
   group: Group;
   first: boolean;
   value: string;
   fraction: number;
   color: string;
-}) {
+};
+
+/**
+ * Memoized on what it draws: the list is fetched every few seconds with fresh objects, and with
+ * "Show all" open it can be every cgroup on the machine, most of them unchanged.
+ */
+const GroupRow = memo(function GroupRow({
+  group,
+  first,
+  value,
+  fraction,
+  color,
+}: GroupRowProps) {
   const theme = useTheme();
   const caption = [
     CATEGORY_LABELS[group.category],
@@ -261,6 +267,23 @@ function GroupRow({
       </View>
       <Meter fraction={fraction} color={color} />
     </Pressable>
+  );
+}, sameRow);
+
+function sameRow(a: GroupRowProps, b: GroupRowProps) {
+  return (
+    a.first === b.first &&
+    a.value === b.value &&
+    a.color === b.color &&
+    // Meter widths that differ by less than half a percent look the same.
+    Math.abs(a.fraction - b.fraction) < 0.005 &&
+    a.group.id === b.group.id &&
+    a.group.name === b.group.name &&
+    a.group.category === b.group.category &&
+    a.group.serviceId === b.group.serviceId &&
+    // The caption only mentions cache from 50 MB up, rounded.
+    (a.group.cacheBytes >= 50e6 ? formatBytes(a.group.cacheBytes) : '') ===
+      (b.group.cacheBytes >= 50e6 ? formatBytes(b.group.cacheBytes) : '')
   );
 }
 
