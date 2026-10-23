@@ -200,8 +200,25 @@ function problemOf(r: QueueRecord) {
 }
 
 async function queueOf(conn: Connection, app: Arr) {
-  const include = app === 'sonarr' ? 'includeSeries=true&includeEpisode=true' : 'includeMovie=true';
-  const res = await arr<{ records: QueueRecord[] }>(conn, `${app}/queue?pageSize=200&${include}`);
+  // The whole queue, since Sonarr sorts torrents qBittorrent hasn't started first: a page of 200
+  // can be all queued while the ones downloading sit further down. includeSeries would repeat the
+  // whole series on every episode (megabytes for a full show), so each series is fetched once.
+  const include = app === 'sonarr' ? 'includeEpisode=true' : 'includeMovie=true';
+  const res = await arr<{ records: QueueRecord[] }>(conn, `${app}/queue?pageSize=1000&${include}`);
+  if (app === 'sonarr') {
+    const ids = [...new Set(res.records.flatMap((r) => (r.seriesId ? [r.seriesId] : [])))];
+    const series = new Map(
+      await Promise.all(
+        ids.map((id) =>
+          arr<NonNullable<QueueRecord['series']>>(conn, `sonarr/series/${id}`).then(
+            (s) => [id, s] as const,
+            () => [id, undefined] as const,
+          ),
+        ),
+      ),
+    );
+    for (const r of res.records) r.series = r.seriesId ? series.get(r.seriesId) : undefined;
+  }
   const groups = new Map<string, QueueRecord[]>();
   for (const r of res.records) {
     const key = r.downloadId ?? `${app}:${r.id}`;
