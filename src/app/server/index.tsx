@@ -176,6 +176,7 @@ function Dashboard() {
         <Card>
           <NavRow first title="Trends" caption="CPU, memory, network, heat and power, up to a year back" onPress={() => router.push('/server/trends')} />
           <NavRow title="Reliability" caption="Crashes, memory kills and reboots, per service" onPress={() => router.push('/server/reliability')} />
+          <NavRow title="Updates" caption="New container builds, going back and holding" onPress={() => router.push('/server/updates')} />
           <NavRow title="Memory" caption="What's using it, by service" onPress={() => router.push('/server/memory')} />
           <NavRow title="CPU" caption="Each core's load and clock, and what's waiting" onPress={() => router.push('/server/cpu')} />
           <NavRow title="Processes" caption="Top programs by memory and CPU" onPress={() => router.push('/server/processes')} />

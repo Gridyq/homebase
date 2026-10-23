@@ -1,6 +1,6 @@
 //! Status server for Homebase's mini-apps: the Server app's stats, services, history, drives and
 //! logs; game mode; the Requests app's searches and requests, its Sonarr and Radarr calls, qBittorrent, clearing stuck downloads and converting the library;
-//! Drop; Videos; the Assistant's chats with a local model; what Jellyfin is playing; and, on a port
+//! Drop; Videos; keeping the containers updated; the Assistant's chats with a local model; what Jellyfin is playing; and, on a port
 //! of its own, the app's over-the-air updates. Replaced the Node server that was in
 //! `status-server/server.mjs`, and keeps its files in that folder: the token, history, events,
 //! chats and settings. The app can keep `/api/live` open to hear of changes as they happen.
@@ -17,6 +17,7 @@ mod cache;
 mod cleanup;
 mod client;
 mod command;
+mod container_updates;
 mod conversions;
 mod dbus;
 mod drives;
@@ -86,6 +87,7 @@ async fn main() {
     dbus::start(state.clone());
     live::start(state.clone());
     updates::start(state.clone());
+    container_updates::start(state.clone());
 
     let api = Router::new()
         .route("/api/status", get(status::handler))
@@ -100,6 +102,7 @@ async fn main() {
         .route("/api/requests/{*rest}", any(media::requests))
         .route("/api/arr/{*rest}", any(media::arr))
         .route("/api/cleanup", get(cleanup::get))
+        .route("/api/container-updates", get(container_updates::get).post(container_updates::set))
         .route("/api/drop", get(drop::list))
         .route("/api/drop/text", post(drop::text))
         .route("/api/drop/files/{name}", get(drop::send).put(drop::receive).delete(drop::delete))

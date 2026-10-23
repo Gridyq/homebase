@@ -235,14 +235,15 @@ export type DeviceSeries = 'rx' | 'tx';
 
 /**
  * Something that happened on the server. `by` says who stopped or started a service when the
- * server knows: 'you' from the app, 'game mode', or 'on demand' (the assistant's models).
+ * server knows: 'you' from the app, 'game mode', 'on demand' (the assistant's models), or 'update'
+ * (restarted on a new image).
  */
 export type ServerEvent = {
   t: number;
   kind: 'boot' | 'started' | 'stopped' | 'restarted' | 'crashed' | 'failed' | 'oom' | 'game' | 'problem' | 'resolved';
   id?: string;
   name?: string;
-  by?: 'you' | 'game mode' | 'on demand';
+  by?: 'you' | 'game mode' | 'on demand' | 'update';
   detail?: string;
   /** For game mode. */
   on?: boolean;
@@ -611,4 +612,64 @@ export type StorageReport = {
 
 export function fetchStorage(conn: Connection) {
   return request<StorageReport>(conn, '/api/storage', { timeoutMs: 130_000 });
+}
+
+/** One build of a container's image. */
+export type ImageBuild = {
+  id: string;
+  /** From the image's version label, when it has a real one. */
+  version?: string;
+  /** When the image was built. */
+  created?: number;
+};
+
+export type ContainerUpdateInfo = {
+  id: string;
+  name: string;
+  image: string;
+  running: boolean;
+  current: ImageBuild;
+  /** The build before the last update, which it can go back to. */
+  previous: ImageBuild | null;
+  /** The registry has a newer build, as of the last check. */
+  available: boolean;
+  /** Skipped by the nightly run. */
+  held: { at: number; reason: string } | null;
+  /** Pulled, but Jellyfin restarts once nobody's watching. */
+  waiting: boolean;
+  changelog: string | null;
+};
+
+export type ContainerChange = {
+  at: number;
+  name: string;
+  from: ImageBuild;
+  to: ImageBuild;
+  /** `rolledBack`: the new build didn't start, so it went back by itself. `reverted`: gone back from the app. */
+  outcome: 'updated' | 'rolledBack' | 'reverted';
+  detail?: string;
+};
+
+export type ContainerUpdates = {
+  running: { what: string; step: string; since: number } | null;
+  lastRun: number | null;
+  checkedAt: number | null;
+  /** The nightly run starts after this hour, server time. */
+  runHour: number;
+  gameMode: boolean;
+  errors: string[];
+  containers: ContainerUpdateInfo[];
+  history: ContainerChange[];
+};
+
+export function fetchContainerUpdates(conn: Connection) {
+  return request<ContainerUpdates>(conn, '/api/container-updates');
+}
+
+/** Checks, updates and going back run on the server; the answer comes as they start. */
+export function changeContainerUpdates(
+  conn: Connection,
+  body: { check: true } | { update: true; name?: string } | { revert: string } | { hold: string; held: boolean },
+) {
+  return request<ContainerUpdates>(conn, '/api/container-updates', { method: 'POST', body: JSON.stringify(body) });
 }

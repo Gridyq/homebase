@@ -25,6 +25,11 @@ fn local(ms: i64) -> libc::tm {
     tm
 }
 
+/// The hour of the day, 0–23.
+pub fn hour(ms: i64) -> i32 {
+    local(ms).tm_hour
+}
+
 /// "14:05", 24-hour.
 pub fn clock(ms: i64) -> String {
     let tm = local(ms);

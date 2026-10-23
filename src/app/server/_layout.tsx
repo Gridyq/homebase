@@ -39,6 +39,7 @@ function ServerStack() {
       <Stack.Screen name="power" options={{ title: 'Power' }} />
       <Stack.Screen name="storage" options={{ title: 'Media Drive' }} />
       <Stack.Screen name="tailscale" options={{ title: 'Tailscale' }} />
+      <Stack.Screen name="updates" options={{ title: 'Updates' }} />
       <Stack.Screen name="service/[id]" options={{ title: '' }} />
       <Stack.Screen name="logs/[id]" options={{ title: 'Logs' }} />
     </Stack>

@@ -12,6 +12,7 @@ const BY: Record<NonNullable<ServerEvent['by']>, string> = {
   you: 'by you',
   'game mode': 'by game mode',
   'on demand': 'on demand',
+  update: 'by an update',
 };
 
 /** "jellyfin crashed", "Game mode on (Starsector)", with `name` left out when the screen is already about it. */

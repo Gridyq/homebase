@@ -82,8 +82,10 @@ impl Services {
 
 pub struct Quadlet {
     pub name: String,
-    image: Option<String>,
+    pub image: Option<String>,
     pub unit: String,
+    /// `AutoUpdate=registry`: kept up to date with its image's tag.
+    pub auto_update: bool,
 }
 
 /// Containers that systemd runs from Quadlet files, with their units.
@@ -105,6 +107,7 @@ pub async fn quadlets() -> Vec<Quadlet> {
                     name: key("ContainerName=").unwrap_or_else(|| format!("systemd-{base}")),
                     image: key("Image="),
                     unit: format!("{base}.service"),
+                    auto_update: key("AutoUpdate=").as_deref() == Some("registry"),
                 })
             })
             .collect()

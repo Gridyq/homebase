@@ -107,8 +107,8 @@ pub struct Events {
     pub list: Vec<Event>,
     /// Each event as it's logged, for the app's live view.
     pub feed: tokio::sync::broadcast::Sender<std::sync::Arc<str>>,
-    /// Service id → when it was started or stopped from the app.
-    intents: HashMap<String, i64>,
+    /// Service id → when it was started or stopped from the app or by an update, and which.
+    intents: HashMap<String, (i64, &'static str)>,
     /// Each service's last settled state, to compare the next reading with.
     last_states: Option<HashMap<String, Settled>>,
     journal_checked_at: i64,
@@ -168,13 +168,18 @@ impl Events {
     }
 
     pub fn note_intent(&mut self, id: &str, now: i64) {
-        self.intents.insert(id.to_owned(), now);
+        self.note_cause(id, "you", now);
+    }
+
+    /// Puts what the service does next down to `cause`, such as "update".
+    pub fn note_cause(&mut self, id: &str, cause: &'static str, now: i64) {
+        self.intents.insert(id.to_owned(), (now, cause));
     }
 
     /// Why a service started or stopped just now, when this server knows.
     fn cause_of(&self, id: &str, now: i64, game_mode: &Value) -> Option<String> {
-        if self.intents.get(id).is_some_and(|at| now - at < INTENT_MS) {
-            return Some("you".into());
+        if let Some((_, cause)) = self.intents.get(id).filter(|(at, _)| now - at < INTENT_MS) {
+            return Some((*cause).into());
         }
         let since = game_mode["since"].as_i64();
         let stops = game_mode["services"]

@@ -35,6 +35,7 @@ pub struct State {
     pub jellyfin: Arc<crate::jellyfin::Jellyfin>,
     pub live: Arc<crate::live::Live>,
     pub updates: Arc<crate::updates::Updates>,
+    pub container_updates: Arc<crate::container_updates::ContainerUpdates>,
 }
 
 impl State {
@@ -61,6 +62,7 @@ impl State {
             jellyfin: Default::default(),
             live: Arc::new(live),
             updates: Arc::new(crate::updates::Updates::new()),
+            container_updates: Arc::new(crate::container_updates::ContainerUpdates::new(data_dir(&config))),
             config,
         }
     }
