@@ -24,6 +24,10 @@ pub struct Unit {
     pub unit: &'static str,
     /// The service a timer triggers, which is what does the work.
     pub runs: Option<&'static str>,
+    /// Belongs to the whole machine, so it's shown read-only.
+    pub system: bool,
+    /// The status server itself, which can only be restarted.
+    pub this_server: bool,
 }
 
 pub const UNITS: &[Unit] = &[
@@ -32,24 +36,32 @@ pub const UNITS: &[Unit] = &[
         name: "Homebase updates",
         unit: "homebase-updates.service",
         runs: None,
+        system: false,
+        this_server: false,
     },
     Unit {
         id: "homebase-status",
         name: "Homebase status",
         unit: "homebase-status.service",
         runs: None,
+        system: false,
+        this_server: true,
     },
     Unit {
         id: "jellyfin-backup",
         name: "Jellyfin backup",
         unit: "jellyfin-backup.timer",
         runs: Some("jellyfin-backup.service"),
+        system: false,
+        this_server: false,
     },
     Unit {
         id: "tailscale",
         name: "Tailscale",
         unit: "tailscaled.service",
         runs: None,
+        system: true,
+        this_server: false,
     },
 ];
 
@@ -62,6 +74,13 @@ pub struct Pod {
     pub id: String,
     pub names: Option<Vec<String>>,
     pub labels: Option<HashMap<String, String>>,
+    pub image: Option<String>,
+    pub state: Option<String>,
+    /// Such as "Up 2 hours (healthy)".
+    pub status: Option<String>,
+    /// Unix seconds.
+    pub started_at: Option<f64>,
+    pub exited_at: Option<f64>,
 }
 
 impl Pod {
@@ -73,7 +92,7 @@ impl Pod {
             .unwrap_or_else(|| self.id.chars().take(12).collect())
     }
 
-    fn systemd_unit(&self) -> Option<&str> {
+    pub fn systemd_unit(&self) -> Option<&str> {
         self.labels.as_ref()?.get("PODMAN_SYSTEMD_UNIT").map(String::as_str)
     }
 }
@@ -96,20 +115,20 @@ async fn podman_ps() -> Result<Vec<Pod>, String> {
 // ---------------------------------------------------------------------------------------------
 // cgroups
 
-struct GroupReading {
-    dir: String,
-    used_bytes: i64,
-    cache_bytes: u64,
+pub struct GroupReading {
+    pub dir: String,
+    pub used_bytes: i64,
+    pub cache_bytes: u64,
     cpu_usec: u64,
     read_bytes: u64,
     written_bytes: u64,
 }
 
 #[derive(Clone, Copy)]
-struct Rates {
-    cpu: f64,
-    read_per_sec: f64,
-    write_per_sec: f64,
+pub struct Rates {
+    pub cpu: f64,
+    pub read_per_sec: f64,
+    pub write_per_sec: f64,
 }
 
 /// Services and scopes, as paths relative to the cgroup root. A unit's own sub-groups (a
@@ -216,7 +235,7 @@ fn group_category(dir: &str) -> &'static str {
 
 /// Maps cgroups to the dashboard's services: by systemd unit, or a plain container's scope.
 /// In order, as the later of two services claiming a cgroup wins.
-fn service_groups<'a>(groups: &'a [(GroupReading, Option<Rates>)], pods: &[Pod]) -> Vec<(String, &'a str)> {
+pub fn service_groups<'a>(groups: &'a [(GroupReading, Option<Rates>)], pods: &[Pod]) -> Vec<(String, &'a str)> {
     let mut by_unit: HashMap<&str, &str> = HashMap::new();
     for (g, _) in groups {
         let unit = g.dir.rsplit('/').next().unwrap_or(&g.dir);
@@ -248,7 +267,7 @@ fn service_groups<'a>(groups: &'a [(GroupReading, Option<Rates>)], pods: &[Pod])
 // Memory
 
 /// /proc/meminfo in bytes.
-fn meminfo() -> HashMap<String, i64> {
+pub fn meminfo() -> HashMap<String, i64> {
     fs::read_to_string("/proc/meminfo")
         .unwrap_or_default()
         .lines()
@@ -320,7 +339,7 @@ type GroupCounters = HashMap<String, (u64, u64, u64)>;
 
 pub struct Usage {
     /// `podman ps` takes ~60 ms, and most screens ask for it every few seconds.
-    pods: Arc<PodList>,
+    pub pods: Arc<PodList>,
     last_groups: Mutex<Option<(Instant, GroupCounters)>>,
     rates: Mutex<HashMap<String, Rates>>,
 }
@@ -339,7 +358,7 @@ impl Usage {
     /// Every leaf cgroup with its memory now and its CPU and disk rates since the last reading.
     /// Readings less than a second apart reuse the previous rates rather than divide by almost
     /// zero.
-    async fn groups(&self) -> Result<Vec<(GroupReading, Option<Rates>)>, HttpError> {
+    pub async fn groups(&self) -> Result<Vec<(GroupReading, Option<Rates>)>, HttpError> {
         // The kernel builds memory.stat when it's read, ~15 ms for them all.
         let groups = tokio::task::spawn_blocking(|| leaf_groups("").into_iter().filter_map(read_group).collect::<Vec<_>>())
             .await

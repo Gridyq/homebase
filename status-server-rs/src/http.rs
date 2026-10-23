@@ -21,6 +21,8 @@ pub struct State {
     pub usage: Arc<crate::usage::Usage>,
     pub processes: Arc<crate::processes::Processes>,
     pub gpu: Arc<crate::gpu::Gpu>,
+    pub services: Arc<crate::services::Services>,
+    pub sampler: Arc<crate::status::Sampler>,
 }
 
 impl State {
@@ -30,6 +32,8 @@ impl State {
             usage: Arc::new(crate::usage::Usage::new()),
             processes: Default::default(),
             gpu: Default::default(),
+            services: Default::default(),
+            sampler: Default::default(),
             config,
         }
     }

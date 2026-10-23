@@ -1,8 +1,10 @@
 //! A reading that's slow to take and asked for every few seconds. One younger than `stale_after`
 //! is answered as is, and one younger than `max_age` is answered while a fresh one is taken in
 //! the background. Only one reading is taken at a time; whoever waited for it gets that one.
+//! After changing what it reads, `expire` makes the next call wait for a fresh one.
 
 use std::future::Future;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -13,6 +15,8 @@ pub struct Refreshed<T, F> {
     label: &'static str,
     last: Mutex<Option<(Arc<T>, Instant)>>,
     taking: tokio::sync::Mutex<()>,
+    /// Bumped on expiry, so a reading that started before a change isn't kept as fresh.
+    generation: AtomicU64,
 }
 
 impl<T, F, Fut> Refreshed<T, F>
@@ -29,6 +33,7 @@ where
             label,
             last: Mutex::new(None),
             taking: Default::default(),
+            generation: AtomicU64::new(0),
         })
     }
 
@@ -58,9 +63,19 @@ where
         {
             return Ok(value);
         }
+        let started = self.generation.load(Ordering::SeqCst);
         let value = Arc::new((self.take)().await?);
-        *self.last.lock().unwrap() = Some((Arc::clone(&value), Instant::now()));
+        let mut last = self.last.lock().unwrap();
+        if self.generation.load(Ordering::SeqCst) == started {
+            *last = Some((Arc::clone(&value), Instant::now()));
+        }
         Ok(value)
+    }
+
+    pub fn expire(&self) {
+        let mut last = self.last.lock().unwrap();
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        *last = None;
     }
 }
 
@@ -94,6 +109,31 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(350)).await;
         assert_eq!(*cache.get().await.unwrap(), 3, "too old: waits for a new one");
         assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn a_reading_from_before_expiry_is_not_kept() {
+        let state = Arc::new(AtomicU32::new(1));
+        let source = Arc::clone(&state);
+        let cache = Refreshed::new("test", Duration::from_secs(10), Duration::from_secs(20), move || {
+            let source = Arc::clone(&source);
+            async move {
+                let value = source.load(Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                Ok(value)
+            }
+        });
+        let early = tokio::spawn({
+            let cache = Arc::clone(&cache);
+            async move { cache.get().await }
+        });
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        // Something changes while that reading is under way.
+        state.store(2, Ordering::SeqCst);
+        cache.expire();
+        assert_eq!(*early.await.unwrap().unwrap(), 1);
+        assert_eq!(*cache.get().await.unwrap(), 2, "waits for a reading taken after the change");
+        assert_eq!(*cache.get().await.unwrap(), 2);
     }
 
     #[tokio::test]

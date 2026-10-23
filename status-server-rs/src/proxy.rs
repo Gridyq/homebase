@@ -5,8 +5,9 @@ use std::net::SocketAddr;
 
 use axum::body::Body;
 use axum::extract::{ConnectInfo, Request, State as AxumState};
-use axum::http::{HeaderValue, StatusCode, Uri};
+use axum::http::{HeaderValue, Method, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
+use http_body_util::BodyExt;
 use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
@@ -32,11 +33,37 @@ pub async fn forward(AxumState(state): AxumState<State>, ConnectInfo(peer): Conn
     if let Ok(v) = HeaderValue::from_str(&peer.ip().to_canonical().to_string()) {
         req.headers_mut().insert("x-forwarded-for", v);
     }
+    // Starting, stopping and game mode change what the dashboard shows.
+    let changes_services =
+        req.method() == Method::POST && (req.uri().path().starts_with("/api/services/") || req.uri().path() == "/api/game-mode");
     match state.upstream.0.request(req).await {
-        Ok(res) => res.map(Body::new),
+        Ok(res) => {
+            // The Node server answers once the change is made.
+            if changes_services {
+                state.services.expire(&state.usage);
+            }
+            res.map(Body::new)
+        }
         Err(e) => {
             eprintln!("Passing a request on failed: {e}");
             HttpError(StatusCode::BAD_GATEWAY, "The status server's Node part isn't answering".into()).into_response()
         }
     }
+}
+
+/// One of the Node server's endpoints, for what only it knows, such as game mode.
+pub async fn get_json(state: &State, path: &str) -> Result<serde_json::Value, String> {
+    let token = tokio::fs::read_to_string(&state.config.token_path)
+        .await
+        .map_err(|e| e.to_string())?;
+    let req = Request::get(format!("{}{path}", state.config.upstream))
+        .header(header::AUTHORIZATION, format!("Bearer {}", token.trim()))
+        .body(Body::empty())
+        .map_err(|e| e.to_string())?;
+    let res = state.upstream.0.request(req).await.map_err(|e| e.to_string())?;
+    if !res.status().is_success() {
+        return Err(format!("answered {}", res.status()));
+    }
+    let body = res.into_body().collect().await.map_err(|e| e.to_string())?.to_bytes();
+    serde_json::from_slice(&body).map_err(|e| e.to_string())
 }

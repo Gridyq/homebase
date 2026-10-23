@@ -12,6 +12,8 @@ mod http;
 mod kernel;
 mod processes;
 mod proxy;
+mod services;
+mod status;
 mod usage;
 
 use std::net::SocketAddr;
@@ -36,8 +38,11 @@ async fn main() {
         token_path: env_or("TOKEN_PATH", "../status-server/token").into(),
     });
     let state = http::State::new(config);
+    let sampler = Arc::clone(&state.sampler);
+    tokio::spawn(async move { sampler.run().await });
 
     let api = Router::new()
+        .route("/api/status", get(status::handler))
         .route("/api/usage", get(usage::handler))
         .route("/api/processes", get(processes::handler))
         .route("/api/gpu", get(gpu::handler))

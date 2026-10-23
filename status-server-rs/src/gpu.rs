@@ -66,7 +66,7 @@ struct Client {
 }
 
 /// The first card that reports how busy it is, which skips display-only devices.
-fn card() -> Option<PathBuf> {
+pub fn card() -> Option<PathBuf> {
     kernel::names("/sys/class/drm")
         .into_iter()
         .filter(|c| {
