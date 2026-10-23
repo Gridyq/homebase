@@ -8,6 +8,21 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
+pub enum ReadError {
+    /// There, but reading it failed (permissions, a disk error).
+    Unreadable(String),
+    /// Read, but not what was saved (cut short, or hand-edited wrong).
+    Invalid(String),
+}
+
+impl std::fmt::Display for ReadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Self::Unreadable(e) | Self::Invalid(e) => f.write_str(e),
+        }
+    }
+}
+
 /// A module's saved state, as JSON in one file.
 pub struct JsonFile {
     path: PathBuf,
@@ -28,12 +43,13 @@ impl JsonFile {
         })
     }
 
-    /// Like `load`, but tells a missing file (`Ok(None)`) from one that can't be read.
-    pub fn read<T: DeserializeOwned>(&self) -> Result<Option<T>, String> {
+    /// Like `load`, but tells a missing file (`Ok(None)`) from one that can't be read, and that
+    /// from one that isn't valid JSON.
+    pub fn read<T: DeserializeOwned>(&self) -> Result<Option<T>, ReadError> {
         match std::fs::read(&self.path) {
-            Ok(bytes) => serde_json::from_slice(&bytes).map(Some).map_err(|e| e.to_string()),
+            Ok(bytes) => serde_json::from_slice(&bytes).map(Some).map_err(|e| ReadError::Invalid(e.to_string())),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(e.to_string()),
+            Err(e) => Err(ReadError::Unreadable(e.to_string())),
         }
     }
 

@@ -169,9 +169,14 @@ impl Conversions {
         let file = crate::files::JsonFile::new(dir.join("conversions.json"), "conversions");
         let saved = match file.read() {
             Ok(Some(saved)) => saved,
-            // Paused at first, so it waits to be switched on from the app.
+            // Paused at first, so it waits to be switched on from the app; and paused when the
+            // file is there but can't be read, rather than start work it may have been told not to.
             Ok(None) => Saved { paused: true, ..Saved::default() },
-            Err(e) => {
+            Err(crate::files::ReadError::Unreadable(e)) => {
+                eprintln!("Couldn't read conversions.json, so starting paused: {e}");
+                Saved { paused: true, ..Saved::default() }
+            }
+            Err(crate::files::ReadError::Invalid(e)) => {
                 eprintln!("Couldn't read conversions.json: {e}");
                 Saved::default()
             }

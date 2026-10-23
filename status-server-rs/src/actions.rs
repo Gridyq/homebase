@@ -278,8 +278,8 @@ pub async fn read_logs(state: &State, id: &str, window: LogWindow) -> Result<Log
         "json",
         "--output-fields=MESSAGE,PRIORITY"
     ]);
-    // After a cursor, -n keeps only the last lines of what came since, so it's set well above
-    // what a poll a few seconds later can bring, yet still bounded for a cursor from long ago.
+    // After a cursor, -n takes the first lines that came since, and the next poll carries on from
+    // the last of them: a cursor from long ago catches up a page at a time instead of all at once.
     match &after {
         Some(after) => args.extend(args![format!("--after-cursor={after}"), "-n", AFTER_CURSOR_LINES.to_string()]),
         None => args.extend(args!["-n", count.to_string()]),

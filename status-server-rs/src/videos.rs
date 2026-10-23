@@ -219,6 +219,10 @@ pub async fn action(
                     "Only failed or cancelled downloads can be retried".into(),
                 ));
             }
+            // Cancelled but yt-dlp hasn't exited yet: finish() would mark the retry failed.
+            if state.videos.running.lock().unwrap().as_ref().is_some_and(|(running, _)| *running == id) {
+                return Err(HttpError(StatusCode::CONFLICT, "Still stopping it; try again in a moment".into()));
+            }
             let job = &mut jobs[i];
             job.insert("state".into(), json!("queued"));
             for k in ["error", "note", "progress"] {

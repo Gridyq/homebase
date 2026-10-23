@@ -21,12 +21,12 @@ use crate::http::State;
 /// together rather than as a stop and then a start.
 const SETTLE: Duration = Duration::from_millis(1500);
 const RECONNECT: Duration = Duration::from_secs(30);
-/// A unit's object path, as systemd escapes its name: anything but a letter or digit becomes
-/// `_` and its hex code.
+/// A unit's object path, as systemd escapes its name (bus_label_escape): anything but a letter
+/// or digit becomes `_` and its hex code, and so does a digit at the start.
 fn unit_object_path(unit: &str) -> String {
     let mut path = String::from("/org/freedesktop/systemd1/unit/");
-    for b in unit.bytes() {
-        if b.is_ascii_alphanumeric() {
+    for (i, b) in unit.bytes().enumerate() {
+        if b.is_ascii_alphabetic() || (b.is_ascii_digit() && i > 0) {
             path.push(b as char);
         } else {
             path.push_str(&format!("_{b:02x}"));
@@ -271,6 +271,7 @@ mod tests {
         assert_eq!(to_json(&V::from(ObjectPath::try_from("/a/b").unwrap())), json!("/a/b"));
         assert_eq!(unit_object_path("tailscaled.service"), "/org/freedesktop/systemd1/unit/tailscaled_2eservice");
         assert_eq!(unit_object_path("app-org.kde.x-1.scope"), "/org/freedesktop/systemd1/unit/app_2dorg_2ekde_2ex_2d1_2escope");
+        assert_eq!(unit_object_path("9p.mount"), "/org/freedesktop/systemd1/unit/_39p_2emount");
         assert!(shown_system_unit("/org/freedesktop/systemd1/unit/tailscaled_2eservice"));
         assert!(watched_unit("/org/freedesktop/systemd1/unit/sonarr_2eservice"));
         assert!(!watched_unit("/org/freedesktop/systemd1/unit/app_2dorg_2ekde_2ekonsole_2d12_2escope"));

@@ -40,6 +40,9 @@ pub const GAME_CHECK_INTERVAL: Duration = Duration::from_secs(10);
 /// bounce them.
 const GAME_GRACE_MS: i64 = 30_000;
 const UNITS_TIMEOUT: Duration = Duration::from_secs(180);
+/// Between tries at starting the services after that failed: rarely enough not to hit systemd's
+/// start limit on a unit that keeps failing.
+const START_RETRY_MS: i64 = 5 * 60_000;
 
 #[derive(Default, Clone)]
 struct Mode {
@@ -50,6 +53,9 @@ struct Mode {
     game: Option<String>,
     last_seen: Option<i64>,
     since: Option<i64>,
+    /// Starting the services when game mode went off failed: when to try again. Not saved; a
+    /// restart of this server tries nothing, but the services start with the machine anyway.
+    retry_start_at: Option<i64>,
 }
 
 pub struct GameMode {
@@ -145,45 +151,84 @@ async fn stop_units(state: &State) -> Result<(), String> {
 }
 
 /// Starts or stops the services if game mode should change.
+/// Starts what game mode stopped, apart from the services that only run on demand.
+async fn start_units(state: &State) -> Result<(), String> {
+    let mut start = args!["--user", "start"].to_vec();
+    start.extend(unit_files(|u| !ON_DEMAND_UNITS.contains(&u)));
+    let result = run("systemctl", &start, UNITS_TIMEOUT).await.map(|_| ());
+    state.services.expire(&state.usage);
+    result
+}
+
 async fn update(state: &State) {
     let gm = &state.game_mode;
     let _changing = gm.changing.lock().await;
-    let (want, game) = {
+    enum Next {
+        Change(bool, Option<String>),
+        RetryStart,
+        Nothing,
+    }
+    let next = {
         let mut m = gm.mode.lock().unwrap();
         let want = m.manual.unwrap_or(m.game.is_some());
-        if want == m.active {
-            return;
+        if want != m.active {
+            // On straight away, so what it stops refuses work while it does; saved once it's done.
+            m.active = want;
+            m.since = Some(now_ms());
+            m.retry_start_at = None;
+            Next::Change(want, m.game.clone())
+        } else if !want && m.retry_start_at.is_some_and(|at| now_ms() >= at) {
+            Next::RetryStart
+        } else {
+            Next::Nothing
         }
-        // On straight away, so what it stops refuses work while it does; saved once it's done.
-        m.active = want;
-        m.since = Some(now_ms());
-        (want, m.game.clone())
+    };
+    let (want, game) = match next {
+        Next::Change(want, game) => (want, game),
+        Next::RetryStart => return retry_start(state).await,
+        Next::Nothing => return,
     };
     println!(
         "Game mode {}{}",
         if want { "on" } else { "off" },
         game.as_ref().map(|g| format!(" ({g})")).unwrap_or_default()
     );
-    let result = if want {
-        stop_units(state).await
-    } else {
-        let mut start = args!["--user", "start"].to_vec();
-        start.extend(unit_files(|u| !ON_DEMAND_UNITS.contains(&u)));
-        let result = run("systemctl", &start, UNITS_TIMEOUT).await.map(|_| ());
-        state.services.expire(&state.usage);
-        result
-    };
-    // The change stands either way: systemctl stops or starts every unit it can, and one that
-    // failed shows as failed (and is alerted on) like any other. Going back would leave the rest
-    // stopped with game mode off, or game mode stuck on with no game.
+    let result = if want { stop_units(state).await } else { start_units(state).await };
+    // The change stands either way: going back would leave the services stopped with game mode
+    // off, or game mode stuck on with no game. A stop does what it can; a start that didn't work
+    // is tried again (see retry_start), since a unit left inactive raises no alert.
     if let Err(e) = result {
         eprintln!("Couldn't {} all the game mode services: {e}", if want { "stop" } else { "start" });
+        if !want {
+            gm.mode.lock().unwrap().retry_start_at = Some(now_ms() + START_RETRY_MS);
+        }
     }
     let mut e = Event::new(now_ms(), "game");
     e.on = Some(want);
     e.detail = game;
     state.recorder.events.lock().unwrap().add(e);
     gm.save(&gm.mode.lock().unwrap());
+}
+
+/// Another go at starting the services after it failed when game mode went off.
+async fn retry_start(state: &State) {
+    let result = start_units(state).await;
+    let mut m = state.game_mode.mode.lock().unwrap();
+    // Game mode may have come back on meanwhile; then there's nothing to start.
+    if m.active {
+        m.retry_start_at = None;
+        return;
+    }
+    match result {
+        Ok(()) => {
+            println!("Started the game mode services on another try");
+            m.retry_start_at = None;
+        }
+        Err(e) => {
+            eprintln!("Starting the game mode services failed again: {e}");
+            m.retry_start_at = Some(now_ms() + START_RETRY_MS);
+        }
+    }
 }
 
 fn steam_dir() -> PathBuf {
@@ -272,6 +317,7 @@ pub async fn start(state: State) {
             game: saved["game"].as_str().map(str::to_owned),
             last_seen: Some(now),
             since: Some(now),
+            retry_start_at: None,
         };
         // After a reboot the services started with everything else, so stop them again.
         if let Err(e) = stop_units(&state).await {
