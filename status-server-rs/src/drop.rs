@@ -14,7 +14,7 @@ use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use futures_util::StreamExt;
 use serde_json::{Value, json};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use unicode_normalization::UnicodeNormalization;
 
 use crate::args;
@@ -165,12 +165,38 @@ pub async fn receive(AxumState(_): AxumState<State>, req: Request) -> Result<Jso
         .map_err(|e| HttpError::internal(e.to_string()))?;
     let mut random = [0u8; 6];
     getrandom(&mut random);
-    let part = dir.join(format!(".{}.part", random.iter().map(|b| format!("{b:02x}")).collect::<String>()));
-    let result = save(req.into_body(), &part, &dir, &name).await;
-    let _ = tokio::fs::remove_file(&part).await;
-    let (saved, size) = result?;
+    let part = PartFile(dir.join(format!(".{}.part", random.iter().map(|b| format!("{b:02x}")).collect::<String>())));
+    let (saved, size) = save(req.into_body(), &part.0, &dir, &name).await?;
+    drop(part);
     notify_desktop("Received from your phone", &saved);
     Ok(Json(json!({ "name": saved, "size": size })))
+}
+
+/// An upload in progress, removed however the request ends; a dropped connection ends it without
+/// the handler getting any further.
+struct PartFile(PathBuf);
+
+impl Drop for PartFile {
+    fn drop(&mut self) {
+        // Already gone when the upload was saved under its name.
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// Uploads cut short by a restart, which no request is left to remove.
+pub fn sweep_parts() {
+    let Ok(entries) = std::fs::read_dir(drop_dir()) else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let old = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .is_ok_and(|t| t.elapsed().is_ok_and(|age| age >= Duration::from_secs(3600)));
+        if name.starts_with('.') && name.ends_with(".part") && old {
+            println!("Removing the unfinished upload {name}");
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 async fn save(body: Body, part: &std::path::Path, dir: &std::path::Path, name: &str) -> Result<(String, u64), HttpError> {
@@ -258,6 +284,8 @@ pub async fn delete(req: Request) -> Result<Json<Value>, HttpError> {
 }
 
 /// Runs a desktop program that might stay open, and returns once it has started or failed.
+/// Only the program itself is waited for, not its stderr: a browser xdg-open starts keeps that
+/// open until it closes.
 async fn start_desktop(program: &str, args: &[&str], input: Option<&str>) -> Result<(), HttpError> {
     let mut child = tokio::process::Command::new(program)
         .args(args)
@@ -269,16 +297,22 @@ async fn start_desktop(program: &str, args: &[&str], input: Option<&str>) -> Res
     if let (Some(text), Some(mut stdin)) = (input, child.stdin.take()) {
         let _ = stdin.write_all(text.as_bytes()).await;
     }
-    let out = child.wait_with_output().await.map_err(|e| HttpError::internal(e.to_string()))?;
-    if out.status.success() {
+    let mut stderr_pipe = child.stderr.take();
+    let status = match tokio::time::timeout(Duration::from_secs(10), child.wait()).await {
+        // Still running: it started.
+        Err(_) => return Ok(()),
+        Ok(status) => status.map_err(|e| HttpError::internal(e.to_string()))?,
+    };
+    if status.success() {
         return Ok(());
     }
-    let stderr = String::from_utf8_lossy(&out.stderr).trim().to_owned();
+    let mut stderr = Vec::new();
+    if let Some(pipe) = stderr_pipe.as_mut() {
+        let _ = tokio::time::timeout(Duration::from_secs(1), pipe.read_to_end(&mut stderr)).await;
+    }
+    let stderr = String::from_utf8_lossy(&stderr).trim().to_owned();
     Err(HttpError::internal(if stderr.is_empty() {
-        format!(
-            "{program} failed ({})",
-            out.status.code().map_or("killed".into(), |c| c.to_string())
-        )
+        format!("{program} failed ({})", status.code().map_or("killed".into(), |c| c.to_string()))
     } else {
         stderr
     }))

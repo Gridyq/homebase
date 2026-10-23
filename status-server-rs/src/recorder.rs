@@ -203,10 +203,21 @@ pub async fn refresh_drives(state: &State) {
 }
 
 async fn check_journal(state: &State) {
-    let since = state.recorder.events.lock().unwrap().journal_window(now_ms());
-    let journal = read_memory_kills(since).await;
+    let now = now_ms();
+    let since = state.recorder.events.lock().unwrap().journal_since();
+    let journal = match read_memory_kills(since).await {
+        Ok(journal) => journal,
+        Err(e) => {
+            eprintln!("Checking the journal failed: {e}");
+            return;
+        }
+    };
     let pods = state.usage.pods.get().await.unwrap_or_default();
-    let notices = state.recorder.events.lock().unwrap().note_memory_kills(&journal, since, &pods);
+    let notices = {
+        let mut events = state.recorder.events.lock().unwrap();
+        events.journal_read(now);
+        events.note_memory_kills(&journal, since, &pods)
+    };
     send(state, notices).await;
 }
 

@@ -226,6 +226,8 @@ pub async fn set_power(AxumState(state): AxumState<State>, body: Bytes) -> Resul
 // Storage: what fills the media drive.
 
 const STORAGE_ITEMS: usize = 8;
+/// Walking the drive takes a while and competes with streams, so an answer is reused this long.
+const STORAGE_FRESH: Duration = Duration::from_secs(5 * 60);
 
 /// What the media drive holds, in this order: du counts a hardlinked file only the first time it
 /// sees it, so downloads that are also in the library count toward the library.
@@ -266,7 +268,21 @@ async fn du(args: Vec<String>) -> Result<Vec<(String, f64)>, HttpError> {
         .collect())
 }
 
+/// One walk at a time; whoever arrives during one gets its answer.
 pub async fn storage() -> Result<Json<Value>, HttpError> {
+    static LAST: tokio::sync::Mutex<Option<(std::time::Instant, Value)>> = tokio::sync::Mutex::const_new(None);
+    let mut last = LAST.lock().await;
+    if let Some((at, answer)) = last.as_ref()
+        && at.elapsed() < STORAGE_FRESH
+    {
+        return Ok(Json(answer.clone()));
+    }
+    let answer = read_storage().await?;
+    *last = Some((std::time::Instant::now(), answer.clone()));
+    Ok(Json(answer))
+}
+
+async fn read_storage() -> Result<Value, HttpError> {
     let root = media_root();
     let present: Vec<_> = MEDIA_FOLDERS.iter().filter(|(_, dir, ..)| root.join(dir).exists()).collect();
     let mut tree = args!["-d", "2"].to_vec();
@@ -305,7 +321,7 @@ pub async fn storage() -> Result<Json<Value>, HttpError> {
     let total = fs.f_blocks as f64 * bsize;
     let downloads = categories.iter().find(|c| c["id"] == "downloads");
     let downloads_alone = alone.iter().find(|(p, _)| p == "Downloads").map_or(0.0, |(_, b)| *b);
-    Ok(Json(json!({
+    Ok(json!({
         "mount": root.to_string_lossy(),
         "totalBytes": num(total),
         "usedBytes": num(total - fs.f_bfree as f64 * bsize),
@@ -314,7 +330,7 @@ pub async fn storage() -> Result<Json<Value>, HttpError> {
         // Downloads that are hardlinked into the library and so take no extra room.
         "sharedDownloadBytes": num(downloads.map_or(0.0, |d| (downloads_alone - d["bytes"].as_f64().unwrap_or(0.0)).max(0.0))),
         "at": now_ms(),
-    })))
+    }))
 }
 
 // ---------------------------------------------------------------------------------------------

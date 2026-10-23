@@ -42,6 +42,9 @@ pub struct Event {
     pub detail: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub drive: Option<String>,
+    /// For problems: which one, as the detail's numbers change while it lasts.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub key: Option<String>,
 }
 
 impl Event {
@@ -55,6 +58,7 @@ impl Event {
             by: None,
             detail: None,
             drive: None,
+            key: None,
         }
     }
 
@@ -263,25 +267,31 @@ impl Events {
             .collect();
         // Logged once per problem, though a restart of this server forgets what it already knew.
         let drive_of = |k: &str| k.strip_prefix("drive:").and_then(|r| r.split_once(':')).map(|(d, _)| d.to_owned());
-        let open = |list: &[Event], v: &str| {
+        // Events from before problems had keys are matched on their text.
+        let open = |list: &[Event], k: &str, v: &str| {
             list.iter()
                 .rev()
-                .find(|e| (e.kind == "problem" || e.kind == "resolved") && e.detail.as_deref() == Some(v))
+                .find(|e| {
+                    (e.kind == "problem" || e.kind == "resolved")
+                        && e.key.as_deref().map_or(e.detail.as_deref() == Some(v), |key| key == k)
+                })
                 .is_some_and(|e| e.kind == "problem")
         };
         for (k, v) in &current {
-            if !has(&self.known, k) && !open(&self.list, v) {
+            if !has(&self.known, k) && !open(&self.list, k, v) {
                 let mut e = Event::new(now, "problem");
                 e.detail = Some(v.clone());
                 e.drive = drive_of(k);
+                e.key = Some(k.clone());
                 self.add(e);
             }
         }
         for (k, v) in self.known.clone() {
-            if !has(&current, &k) && open(&self.list, &v) {
+            if !has(&current, &k) && open(&self.list, &k, &v) {
                 let mut e = Event::new(now, "resolved");
                 e.detail = Some(v.clone());
                 e.drive = drive_of(&k);
+                e.key = Some(k.clone());
                 self.add(e);
             }
         }
@@ -307,9 +317,15 @@ impl Events {
         notices
     }
 
-    /// Since when the journal is still to be looked through for memory kills; moves it to now.
-    pub fn journal_window(&mut self, now: i64) -> i64 {
-        std::mem::replace(&mut self.journal_checked_at, now)
+    /// Since when the journal is still to be looked through for memory kills.
+    pub fn journal_since(&self) -> i64 {
+        self.journal_checked_at
+    }
+
+    /// The journal has been read up to `at`; not called when reading it failed, so the next look
+    /// covers that time again.
+    pub fn journal_read(&mut self, at: i64) {
+        self.journal_checked_at = self.journal_checked_at.max(at);
     }
 
     /// Memory kills in the journal output since `since`, logged unless already known.
@@ -401,7 +417,7 @@ fn service_of_cgroup(cgroup: &str, pods: &[Pod]) -> (Option<String>, String) {
 }
 
 /// journalctl output with the memory kills since `since`.
-pub async fn read_memory_kills(since: i64) -> String {
+pub async fn read_memory_kills(since: i64) -> Result<String, String> {
     let a = args![
         "-o",
         "json",
@@ -416,12 +432,10 @@ pub async fn read_memory_kills(since: i64) -> String {
         "_SYSTEMD_UNIT=systemd-oomd.service"
     ];
     // Exits with 1 when nothing matches.
-    match command::output("journalctl", &a, Duration::from_secs(30)).await {
-        Ok(out) => out.stdout,
-        Err(e) => {
-            eprintln!("Checking the journal failed: {e}");
-            String::new()
-        }
+    let out = command::output("journalctl", &a, Duration::from_secs(30)).await?;
+    match out.code {
+        Some(0 | 1) => Ok(out.stdout),
+        code => Err(format!("journalctl failed ({}): {}", code.map_or("killed".into(), |c| c.to_string()), out.stderr)),
     }
 }
 
@@ -596,6 +610,26 @@ mod tests {
             restarts,
             detail: None,
         }
+    }
+
+    #[test]
+    fn problems_resolve_after_their_numbers_change() {
+        let dir = std::env::temp_dir().join(format!("events-problems-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut ev = Events::new(&dir, 0);
+        let disk = |pct: u32| vec![("disk:/".to_owned(), format!("/ is {pct}% full"))];
+        assert_eq!(ev.note_problems(disk(91), 1000).len(), 1);
+        assert!(ev.note_problems(disk(93), 2000).is_empty());
+        let notices = ev.note_problems(Vec::new(), 3000);
+        assert_eq!(notices[0].title, "Server back to normal");
+        let kinds: Vec<_> = ev.list.iter().map(|e| e.kind.as_str()).collect();
+        assert_eq!(kinds, ["problem", "resolved"]);
+        // After a restart (nothing known), a problem still open in the log isn't logged again.
+        ev.note_problems(disk(95), 4000);
+        ev.known.clear();
+        ev.note_problems(disk(96), 5000);
+        assert_eq!(ev.list.iter().filter(|e| e.kind == "problem").count(), 2);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

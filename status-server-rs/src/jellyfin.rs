@@ -17,6 +17,8 @@ use crate::http::State;
 use crate::usage::now_ms;
 
 pub const JELLYFIN_URL: &str = "http://127.0.0.1:8096";
+/// Where the Jellyfin container sees the media drive.
+pub const MEDIA_IN_CONTAINER: &str = "/media/drive";
 const POLL_EVERY: Duration = Duration::from_secs(5);
 /// Jellyfin counts time in ticks of 100 ns.
 const TICKS_PER_MS: f64 = 10_000.0;
@@ -65,6 +67,7 @@ pub fn session(s: &Value) -> Option<Value> {
     let mut out = Map::new();
     let text = |v: &Value| v.as_str().filter(|t| !t.is_empty()).map(str::to_owned);
     out.insert("id".into(), json!(s["Id"]));
+    out.insert("itemId".into(), json!(item["Id"]));
     out.insert("user".into(), json!(text(&s["UserName"]).unwrap_or_else(|| "Someone".into())));
     for (from, to) in [("Client", "client"), ("DeviceName", "device")] {
         if let Some(v) = text(&s[from]) {
@@ -156,6 +159,39 @@ async fn read(state: &State) -> Result<Vec<Value>, String> {
     }
     let list: Value = serde_json::from_slice(&reply.body).map_err(|e| e.to_string())?;
     Ok(list.as_array().into_iter().flatten().filter_map(session).collect())
+}
+
+/// The files being played now, as the container sees them.
+pub async fn playing_paths(state: &State) -> Result<Vec<String>, String> {
+    let ids: Vec<String> = state
+        .jellyfin
+        .sessions()
+        .iter()
+        .filter_map(|s| s["itemId"].as_str().map(str::to_owned))
+        .collect();
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let key = api_key().ok_or("No jellyfin_api_key in the credentials file")?;
+    let reply = crate::client::call(
+        &state.upstream,
+        Method::GET,
+        &format!("{JELLYFIN_URL}/Items?ids={}&fields=Path", ids.join(",")),
+        &[("Authorization", format!("MediaBrowser Token=\"{key}\""))],
+        None,
+        Duration::from_secs(5),
+    )
+    .await?;
+    if !reply.status.is_success() {
+        return Err(format!("Jellyfin answered {}", reply.status.as_u16()));
+    }
+    let list: Value = serde_json::from_slice(&reply.body).map_err(|e| e.to_string())?;
+    Ok(list["Items"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|i| i["Path"].as_str().map(str::to_owned))
+        .collect())
 }
 
 fn report(state: &State) -> Value {

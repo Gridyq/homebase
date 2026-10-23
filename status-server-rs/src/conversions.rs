@@ -9,7 +9,8 @@
 //!   and attachments dropped, audio the iPhone can't play as E-AC-3, and the index at the front so
 //!   playback starts before the whole file loads.
 //!
-//! The new file replaces the original, then Sonarr or Radarr rescans the show or movie. The
+//! The new file is checked with ffprobe and waits while anyone plays the original, then replaces
+//! it, and Sonarr or Radarr rescans the show or movie. The
 //! libraries are watched (inotify), and scanned once a file has had time to settle after a change,
 //! and every half hour besides; what's been decided is kept in `conversions.json` by path, with
 //! the size and time the file had, so a changed file is looked at again. ffmpeg runs in a scope of
@@ -64,6 +65,9 @@ const HDR_TRANSFERS: &[&str] = &["smpte2084", "arib-std-b67"];
 const GAME_CHECK: Duration = Duration::from_secs(5);
 /// A job that hasn't moved in this long, while nothing's holding it, is reported as stuck.
 const STUCK_MS: i64 = 30 * 60 * 1000;
+/// How long a finished file waits for someone to stop playing the original before replacing it
+/// anyway, for a session that never ends.
+const PLAYING_WAIT: Duration = Duration::from_secs(4 * 3600);
 /// Failures in a row that are reported, since one bad file is normal and a run of them isn't.
 const FAILURES_REPORTED: usize = 3;
 
@@ -579,6 +583,33 @@ fn check_output(source: &Probe, made: &Probe) -> Result<(), String> {
     Ok(())
 }
 
+/// Waits while Jellyfin plays the original: a player reading it in ranges would otherwise seek
+/// into a different file once it's swapped.
+async fn wait_until_unplayed(state: &State, original: &Path) {
+    let Ok(relative) = original.strip_prefix(media_root()) else { return };
+    let seen_as = Path::new(crate::jellyfin::MEDIA_IN_CONTAINER).join(relative).to_string_lossy().into_owned();
+    let started = std::time::Instant::now();
+    loop {
+        let playing = match crate::jellyfin::playing_paths(state).await {
+            Ok(paths) => paths.contains(&seen_as),
+            // Better a seek that fails than a queue that never moves.
+            Err(e) => {
+                eprintln!("Couldn't ask Jellyfin what's playing: {e}");
+                false
+            }
+        };
+        let waited = started.elapsed() >= PLAYING_WAIT;
+        if let Some(job) = state.conversions.job.lock().unwrap().as_mut() {
+            job.held_for = (playing && !waited).then(|| "someone watching it".into());
+            job.progressed_at = now_ms();
+        }
+        if !playing || waited {
+            return;
+        }
+        tokio::time::sleep(Duration::from_secs(30)).await;
+    }
+}
+
 /// Moves `made` into the original's place as an MP4, unless the original changed meanwhile.
 fn replace(original: &Path, made: &Path, seen: (u64, i64)) -> Result<PathBuf, Outcome> {
     let Ok(meta) = std::fs::metadata(original) else {
@@ -672,6 +703,7 @@ async fn convert(state: &State, path: &str) -> Outcome {
                 if let Err(why) = checked {
                     break Outcome::Failed(format!("The converted file didn't check out, so the original is kept: {why}"));
                 }
+                wait_until_unplayed(state, original).await;
                 break match replace(original, &made, seen) {
                     Ok(target) => Outcome::Done {
                         path: target.to_string_lossy().into_owned(),
