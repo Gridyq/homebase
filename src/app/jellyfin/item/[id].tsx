@@ -22,7 +22,7 @@ import {
 } from '@/miniapps/jellyfin/components';
 import { addToPlaylist, PlaylistEntries } from '@/miniapps/jellyfin/playlists';
 import { playOnDevice } from '@/miniapps/jellyfin/remote-play';
-import { useJellyfin } from '@/miniapps/jellyfin/session';
+import { useIsAdmin, useJellyfin } from '@/miniapps/jellyfin/session';
 import { defaultSubtitleIndex, subtitleLabel, subtitleStreams, SUBTITLES_OFF } from '@/miniapps/jellyfin/subtitles';
 import { useAsync } from '@/miniapps/jellyfin/use-async';
 
@@ -33,6 +33,7 @@ export default function ItemDetail() {
   const { width, height } = useWindowDimensions();
   const gutter = useGutter();
   const [selectedSubtitle, setSubtitle] = useState<number>();
+  const isAdmin = useIsAdmin();
 
   const { data: loaded, error, loading, reload } = useAsync(() => client.item(id), id);
   // Watched/favorite changes made here, shown until the next reload catches up.
@@ -75,7 +76,7 @@ export default function ItemDetail() {
   const canMarkPlayed = playable || item.Type === 'Series' || item.Type === 'Season' || item.Type === 'BoxSet';
   const isPerson = item.Type === 'Person';
   const canAddToPlaylist = playable || item.Type === 'Series' || item.Type === 'Season' || item.Type === 'BoxSet';
-  const canPlayOn = playable || item.Type === 'Series' || item.Type === 'Season';
+  const canPlayOn = isAdmin && (playable || item.Type === 'Series' || item.Type === 'Season');
 
   const meta = [
     item.Type === 'Episode' && item.SeriesName,

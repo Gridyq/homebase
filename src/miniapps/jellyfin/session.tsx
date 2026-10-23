@@ -4,6 +4,7 @@ import { createContext, use, useEffect, useMemo, useState, type ReactNode } from
 
 import { createClient, signIn as apiSignIn, type JellyfinClient, type Session } from './api';
 import { clearLastPlayed } from './last-played';
+import { useAsync } from './use-async';
 
 export const SESSION_KEY = 'jellyfin.session';
 const DEVICE_ID_KEY = 'jellyfin.deviceId';
@@ -65,6 +66,13 @@ export function useJellyfinSession() {
   const ctx = use(SessionContext);
   if (!ctx) throw new Error('useJellyfinSession must be used inside JellyfinSessionProvider');
   return ctx;
+}
+
+/** False until the server confirms the signed-in user is an admin. */
+export function useIsAdmin(): boolean {
+  const client = useJellyfin();
+  const { data } = useAsync(() => client.isAdmin(), `admin:${client.session.userId}`);
+  return data === true;
 }
 
 /** For screens that are only reachable while signed in. */

@@ -5,9 +5,9 @@ import { ThemedText } from '@/components/themed-text';
 import { Spacing } from '@/constants/theme';
 import { useGutter } from '@/hooks/use-gutter';
 import { useTheme } from '@/hooks/use-theme';
-import { JellyfinError, type User } from '@/miniapps/jellyfin/api';
+import type { User } from '@/miniapps/jellyfin/api';
 import { Chip } from '@/miniapps/jellyfin/components';
-import { useJellyfin, useJellyfinSession } from '@/miniapps/jellyfin/session';
+import { useIsAdmin, useJellyfin, useJellyfinSession } from '@/miniapps/jellyfin/session';
 import { BITRATE_OPTIONS, useJellyfinSettings } from '@/miniapps/jellyfin/settings';
 import { useAsync } from '@/miniapps/jellyfin/use-async';
 
@@ -62,13 +62,13 @@ export default function JellyfinSettings() {
 
 /**
  * The server's "play next episode automatically" setting for every user. The Roku and iPhone
- * apps both follow it. Admins only; hidden for everyone else.
+ * apps both follow it. Only shown to admins.
  */
 function AutoplaySection() {
   const client = useJellyfin();
-  const { data: users, error, reload } = useAsync(() => client.users(), 'users');
-  if (error instanceof JellyfinError && error.status === 403) return null;
-  if (!users) return null;
+  const isAdmin = useIsAdmin();
+  const { data: users, reload } = useAsync(() => (isAdmin ? client.users() : Promise.resolve([])), `users:${isAdmin}`);
+  if (!isAdmin || !users?.length) return null;
 
   const isOn = (u: User) => u.Configuration?.EnableNextEpisodeAutoPlay !== false;
   const set = async (targets: User[], enabled: boolean) => {

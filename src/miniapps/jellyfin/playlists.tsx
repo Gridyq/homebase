@@ -20,7 +20,7 @@ import {
 } from './api';
 import { episodeLabel, formatRuntime, itemHref } from './components';
 import { playOnDevice } from './remote-play';
-import { useJellyfin } from './session';
+import { useIsAdmin, useJellyfin } from './session';
 import { useAsync } from './use-async';
 
 const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
@@ -132,6 +132,7 @@ function playEntry(playlistId: string, entry: BaseItem) {
 /** A playlist's entries in order: play from any of them, and reorder or remove them. */
 export function PlaylistEntries({ playlist }: { playlist: BaseItem }) {
   const client = useJellyfin();
+  const isAdmin = useIsAdmin();
   const theme = useTheme();
   const gutter = useGutter();
   const { width, height } = useWindowDimensions();
@@ -206,16 +207,18 @@ export function PlaylistEntries({ playlist }: { playlist: BaseItem }) {
   return (
     <View style={[styles.section, gutter]}>
       {firstVideo ? <Button title="Play all" onPress={() => playEntry(playlist.Id, firstVideo)} /> : null}
-      <View style={styles.buttons}>
-        {firstVideo ? (
+      {isAdmin ? (
+        <View style={styles.buttons}>
+          {firstVideo ? (
+            <View style={styles.button}>
+              <Button title="Play on…" variant="secondary" onPress={() => playOnDevice(client, playlist)} />
+            </View>
+          ) : null}
           <View style={styles.button}>
-            <Button title="Play on…" variant="secondary" onPress={() => playOnDevice(client, playlist)} />
+            <Button title="Share…" variant="secondary" onPress={() => sharePlaylist(client, playlist)} />
           </View>
-        ) : null}
-        <View style={styles.button}>
-          <Button title="Share…" variant="secondary" onPress={() => sharePlaylist(client, playlist)} />
         </View>
-      </View>
+      ) : null}
       {!entries.length ? (
         <ThemedText themeColor="textSecondary">
           Nothing here yet. Add movies or episodes from their pages with “+ Playlist”.

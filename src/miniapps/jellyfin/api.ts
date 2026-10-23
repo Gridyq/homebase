@@ -262,9 +262,17 @@ export function createClient(session: Session) {
     request<T>(serverUrl, path, deviceId, accessToken, { method: 'POST', body: body ?? {} });
 
   const itemFields = 'Overview,PrimaryImageAspectRatio,ParentBackdropItemId';
+  let me: Promise<User> | undefined;
 
   return {
     session,
+
+    /** Asked once per sign-in. Sharing, "Play on…" and other people's settings are for admins only. */
+    isAdmin: () => {
+      me ??= get<User>('/Users/Me');
+      me.catch(() => (me = undefined));
+      return me.then((u) => !!u.Policy?.IsAdministrator);
+    },
 
     signOut: () => post<void>('/Sessions/Logout').catch(() => undefined),
 
