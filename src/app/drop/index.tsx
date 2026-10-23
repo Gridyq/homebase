@@ -1,6 +1,6 @@
 import { File } from 'expo-file-system';
 import { router } from 'expo-router';
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { ActionSheetIOS, Alert, Pressable, RefreshControl, ScrollView, StyleSheet, TextInput, View } from 'react-native';
 
 import { Button } from '@/components/button';
@@ -16,10 +16,10 @@ import {
   pickFiles,
   pickPhotos,
   sendText,
-  uploadFile,
   type DropFile,
   type Picked,
 } from '@/miniapps/drop/api';
+import { dismissUpload, retryUpload, startUploads, useUploads, type Upload } from '@/miniapps/drop/uploads';
 import { type Connection } from '@/miniapps/server/api';
 import { Card, formatBytes, formatWhen, Meter, PollStatus, Section, StatusColors } from '@/miniapps/server/components';
 import { useServerConnection } from '@/miniapps/server/connection';
@@ -27,8 +27,7 @@ import { usePolling } from '@/miniapps/server/use-polling';
 
 const FOLDER_POLL_MS = 10_000;
 
-/** `picked` is kept on an upload so a failed one can be tried again. */
-type Transfer = { id: string; name: string; progress: number; error?: string; picked?: Picked };
+type Transfer = { id: string; name: string; progress: number; error?: string };
 
 export default function DropHome() {
   const { connection } = useServerConnection();
@@ -56,14 +55,11 @@ function Drop({ conn }: { conn: Connection }) {
   const [pulled, setPulled] = useState(false);
   const [text, setText] = useState('');
   const [sending, setSending] = useState(false);
-  const [uploads, setUploads] = useState<Transfer[]>([]);
+  const { uploads, finished } = useUploads();
   // The file being fetched for opening, and how far along it is.
   const [opening, setOpening] = useState<Transfer>();
   // Set straight away, so a second tap can't start another download before the first re-renders.
   const openingNow = useRef(false);
-
-  const updateUpload = (id: string, change: Partial<Transfer>) =>
-    setUploads((list) => list.map((u) => (u.id === id ? { ...u, ...change } : u)));
 
   const send = async () => {
     setSending(true);
@@ -78,25 +74,16 @@ function Drop({ conn }: { conn: Connection }) {
     }
   };
 
-  // One at a time, so a big video doesn't hold up the photos picked with it for long.
-  const upload = async (picked: Picked[]) => {
-    const batch = picked.map((p, i) => ({ ...p, id: `${Date.now()}-${i}` }));
-    setUploads((list) => [...list, ...batch.map(({ id, name, file }) => ({ id, name, progress: 0, picked: { file, name } }))]);
-    for (const { id, file, name } of batch) {
-      try {
-        await uploadFile(conn, file, name, (progress) => updateUpload(id, { progress }));
-        setUploads((list) => list.filter((u) => u.id !== id));
-      } catch (e) {
-        updateUpload(id, { error: e instanceof Error ? e.message : String(e) });
-      }
-    }
-    folder.refresh();
-  };
+  // A file that just arrived on the PC shows up in its folder.
+  const { refresh } = folder;
+  useEffect(() => {
+    if (finished) refresh();
+  }, [finished, refresh]);
 
   const choose = async (pick: () => Promise<Picked[]>) => {
     try {
       const picked = await pick();
-      if (picked.length) await upload(picked);
+      if (picked.length) startUploads(conn, picked);
     } catch (e) {
       Alert.alert('Couldn’t pick', e instanceof Error ? e.message : String(e));
     }
@@ -110,19 +97,12 @@ function Drop({ conn }: { conn: Connection }) {
     choose(pickPhotos);
   };
 
-  const failedUpload = (u: Transfer) =>
+  const failedUpload = (u: Upload) =>
     ActionSheetIOS.showActionSheetWithOptions(
-      {
-        title: u.name,
-        message: u.error,
-        options: [...(u.picked ? ['Try again'] : []), 'Dismiss', 'Cancel'],
-        cancelButtonIndex: u.picked ? 2 : 1,
-      },
+      { title: u.name, message: u.error, options: ['Try again', 'Dismiss', 'Cancel'], cancelButtonIndex: 2 },
       (i) => {
-        const choice = (u.picked ? ['retry', 'dismiss'] : ['dismiss'])[i];
-        if (!choice) return;
-        setUploads((list) => list.filter((x) => x.id !== u.id));
-        if (choice === 'retry' && u.picked) upload([u.picked]);
+        if (i === 0) retryUpload(conn, u.id);
+        if (i === 1) dismissUpload(u.id);
       },
     );
 

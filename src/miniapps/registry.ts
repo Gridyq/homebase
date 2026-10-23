@@ -1,6 +1,7 @@
 import type { Href, Link } from 'expo-router';
 import type { ComponentProps } from 'react';
 
+import { dropActivity } from './drop/uploads';
 import { jellyfinActivity, jellyfinShortcuts } from './jellyfin/last-played';
 import { requestsActivity } from './requests/activity';
 import { serverActivity } from './server/activity';
@@ -82,6 +83,7 @@ export const miniApps: MiniApp[] = [
     glyph: '⇄',
     color: '#0090FF',
     href: '/drop',
+    activity: dropActivity,
   },
   {
     id: 'videos',
