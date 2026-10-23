@@ -1456,6 +1456,122 @@ async function setSpeedLimit(limit) {
   return speedLimit();
 }
 
+// Tdarr converts the library to HEVC MP4s. It has its own login (the shared credentials) that
+// hands out a bearer token. The phone sees what's converting, what's done and what was saved,
+// and can pause the node; everything else stays in Tdarr's web UI.
+
+const TDARR_URL = process.env.TDARR_URL ?? 'http://localhost:8265';
+const GIB = 1024 ** 3;
+let tdarrToken;
+
+async function tdarrLogin() {
+  const creds = await readFile(path.join(ARR_DIR, 'credentials'), 'utf8').catch(() => '');
+  const username = /^username=(.*)$/m.exec(creds)?.[1]?.trim();
+  const password = /^password=(.*)$/m.exec(creds)?.[1]?.trim();
+  if (!username || !password) throw new HttpError(503, "Tdarr's login isn't set up on the server");
+  const res = await fetch(`${TDARR_URL}/api/v2/public/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password }),
+    signal: AbortSignal.timeout(10_000),
+  }).catch((e) => {
+    throw new HttpError(502, `Tdarr didn't answer (${e.name === 'TimeoutError' ? 'timed out' : e.message})`);
+  });
+  tdarrToken = res.ok ? (await res.json()).token : undefined;
+  if (!tdarrToken) throw new HttpError(502, "Tdarr didn't accept the login");
+}
+
+async function tdarr(apiPath, body) {
+  gameModeError('Tdarr');
+  for (let attempt = 0; ; attempt++) {
+    if (!tdarrToken) await tdarrLogin();
+    let res;
+    try {
+      res = await fetch(`${TDARR_URL}/api/v2/${apiPath}`, {
+        method: body ? 'POST' : 'GET',
+        headers: { Authorization: `Bearer ${tdarrToken}`, 'Content-Type': 'application/json' },
+        body: body && JSON.stringify(body),
+        signal: AbortSignal.timeout(30_000),
+      });
+    } catch (e) {
+      throw new HttpError(502, `Tdarr didn't answer (${e.name === 'TimeoutError' ? 'timed out' : e.message})`);
+    }
+    if ((res.status === 401 || res.status === 403) && attempt === 0) {
+      tdarrToken = undefined;
+      continue;
+    }
+    if (!res.ok) throw new HttpError(502, `Tdarr answered ${res.status}`);
+    // Updates answer a plain "OK".
+    const text = await res.text();
+    return text && res.headers.get('content-type')?.includes('json') ? JSON.parse(text) : text;
+  }
+}
+
+const tdarrFile = (file) => ({ file: path.basename(file, path.extname(file)), show: file.startsWith('/data/Shows/') });
+
+/** The file list carries every file's full probe, so it's fetched at most every 15 s. */
+const TDARR_FILES_TTL_MS = 15_000;
+let tdarrFiles;
+
+async function conversions() {
+  if (!tdarrFiles || Date.now() - tdarrFiles.at > TDARR_FILES_TTL_MS) {
+    const files = await tdarr('cruddb', { data: { collection: 'FileJSONDB', mode: 'getAll' } });
+    tdarrFiles = { at: Date.now(), files };
+  }
+  const nodes = Object.values((await tdarr('get-nodes')) ?? {});
+
+  const counts = { queued: 0, done: 0, skipped: 0, failed: 0 };
+  const done = [];
+  const failed = [];
+  let savedBytes = 0;
+  for (const f of tdarrFiles.files) {
+    const state = f.TranscodeDecisionMaker;
+    if (state === 'Queued') counts.queued++;
+    else if (state === 'Not required') counts.skipped++;
+    else if (state === 'Transcode success') {
+      counts.done++;
+      const oldSize = (f.oldSize ?? 0) * GIB;
+      const newSize = (f.newSize ?? 0) * GIB;
+      if (oldSize && newSize) savedBytes += oldSize - newSize;
+      done.push({ ...tdarrFile(f.file), oldSize, newSize, at: f.lastTranscodeDate });
+    } else if (state === 'Transcode error') {
+      counts.failed++;
+      failed.push({ ...tdarrFile(f.file), at: f.lastTranscodeDate });
+    }
+  }
+  const latest = (a, b) => (b.at ?? 0) - (a.at ?? 0);
+
+  const workers = nodes.flatMap((n) =>
+    Object.values(n.workers ?? {}).map((w) => ({
+      ...tdarrFile(w.file),
+      percent: w.percentage,
+      eta: w.ETA,
+      fps: w.fps,
+      startedAt: w.job?.start,
+      oldSize: (w.originalfileSizeInGbytes ?? 0) * GIB,
+      estSize: (w.estSize ?? 0) * GIB,
+    })),
+  );
+  return {
+    paused: nodes.length > 0 && nodes.every((n) => n.nodePaused),
+    workers,
+    counts,
+    savedBytes,
+    recent: done.sort(latest).slice(0, 30),
+    errors: failed.sort(latest).slice(0, 30),
+  };
+}
+
+/** A paused node finishes the file it's on, then waits. */
+async function setConversionsPaused(paused) {
+  if (typeof paused !== 'boolean') throw new HttpError(400, 'Expected { paused: true | false }');
+  const nodes = (await tdarr('get-nodes')) ?? {};
+  for (const nodeID of Object.keys(nodes)) {
+    await tdarr('update-node', { data: { nodeID, nodeUpdates: { nodePaused: paused } } });
+  }
+  return conversions();
+}
+
 // States of finished torrents that are uploading or waiting to, and of ones stopped after
 // finishing. qBittorrent 5 renamed "paused" to "stopped".
 const SEEDING_STATES = new Set(['uploading', 'stalledUP', 'forcedUP', 'queuedUP', 'checkingUP']);
@@ -1959,6 +2075,20 @@ async function handle(req, res) {
       }
       log(req, `download limit ${limit}`);
       return sendJson(res, 200, await setSpeedLimit(limit));
+    }
+  }
+
+  if (url.pathname === '/api/tdarr') {
+    if (req.method === 'GET') return sendJson(res, 200, await conversions());
+    if (req.method === 'POST') {
+      let paused;
+      try {
+        paused = JSON.parse((await readBody(req))?.toString() ?? '{}').paused;
+      } catch {
+        throw new HttpError(400, 'Expected JSON');
+      }
+      log(req, `conversions paused ${paused}`);
+      return sendJson(res, 200, await setConversionsPaused(paused));
     }
   }
 

@@ -609,3 +609,37 @@ export function seeding(conn: Connection) {
 export function setSeeding(conn: Connection, change: { seed?: boolean; stopWhenDone?: boolean }) {
   return request<Seeding>(conn, '/api/qbittorrent/seeding', { method: 'POST', body: JSON.stringify(change) });
 }
+
+// ---------------------------------------------------------------------------------------------
+// Tdarr
+
+/** A file in Tdarr's library, named without its folder or extension. */
+export type ConvertedFile = { file: string; show: boolean; oldSize: number; newSize: number; at?: number };
+
+export type Conversions = {
+  /** The node finishes the file it's on, then waits. */
+  paused: boolean;
+  workers: {
+    file: string;
+    show: boolean;
+    percent: number;
+    /** "0:01:12". */
+    eta: string;
+    fps: number;
+    oldSize: number;
+    estSize: number;
+  }[];
+  counts: { queued: number; done: number; skipped: number; failed: number };
+  savedBytes: number;
+  /** The latest conversions, newest first. */
+  recent: ConvertedFile[];
+  errors: { file: string; show: boolean; at?: number }[];
+};
+
+export function conversions(conn: Connection) {
+  return request<Conversions>(conn, '/api/tdarr');
+}
+
+export function setConversionsPaused(conn: Connection, paused: boolean) {
+  return request<Conversions>(conn, '/api/tdarr', { method: 'POST', body: JSON.stringify({ paused }) });
+}

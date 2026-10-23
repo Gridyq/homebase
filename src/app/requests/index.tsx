@@ -72,6 +72,11 @@ function Home({ conn }: { conn: Connection }) {
       <Stack.Toolbar.Button icon="internaldrive" onPress={() => router.push('/requests/library')}>
         Library
       </Stack.Toolbar.Button>
+      <Stack.Toolbar.Button
+        icon="arrow.triangle.2.circlepath"
+        onPress={() => router.push('/requests/conversions')}>
+        Conversions
+      </Stack.Toolbar.Button>
     </Stack.Toolbar>
   );
 
