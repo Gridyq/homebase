@@ -272,6 +272,28 @@ export function normalizeUrl(input: string) {
   return url;
 }
 
+/** What the server refused, with its HTTP status; none when it couldn't be reached at all. */
+export class ServerError extends Error {
+  constructor(
+    message: string,
+    readonly status?: number,
+  ) {
+    super(message);
+  }
+}
+
+export function unreachable(conn: Connection, reason: string) {
+  return new ServerError(`Can't reach ${conn.url} (${reason}). Is Tailscale connected?`);
+}
+
+/** The error for a response that wasn't ok, from its status and JSON body. */
+export function refused(status: number, body: { error?: string } | undefined) {
+  if (status === 401) {
+    return new ServerError('The server rejected the token. Pair again under Connection (the gear button).', 401);
+  }
+  return new ServerError(body?.error ?? `The server answered ${status}.`, status);
+}
+
 /** Calls the status server. Also used by the Requests mini-app, whose calls go through it. */
 export async function request<T>(
   conn: Connection,
@@ -289,16 +311,12 @@ export async function request<T>(
       signal: controller.signal,
     });
   } catch (e) {
-    const reason = controller.signal.aborted ? 'timed out' : e instanceof Error ? e.message : String(e);
-    throw new Error(`Can't reach ${conn.url} (${reason}). Is Tailscale connected?`);
+    throw unreachable(conn, controller.signal.aborted ? 'timed out' : e instanceof Error ? e.message : String(e));
   } finally {
     clearTimeout(timer);
   }
   const body = await res.json().catch(() => undefined);
-  if (!res.ok) {
-    if (res.status === 401) throw new Error('The server rejected the token. Pair again under Connection (the gear button).');
-    throw new Error(body?.error ?? `The server answered ${res.status}.`);
-  }
+  if (!res.ok) throw refused(res.status, body);
   return body as T;
 }
 

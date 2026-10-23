@@ -1,7 +1,7 @@
 import { requireOptionalNativeModule } from 'expo';
 import { Directory, File, Paths } from 'expo-file-system';
 
-import { request, type Connection } from '@/miniapps/server/api';
+import { refused, request, unreachable, type Connection } from '@/miniapps/server/api';
 
 /**
  * The status server's Drop endpoints. Files sent from the phone land in a folder on the PC
@@ -42,14 +42,13 @@ export async function uploadFile(conn: Connection, file: File, name: string, onP
       onProgress: ({ bytesSent, totalBytes }) => totalBytes > 0 && onProgress(Number(bytesSent) / Number(totalBytes)),
     });
   } catch (e) {
-    throw new Error(`Can't reach ${conn.url} (${reason(e)}). Is Tailscale connected?`);
+    throw unreachable(conn, reason(e));
   }
   let body: { name?: string; error?: string } | undefined;
   try {
     body = JSON.parse(result.body);
   } catch {}
-  if (result.status === 401) throw new Error('The server rejected the token. Pair again under Connection (the gear button).');
-  if (result.status < 200 || result.status >= 300) throw new Error(body?.error ?? `The server answered ${result.status}.`);
+  if (result.status < 200 || result.status >= 300) throw refused(result.status, body);
   return body?.name ?? name;
 }
 

@@ -3,7 +3,7 @@ import { File } from 'expo-file-system';
 import { fetch } from 'expo/fetch';
 
 import { loadImagePicker } from '@/miniapps/drop/api';
-import { request, type Connection } from '@/miniapps/server/api';
+import { refused, request, ServerError, unreachable, type Connection } from '@/miniapps/server/api';
 
 /**
  * The status server's Assistant endpoints. Chats are kept on the server and answered by a model
@@ -79,7 +79,7 @@ export async function getChat(conn: Connection, id: string) {
   try {
     return await request<Chat>(conn, `/api/assistant/chats/${id}`);
   } catch (e) {
-    if (e instanceof Error && e.message === 'No such chat') return undefined;
+    if (e instanceof ServerError && e.status === 404) return undefined;
     throw e;
   }
 }
@@ -117,13 +117,9 @@ export async function ask(
       signal,
     });
   } catch (e) {
-    throw new Error(`Can't reach ${conn.url} (${e instanceof Error ? e.message : String(e)}). Is Tailscale connected?`);
+    throw unreachable(conn, e instanceof Error ? e.message : String(e));
   }
-  if (!res.ok) {
-    const body = await res.json().catch(() => undefined);
-    if (res.status === 401) throw new Error('The server rejected the token. Pair again under Connection (the gear button).');
-    throw new Error(body?.error ?? `The server answered ${res.status}.`);
-  }
+  if (!res.ok) throw refused(res.status, await res.json().catch(() => undefined));
   const reader = res.body!.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
@@ -152,14 +148,13 @@ export async function uploadPhoto(conn: Connection, uri: string) {
       headers: { Authorization: `Bearer ${conn.token}` },
     });
   } catch (e) {
-    throw new Error(`Can't reach ${conn.url} (${e instanceof Error ? e.message : String(e)}). Is Tailscale connected?`);
+    throw unreachable(conn, e instanceof Error ? e.message : String(e));
   }
   let body: { id?: string; error?: string } | undefined;
   try {
     body = JSON.parse(result.body);
   } catch {}
-  if (result.status === 401) throw new Error('The server rejected the token. Pair again under Connection (the gear button).');
-  if (result.status < 200 || result.status >= 300 || !body?.id) throw new Error(body?.error ?? `The server answered ${result.status}.`);
+  if (result.status < 200 || result.status >= 300 || !body?.id) throw refused(result.status, body);
   return body.id;
 }
 

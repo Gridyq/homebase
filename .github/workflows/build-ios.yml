@@ -18,8 +18,10 @@ on:
   push:
     tags: ['v*']
 
+# The build runs npm install scripts and Expo's prebuild, so it only gets to read the repo; the
+# release job, which runs none of that, is the one that can write.
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: build-ios-${{ github.ref }}-${{ inputs.configuration || 'Release' }}
@@ -32,8 +34,12 @@ jobs:
     env:
       CONFIGURATION: ${{ inputs.configuration || 'Release' }}
       APP_NAME: Homebase
+    outputs:
+      ipa: ${{ steps.package.outputs.ipa }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       # Third-party, so pinned to a commit (v1.7.0) rather than a tag its owner could move.
       - uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90
@@ -80,10 +86,25 @@ jobs:
           path: ${{ steps.package.outputs.ipa }}
           retention-days: 14
 
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      CONFIGURATION: ${{ inputs.configuration || 'Release' }}
+      APP_NAME: Homebase
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.ipa }}
+
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
-          IPA: ${{ steps.package.outputs.ipa }}
+          GH_REPO: ${{ github.repository }}
+          IPA: ${{ needs.build.outputs.ipa }}
         run: |
           if [[ "$GITHUB_REF_TYPE" == tag ]]; then
             gh release create "$GITHUB_REF_NAME" "$IPA" --title "$APP_NAME $GITHUB_REF_NAME" --generate-notes
