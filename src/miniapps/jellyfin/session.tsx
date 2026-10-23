@@ -7,6 +7,8 @@ import { clearLastPlayed } from './last-played';
 import { useAsync } from './use-async';
 
 export const SESSION_KEY = 'jellyfin.session';
+/** The server and username last signed in with, to fill in the login form after a sign-out. */
+export const LAST_LOGIN_KEY = 'jellyfin.lastLogin';
 const DEVICE_ID_KEY = 'jellyfin.deviceId';
 
 type SessionState = {
@@ -38,7 +40,19 @@ export function JellyfinSessionProvider({ children }: { children: ReactNode }) {
       .finally(() => setLoading(false));
   }, []);
 
-  const client = useMemo(() => (session ? createClient(session) : null), [session]);
+  // A token the server no longer accepts (signed out elsewhere, or the device removed) can't be
+  // fixed by trying again: forget it, and the login screen shows.
+  const client = useMemo(
+    () =>
+      session
+        ? createClient(session, () => {
+            SecureStore.deleteItemAsync(SESSION_KEY).catch(() => undefined);
+            clearLastPlayed();
+            setSession((current) => (current === session ? null : current));
+          })
+        : null,
+    [session],
+  );
 
   const value = useMemo<SessionState>(
     () => ({
@@ -47,6 +61,9 @@ export function JellyfinSessionProvider({ children }: { children: ReactNode }) {
       signIn: async (serverUrl, username, password) => {
         const next = await apiSignIn(serverUrl, username, password, await getDeviceId());
         await SecureStore.setItemAsync(SESSION_KEY, JSON.stringify(next));
+        await SecureStore.setItemAsync(LAST_LOGIN_KEY, JSON.stringify({ server: serverUrl, username })).catch(
+          () => undefined,
+        );
         setSession(next);
       },
       signOut: async () => {

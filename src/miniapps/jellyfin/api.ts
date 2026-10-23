@@ -255,11 +255,16 @@ export async function signIn(
 }
 
 /** API calls bound to a signed-in session. */
-export function createClient(session: Session) {
+/** `onUnauthorized` runs when the server no longer accepts the session's token. */
+export function createClient(session: Session, onUnauthorized?: () => void) {
   const { serverUrl, userId, accessToken, deviceId } = session;
-  const get = <T>(path: string) => request<T>(serverUrl, path, deviceId, accessToken);
-  const post = <T>(path: string, body?: unknown) =>
-    request<T>(serverUrl, path, deviceId, accessToken, { method: 'POST', body: body ?? {} });
+  const call = <T>(path: string, init?: { method?: string; body?: unknown }) =>
+    request<T>(serverUrl, path, deviceId, accessToken, init).catch((e: unknown) => {
+      if (e instanceof JellyfinError && e.status === 401) onUnauthorized?.();
+      throw e;
+    });
+  const get = <T>(path: string) => call<T>(path);
+  const post = <T>(path: string, body?: unknown) => call<T>(path, { method: 'POST', body: body ?? {} });
 
   const itemFields = 'Overview,PrimaryImageAspectRatio,ParentBackdropItemId';
   let me: Promise<User> | undefined;
@@ -321,12 +326,12 @@ export function createClient(session: Session) {
       get<ItemsResponse>(`/Genres?userId=${userId}&parentId=${libraryId}&sortBy=SortName`).then((r) => r.Items),
 
     setPlayed: (itemId: string, played: boolean) =>
-      request<UserData>(serverUrl, `/UserPlayedItems/${itemId}?userId=${userId}`, deviceId, accessToken, {
+      call<UserData>(`/UserPlayedItems/${itemId}?userId=${userId}`, {
         method: played ? 'POST' : 'DELETE',
       }),
 
     setFavorite: (itemId: string, favorite: boolean) =>
-      request<UserData>(serverUrl, `/UserFavoriteItems/${itemId}?userId=${userId}`, deviceId, accessToken, {
+      call<UserData>(`/UserFavoriteItems/${itemId}?userId=${userId}`, {
         method: favorite ? 'POST' : 'DELETE',
       }),
 
@@ -381,7 +386,7 @@ export function createClient(session: Session) {
       post<void>(`/Playlists/${playlistId}/Items?ids=${itemIds.join(',')}&userId=${userId}`),
 
     removeFromPlaylist: (playlistId: string, entryIds: string[]) =>
-      request<void>(serverUrl, `/Playlists/${playlistId}/Items?entryIds=${entryIds.join(',')}`, deviceId, accessToken, {
+      call<void>(`/Playlists/${playlistId}/Items?entryIds=${entryIds.join(',')}`, {
         method: 'DELETE',
       }),
 
@@ -432,7 +437,7 @@ export function createClient(session: Session) {
       ).then((r) => r.Items),
 
     deleteItem: (itemId: string) =>
-      request<void>(serverUrl, `/Items/${itemId}`, deviceId, accessToken, { method: 'DELETE' }),
+      call<void>(`/Items/${itemId}`, { method: 'DELETE' }),
 
     children: (parentId: string) =>
       get<ItemsResponse>(

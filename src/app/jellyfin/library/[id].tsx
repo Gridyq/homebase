@@ -1,6 +1,6 @@
 import { Stack, useLocalSearchParams } from 'expo-router';
-import { useCallback, useState } from 'react';
-import { ActivityIndicator, FlatList, ScrollView, StyleSheet, View } from 'react-native';
+import { useCallback, useRef, useState } from 'react';
+import { ActivityIndicator, FlatList, RefreshControl, ScrollView, StyleSheet, View } from 'react-native';
 
 import { ThemedText } from '@/components/themed-text';
 import { Spacing } from '@/constants/theme';
@@ -27,6 +27,10 @@ export default function Library() {
   // Pages loaded past the first, tagged with the first page they continue.
   const [more, setMore] = useState<{ after?: ItemsResponse; items: BaseItem[] }>({ items: [] });
   const [loadingMore, setLoadingMore] = useState(false);
+  const [moreError, setMoreError] = useState<Error>();
+  // onEndReached can fire twice before the state above has re-rendered.
+  const inFlight = useRef(false);
+  const [pulled, setPulled] = useState(false);
 
   const { data: library, error: libraryError, reload: reloadLibrary } = useAsync(() => client.item(id), id);
   const { data: genres } = useAsync(() => client.genres(id).catch(() => []), `genres:${id}`);
@@ -40,16 +44,23 @@ export default function Library() {
   const items = data ? [...data.Items, ...(more.after === data ? more.items : [])] : [];
   const hasMore = data ? items.length < data.TotalRecordCount : false;
 
+  if (pulled && !loading) setPulled(false);
+
   const loadMore = useCallback(async () => {
-    if (!data || !library || !hasMore || loadingMore || loading) return;
+    if (!data || !library || !hasMore || inFlight.current || loading) return;
+    inFlight.current = true;
     setLoadingMore(true);
+    setMoreError(undefined);
     try {
       const page = await client.libraryItems(library, query, items.length);
       setMore((prev) => ({ after: data, items: [...(prev.after === data ? prev.items : []), ...page.Items] }));
+    } catch (e) {
+      setMoreError(e instanceof Error ? e : new Error(String(e)));
     } finally {
+      inFlight.current = false;
       setLoadingMore(false);
     }
-  }, [client, data, library, query, hasMore, loadingMore, loading, items.length]);
+  }, [client, data, library, query, hasMore, loading, items.length]);
 
   if (!library) return <Centered loading={!libraryError} error={libraryError} onRetry={reloadLibrary} />;
 
@@ -105,7 +116,7 @@ export default function Library() {
       <FlatList
         style={{ backgroundColor: theme.background }}
         contentInsetAdjustmentBehavior="automatic"
-        data={loading ? [] : items}
+        data={items}
         keyExtractor={(i) => i.Id}
         // numColumns can't change on a mounted FlatList, so remount when rotating changes it.
         key={columns}
@@ -113,13 +124,24 @@ export default function Library() {
         columnWrapperStyle={[styles.column, gutter]}
         contentContainerStyle={styles.content}
         renderItem={({ item }) => <PosterCard item={item} width={cardWidth} />}
-        onEndReached={loadMore}
+        // A failed page waits for "Try again" rather than retrying on every scroll.
+        onEndReached={moreError ? undefined : loadMore}
+        refreshControl={
+          <RefreshControl
+            refreshing={pulled}
+            onRefresh={() => {
+              setPulled(true);
+              setMoreError(undefined);
+              reload();
+            }}
+          />
+        }
         onEndReachedThreshold={1.5}
         ListHeaderComponent={filters}
         ListEmptyComponent={
-          loading ? (
+          !data && !error ? (
             <ActivityIndicator style={{ margin: Spacing.four }} />
-          ) : error ? (
+          ) : error && !data ? (
             <Centered error={error} onRetry={reload} />
           ) : (
             <ThemedText themeColor="textSecondary" style={styles.empty}>
@@ -127,7 +149,18 @@ export default function Library() {
             </ThemedText>
           )
         }
-        ListFooterComponent={loadingMore ? <ActivityIndicator style={{ margin: Spacing.four }} /> : undefined}
+        ListFooterComponent={
+          loadingMore ? (
+            <ActivityIndicator style={{ margin: Spacing.four }} />
+          ) : moreError ? (
+            <ThemedText type="small" themeColor="textSecondary" style={styles.empty}>
+              Couldn&apos;t load more.{' '}
+              <ThemedText type="small" style={{ color: theme.accent }} onPress={loadMore}>
+                Try again
+              </ThemedText>
+            </ThemedText>
+          ) : undefined
+        }
       />
     </>
   );

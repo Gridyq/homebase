@@ -2,7 +2,8 @@ import { Image } from 'expo-image';
 import { Link, router, Stack, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import * as WebBrowser from 'expo-web-browser';
 import { useCallback, useRef, useState } from 'react';
-import { Alert, FlatList, Pressable, ScrollView, StyleSheet, useWindowDimensions, View } from 'react-native';
+import { ActivityIndicator, Alert, FlatList, Pressable, ScrollView, StyleSheet, useWindowDimensions, View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Button } from '@/components/button';
 import { ThemedText } from '@/components/themed-text';
@@ -34,6 +35,7 @@ export default function ItemDetail() {
   const gutter = useGutter();
   const [selectedSubtitle, setSubtitle] = useState<number>();
   const isAdmin = useIsAdmin();
+  const insets = useSafeAreaInsets();
 
   const { data: loaded, error, loading, reload } = useAsync(() => client.item(id), id);
   // Watched/favorite changes made here, shown until the next reload catches up.
@@ -55,7 +57,11 @@ export default function ItemDetail() {
 
   if (!item) return <Centered loading={loading} error={error} onRetry={reload} />;
 
-  const backdrop = client.imageUrl(item, { type: 'Backdrop', height: 720 }) ?? client.imageUrl(item, { height: 720 });
+  // A person's only picture is a portrait, which a wide banner would crop to the forehead.
+  const backdrop =
+    client.imageUrl(item, { type: 'Backdrop', height: 720 }) ??
+    (item.Type === 'Person' ? undefined : client.imageUrl(item, { height: 720 }));
+  const portrait = item.Type === 'Person' && !backdrop ? client.imageUrl(item, { height: 480 }) : undefined;
   const resumeTicks = item.UserData?.PlaybackPositionTicks ?? 0;
   // A playlist of videos has MediaType Video too, but it's played from its entries.
   const playable = item.MediaType === 'Video' && !item.IsFolder;
@@ -103,7 +109,10 @@ export default function ItemDetail() {
         // In landscape a full-width 16:9 image would fill the whole screen; keep the title in view.
         <Image source={backdrop} style={{ width, height: Math.min((width * 9) / 16, height * 0.6) }} contentFit="cover" />
       ) : (
-        <View style={{ height: 100 }} />
+        // Clear of the transparent header, whatever its height on this phone.
+        <View style={[styles.noBackdrop, { paddingTop: insets.top + 56 }]}>
+          {portrait ? <Image source={portrait} style={styles.portrait} contentFit="cover" /> : null}
+        </View>
       )}
       <View style={[styles.body, gutter]}>
         <ThemedText type="subtitle" style={styles.title}>
@@ -191,17 +200,35 @@ export default function ItemDetail() {
 
 function SeriesEpisodes({ series }: { series: BaseItem }) {
   const client = useJellyfin();
+  const theme = useTheme();
   const { width, height } = useWindowDimensions();
   const gutter = useGutter();
   const [selectedSeasonId, setSeasonId] = useState<string>();
 
-  const { data: seasons } = useAsync(() => client.seasons(series.Id), series.Id);
+  const { data: seasons, error: seasonsError, reload: reloadSeasons } = useAsync(
+    () => client.seasons(series.Id),
+    series.Id,
+  );
   const seasonId = selectedSeasonId ?? seasons?.[0]?.Id;
 
-  const { data: episodes, reload: reloadEpisodes } = useAsync(
+  const {
+    data: episodes,
+    error: episodesError,
+    reload: reloadEpisodes,
+  } = useAsync(
     () => (seasonId ? client.episodes(series.Id, seasonId) : Promise.resolve([])),
     `${series.Id}/${seasonId}`,
   );
+
+  // Show what was just watched when coming back from the player.
+  const focusedOnce = useRef(false);
+  useFocusEffect(
+    useCallback(() => {
+      if (focusedOnce.current) reloadEpisodes();
+      focusedOnce.current = true;
+    }, [reloadEpisodes]),
+  );
+  const error = seasonsError ?? episodesError;
 
   const episodeActions = (ep: BaseItem) => {
     const played = !!ep.UserData?.Played;
@@ -222,6 +249,18 @@ function SeriesEpisodes({ series }: { series: BaseItem }) {
           <Chip key={s.Id} label={s.Name} selected={s.Id === seasonId} onPress={() => setSeasonId(s.Id)} />
         ))}
       </ScrollView>
+      {error && !episodes ? (
+        <View style={gutter}>
+          <ThemedText type="small" themeColor="textSecondary">
+            {error.message}{' '}
+            <ThemedText type="small" style={{ color: theme.accent }} onPress={seasonsError ? reloadSeasons : reloadEpisodes}>
+              Try again
+            </ThemedText>
+          </ThemedText>
+        </View>
+      ) : !episodes ? (
+        <ActivityIndicator style={styles.episodesLoading} />
+      ) : null}
       <View style={[styles.episodes, gutter]}>
         {episodes?.map((ep) => (
           <Link key={ep.Id} href={{ pathname: '/jellyfin/item/[id]', params: { id: ep.Id } }} asChild>
@@ -259,17 +298,31 @@ function EpisodeThumb({ item, width }: { item: BaseItem; width: number }) {
   );
 }
 
+const FOLDER_PREVIEW = 30;
+
 function FolderChildren({ parent }: { parent: BaseItem }) {
   const client = useJellyfin();
   const { cardWidth, gutter } = usePosterGrid();
   const { data } = useAsync(() => client.children(parent.Id), parent.Id);
   if (!data?.length) return null;
   if (data.length <= 12) return <ItemRow title="Items" items={data} />;
+  // A big folder would draw hundreds of posters at once here; the library screen scrolls them lazily.
   return (
-    <View style={[styles.section, styles.grid, gutter]}>
-      {data.map((child) => (
-        <PosterCard key={child.Id} item={child} width={cardWidth} />
-      ))}
+    <View style={styles.section}>
+      <View style={[styles.grid, gutter]}>
+        {data.slice(0, FOLDER_PREVIEW).map((child) => (
+          <PosterCard key={child.Id} item={child} width={cardWidth} />
+        ))}
+      </View>
+      {data.length > FOLDER_PREVIEW ? (
+        <View style={gutter}>
+          <Button
+            title={`Show all ${data.length}`}
+            variant="secondary"
+            onPress={() => router.push({ pathname: '/jellyfin/library/[id]', params: { id: parent.Id } })}
+          />
+        </View>
+      ) : null}
     </View>
   );
 }
@@ -482,6 +535,18 @@ const styles = StyleSheet.create({
   },
   episodes: {
     gap: Spacing.three,
+  },
+  episodesLoading: {
+    paddingVertical: Spacing.three,
+  },
+  noBackdrop: {
+    alignItems: 'center',
+    paddingBottom: Spacing.two,
+  },
+  portrait: {
+    width: 160,
+    height: 160,
+    borderRadius: 80,
   },
   episode: {
     flexDirection: 'row',

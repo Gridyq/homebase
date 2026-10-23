@@ -116,6 +116,8 @@ function Player({
   /** Handed over to the iOS player (for AirPlay and its menus); our controls are hidden meanwhile. */
   const [systemPlayer, setSystemPlayer] = useState(false);
   const [ended, setEnded] = useState(false);
+  /** Why playback stopped working, like a transcode that failed on the server. */
+  const [failure, setFailure] = useState<string>();
   const [audioTracks, setAudioTracks] = useState<AudioTrack[]>([]);
   const started = useRef(false);
   const position = useRef(startSeconds);
@@ -177,7 +179,12 @@ function Player({
   useEventListener(player, 'availableSubtitleTracksChange', applySubtitle);
   useEventListener(player, 'availableAudioTracksChange', ({ availableAudioTracks }) => setAudioTracks(availableAudioTracks));
 
-  useEventListener(player, 'statusChange', ({ status }) => {
+  useEventListener(player, 'statusChange', ({ status, error }) => {
+    if (status === 'error') {
+      viewRef.current?.exitFullscreen().catch(() => undefined);
+      setFailure(error?.message || "This video couldn't be played.");
+      return;
+    }
     if (status !== 'readyToPlay' || started.current) return;
     started.current = true;
     if (startSeconds > 0) player.seekBy(startSeconds);
@@ -208,6 +215,19 @@ function Player({
   });
 
   const lang = () => subtitleLanguage(item, chosenSubtitle.current);
+  // Start over from where it stopped, with a fresh stream from the server.
+  const retry = () => {
+    const subtitle = chosenSubtitle.current;
+    router.replace({
+      pathname: '/jellyfin/player/[id]',
+      params: {
+        id: item.Id,
+        start: String(Math.floor(position.current)),
+        ...(subtitle !== undefined ? { subtitle: String(subtitle) } : {}),
+        ...(playlist ? { playlist } : {}),
+      },
+    });
+  };
   const playNext = () => {
     if (!next) return;
     const l = lang();
@@ -323,7 +343,15 @@ function Player({
         // Leaving the iOS player comes back to ours rather than closing.
         onFullscreenExit={() => setSystemPlayer(false)}
       />
-      {!systemPlayer && !ended ? (
+      {failure ? (
+        <View style={[StyleSheet.absoluteFill, styles.failure]}>
+          <ThemedText style={styles.light}>{failure}</ThemedText>
+          <View style={styles.upNextActions}>
+            <Button title="Try again" onPress={retry} />
+            <Button title="Close" variant="secondary" onPress={() => router.back()} />
+          </View>
+        </View>
+      ) : !systemPlayer && !ended ? (
         <PlayerControls
           player={player}
           title={item.Type === 'Episode' ? (item.SeriesName ?? item.Name) : item.Name}
@@ -452,6 +480,13 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
   error: {
+    padding: Spacing.four,
+    gap: Spacing.three,
+  },
+  failure: {
+    backgroundColor: '#000',
+    alignItems: 'center',
+    justifyContent: 'center',
     padding: Spacing.four,
     gap: Spacing.three,
   },

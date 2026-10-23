@@ -23,10 +23,15 @@ export default function JellyfinHome() {
     return () => clearTimeout(timer);
   }, [query]);
 
+  const gutter = useGutter();
   const { data, error, loading, reload } = useAsync(
     () =>
+      // Only the libraries are essential; a row that fails to load is just left out.
       Promise.all([
-        client.resume(), client.nextUp(), client.libraries(), client.favorites().catch(() => []),
+        client.resume().catch(() => []),
+        client.nextUp().catch(() => []),
+        client.libraries(),
+        client.favorites().catch(() => []),
         client.playlists().catch(() => []),
       ]),
     'home',
@@ -102,6 +107,14 @@ export default function JellyfinHome() {
       }>
       {header}
       {searchBar}
+      {error ? (
+        <ThemedText type="small" themeColor="textSecondary" style={[styles.notice, gutter]}>
+          Couldn&apos;t refresh. {error.message}{' '}
+          <ThemedText type="small" style={{ color: theme.accent }} onPress={reload}>
+            Try again
+          </ThemedText>
+        </ThemedText>
+      ) : null}
       <ItemRow title="Continue watching" items={resume} shape="wide" />
       <ItemRow title="Next up" items={nextUp} shape="wide" />
       <ItemRow title="Libraries" items={libraries} shape="wide" />
@@ -157,6 +170,9 @@ function SearchResults({ term }: { term: string }) {
 const styles = StyleSheet.create({
   empty: {
     textAlign: 'center',
+  },
+  notice: {
+    paddingBottom: Spacing.two,
   },
   content: {
     paddingVertical: Spacing.three,

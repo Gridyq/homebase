@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { Alert, ScrollView, StyleSheet, View } from 'react-native';
 
 import { Button } from '@/components/button';
@@ -67,11 +68,34 @@ export default function JellyfinSettings() {
 function AutoplaySection() {
   const client = useJellyfin();
   const isAdmin = useIsAdmin();
-  const { data: users, reload } = useAsync(() => (isAdmin ? client.users() : Promise.resolve([])), `users:${isAdmin}`);
-  if (!isAdmin || !users?.length) return null;
+  const { data: users, error, reload } = useAsync(
+    () => (isAdmin ? client.users() : Promise.resolve([])),
+    `users:${isAdmin}`,
+  );
+  // Shown as changed right away; the reload afterwards confirms it.
+  const [pending, setPending] = useState<Record<string, boolean>>({});
+  const [shownUsers, setShownUsers] = useState(users);
+  if (shownUsers !== users) {
+    setShownUsers(users);
+    setPending({});
+  }
+  if (!isAdmin) return null;
+  if (!users?.length) {
+    if (!error) return null;
+    return (
+      <View style={styles.picker}>
+        <ThemedText type="smallBold">Play next episode automatically</ThemedText>
+        <ThemedText type="small" themeColor="textSecondary">
+          Couldn&apos;t load the people on the server. {error.message}
+        </ThemedText>
+        <Button title="Try again" variant="secondary" onPress={reload} />
+      </View>
+    );
+  }
 
-  const isOn = (u: User) => u.Configuration?.EnableNextEpisodeAutoPlay !== false;
+  const isOn = (u: User) => pending[u.Id] ?? u.Configuration?.EnableNextEpisodeAutoPlay !== false;
   const set = async (targets: User[], enabled: boolean) => {
+    setPending((p) => ({ ...p, ...Object.fromEntries(targets.map((u) => [u.Id, enabled])) }));
     try {
       await Promise.all(targets.map((u) => client.setAutoplay(u, enabled)));
     } catch (e) {
