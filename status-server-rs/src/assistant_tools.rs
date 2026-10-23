@@ -644,9 +644,16 @@ pub async fn use_tool(state: &State, name: &str, arguments: &str, room: usize) -
         Err(_) => return (format!("Tried {name}"), "Error: the arguments weren’t valid JSON.".into()),
     };
     let args = if args.is_null() { json!({}) } else { args };
+    // Earlier calls used up the room set aside for results; more would crowd out the chat.
+    if room < 500 {
+        return (
+            format!("Tried {}", name.replace('_', " ")),
+            "Error: no room left for more results. Answer with what you have.".into(),
+        );
+    }
     match run_tool(state, name, &args).await {
         Ok((label, text)) => {
-            let max = TOOL_RESULT_CHARS.min(room).max(500);
+            let max = TOOL_RESULT_CHARS.min(room);
             let text = if js_len(&text) > max {
                 format!("{}\n… (cut short)", js_slice(&text, max))
             } else {

@@ -275,12 +275,13 @@ pub async fn read_logs(state: &State, id: &str, window: LogWindow) -> Result<Log
         "--no-pager",
         "-o",
         "json",
-        "--output-fields=MESSAGE,PRIORITY",
-        "-n",
-        count.to_string()
+        "--output-fields=MESSAGE,PRIORITY"
     ]);
-    if let Some(after) = &after {
-        args.push(format!("--after-cursor={after}"));
+    // After a cursor, everything since: with -n too, journalctl gives only the last lines of a
+    // burst and the ones before them are never seen.
+    match &after {
+        Some(after) => args.push(format!("--after-cursor={after}")),
+        None => args.extend(args!["-n", count.to_string()]),
     }
     if let Some(since) = since {
         args.push(format!("--since=@{}", since.div_euclid(1000)));

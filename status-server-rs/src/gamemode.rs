@@ -133,19 +133,17 @@ impl GameMode {
     }
 }
 
-async fn stop_units(state: &State) {
+async fn stop_units(state: &State) -> Result<(), String> {
     let units = unit_files(|_| true);
     let mut stop = args!["--user", "stop"].to_vec();
     stop.extend(units.iter().cloned());
     let result = run("systemctl", &stop, UNITS_TIMEOUT).await;
     state.services.expire(&state.usage);
-    if let Err(e) = result {
-        eprintln!("Couldn't stop the game mode services: {e}");
-    }
     // Some exit with an error when stopped (gluetun with 1); that's not a failure worth showing.
     let mut reset = args!["--user", "reset-failed"].to_vec();
     reset.extend(units);
     let _ = run("systemctl", &reset, Duration::from_secs(30)).await;
+    result.map(|_| ())
 }
 
 /// Starts or stops the services if game mode should change.
@@ -158,9 +156,9 @@ async fn update(state: &State) {
         if want == m.active {
             return;
         }
+        // On straight away, so what it stops refuses work while it does; saved once it's done.
         m.active = want;
         m.since = Some(now_ms());
-        gm.save(&m);
         (want, m.game.clone())
     };
     println!(
@@ -168,20 +166,30 @@ async fn update(state: &State) {
         if want { "on" } else { "off" },
         game.as_ref().map(|g| format!(" ({g})")).unwrap_or_default()
     );
-    let mut e = Event::new(now_ms(), "game");
-    e.on = Some(want);
-    e.detail = game;
-    state.recorder.events.lock().unwrap().add(e);
-    if want {
-        stop_units(state).await;
+    let result = if want {
+        stop_units(state).await
     } else {
         let mut start = args!["--user", "start"].to_vec();
         start.extend(unit_files(|u| !ON_DEMAND_UNITS.contains(&u)));
-        if let Err(e) = run("systemctl", &start, UNITS_TIMEOUT).await {
-            eprintln!("Couldn't start the game mode services: {e}");
-        }
+        let result = run("systemctl", &start, UNITS_TIMEOUT).await.map(|_| ());
         state.services.expire(&state.usage);
+        result
+    };
+    let mut m = gm.mode.lock().unwrap();
+    match result {
+        Ok(()) => {
+            let mut e = Event::new(now_ms(), "game");
+            e.on = Some(want);
+            e.detail = game;
+            state.recorder.events.lock().unwrap().add(e);
+        }
+        Err(e) => {
+            // Back as it was, so the next check tries again rather than believing it's done.
+            eprintln!("Couldn't {} the game mode services: {e}", if want { "stop" } else { "start" });
+            m.active = !want;
+        }
     }
+    gm.save(&m);
 }
 
 fn steam_dir() -> PathBuf {
@@ -274,7 +282,9 @@ pub async fn start(state: State) {
             since: Some(now),
         };
         // After a reboot the services started with everything else, so stop them again.
-        stop_units(&state).await;
+        if let Err(e) = stop_units(&state).await {
+            eprintln!("Couldn't stop the game mode services: {e}");
+        }
     }
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(GAME_CHECK_INTERVAL);

@@ -301,8 +301,13 @@ async fn stop_idle(state: &State) {
         return;
     }
     for model in MODELS {
-        // Checked again after the wait, in case a question came in meanwhile.
-        if !unit_active(model.unit).await || !idle() {
+        if !unit_active(model.unit).await {
+            continue;
+        }
+        // Checked again under the start lock, so a question that comes in now waits and then
+        // starts the model again, rather than having it stopped underneath.
+        let _starting = a.start_lock.lock().await;
+        if !idle() {
             continue;
         }
         println!("Stopping {}, unused for a quarter of an hour", model.name);
@@ -701,14 +706,19 @@ pub async fn ask(AxumState(state): AxumState<State>, UrlPath(id): UrlPath<String
     let chat: Chat = Arc::new(Mutex::new(chat));
     let cancel = CancellationToken::new();
     let stopped = Arc::new(AtomicBool::new(false));
-    a.generations.lock().unwrap().insert(
-        id.clone(),
-        Generation {
-            chat: Arc::clone(&chat),
-            cancel: cancel.clone(),
-            stopped: Arc::clone(&stopped),
-        },
-    );
+    // Checked again as it's claimed: a second ask (a double tap, a retry) may have got here first.
+    match a.generations.lock().unwrap().entry(id.clone()) {
+        std::collections::hash_map::Entry::Occupied(_) => {
+            return Err(bad(StatusCode::CONFLICT, "Still answering the last message"));
+        }
+        std::collections::hash_map::Entry::Vacant(slot) => {
+            slot.insert(Generation {
+                chat: Arc::clone(&chat),
+                cancel: cancel.clone(),
+                stopped: Arc::clone(&stopped),
+            });
+        }
+    }
     if let Err(e) = a.save_chat(&chat.lock().unwrap()) {
         a.generations.lock().unwrap().remove(&id);
         return Err(HttpError::internal(e));
@@ -727,6 +737,9 @@ pub async fn ask(AxumState(state): AxumState<State>, UrlPath(id): UrlPath<String
 }
 
 const ABORTED: &str = "This operation was aborted";
+/// A model that sends nothing for this long is stuck; without a limit its generation would never
+/// end, and the model would never be stopped for being idle.
+const LLAMA_SILENCE: Duration = Duration::from_secs(120);
 
 /// Writes the answer to the chat's last question, sending each piece, and saves the chat. A model
 /// with tools may look at the server first, a few rounds at most.
@@ -836,7 +849,10 @@ async fn write_answer(
             .header("content-type", "application/json")
             .body(Body::from(Value::Object(body).to_string()))
             .map_err(|e| e.to_string())?;
-        let res = state.upstream.0.request(req).await.map_err(|e| e.to_string())?;
+        let res = tokio::time::timeout(LLAMA_SILENCE, state.upstream.0.request(req))
+            .await
+            .map_err(|_| format!("{} stopped responding", model.name))?
+            .map_err(|e| e.to_string())?;
         if !res.status().is_success() {
             let status = res.status().as_u16();
             let detail = res
@@ -858,7 +874,10 @@ async fn write_answer(
         let mut said = String::new();
         // Tool calls come in pieces, by index: the id and name first, then the arguments bit by bit.
         let mut calls: Vec<(String, String, String)> = Vec::new();
-        while let Some(frame) = body.frame().await {
+        while let Some(frame) = tokio::time::timeout(LLAMA_SILENCE, body.frame())
+            .await
+            .map_err(|_| format!("{} stopped responding", model.name))?
+        {
             if cancel.is_cancelled() {
                 return Err(ABORTED.into());
             }

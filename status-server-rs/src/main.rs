@@ -87,7 +87,7 @@ async fn main() {
     jellyfin::start(state.clone());
     dbus::start(state.clone());
     live::start(state.clone());
-    updates::start(state.clone());
+    updates::start(state.clone()).await;
     container_updates::start(state.clone());
 
     let api = Router::new()

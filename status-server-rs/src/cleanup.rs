@@ -176,6 +176,22 @@ fn blocked(patterns: &[String], path: &str) -> bool {
     patterns.iter().any(|p| glob(p.as_bytes(), name.as_bytes()))
 }
 
+/// Names any real download has. A pattern matching one (a bad list with `*` or `*.mkv`) would
+/// skip every file of every new download and remove them all.
+const ORDINARY_FILES: &[&str] = &[
+    "Show.Name.S01E01.1080p.WEB-DL.DDP5.1.H.264-GROUP.mkv",
+    "Movie.Name.2023.2160p.UHD.BluRay.x265-GROUP.mkv",
+    "Movie Name (2019) [1080p].mp4",
+    "show.name.s02e10.720p.hdtv.x264.avi",
+];
+
+/// Why a fetched list can't be trusted, if it can't.
+fn implausible(patterns: &[String]) -> Option<String> {
+    let caught = ORDINARY_FILES.iter().find(|f| blocked(patterns, f))?;
+    let pattern = patterns.iter().find(|p| glob(p.as_bytes(), caught.to_lowercase().as_bytes()))?;
+    Some(format!("its pattern {pattern:?} would block ordinary videos"))
+}
+
 async fn refresh_blocklist(state: &State) {
     let cleanup = &state.cleanup;
     let now = now_ms();
@@ -187,6 +203,10 @@ async fn refresh_blocklist(state: &State) {
     let fetched = output("curl", &args!["-fsS", "--max-time", "30", BLOCKLIST_URL], Duration::from_secs(40)).await;
     match fetched {
         Ok(out) if out.success && !patterns(&out.stdout).is_empty() => {
+            if let Some(why) = implausible(&patterns(&out.stdout)) {
+                eprintln!("Not using the fetched blocklist: {why}");
+                return;
+            }
             if let Err(e) = std::fs::write(&cleanup.blocklist_path, &out.stdout) {
                 eprintln!("Couldn't save the blocklist: {e}");
             }
@@ -217,7 +237,8 @@ async fn queue(state: &State, app: &str) -> Result<HashMap<String, Vec<Value>>, 
 
 /// Removes a download from qBittorrent and the queue, blocks the release so it isn't grabbed
 /// again, and searches for another.
-async fn remove(state: &State, app: &str, items: &[Value], title: &str, reason: &str) {
+/// Whether it was removed.
+async fn remove(state: &State, app: &str, items: &[Value], title: &str, reason: &str) -> bool {
     println!("cleanup: removing {title} from {app}: {reason}");
     if !state.cleanup.dry_run {
         let ids: Vec<&Value> = items.iter().map(|i| &i["id"]).collect();
@@ -231,7 +252,7 @@ async fn remove(state: &State, app: &str, items: &[Value], title: &str, reason: 
         .await;
         if let Err(e) = removed {
             eprintln!("cleanup: couldn't remove {title}: {e}");
-            return;
+            return false;
         }
         let (field, ids_field, command) = if app == "sonarr" {
             ("episodeId", "episodeIds", "EpisodeSearch")
@@ -258,6 +279,7 @@ async fn remove(state: &State, app: &str, items: &[Value], title: &str, reason: 
     let extra = saved.removed.len().saturating_sub(REMOVED_KEPT);
     saved.removed.drain(..extra);
     state.cleanup.save(&saved);
+    true
 }
 
 fn import_stuck(items: &[Value]) -> bool {
@@ -338,16 +360,18 @@ async fn check_queues(state: &State) {
             };
             let s = saved.strikes.entry(hash.clone()).or_default();
             let reason = strike(s, t, &items, now);
+            // The strikes stay until it's gone, so a removal that fails is tried again next round.
             if let Some(reason) = reason {
-                out_of_strikes.push((*app, items, s.title.clone(), reason));
-                saved.strikes.remove(&hash);
+                out_of_strikes.push((*app, hash, items, s.title.clone(), reason));
             }
         }
         state.cleanup.save(&saved);
     }
     state.cleanup.went(trouble);
-    for (app, items, title, reason) in out_of_strikes {
-        remove(state, app, &items, &title, reason).await;
+    for (app, hash, items, title, reason) in out_of_strikes {
+        if remove(state, app, &items, &title, reason).await {
+            state.cleanup.saved.lock().unwrap().strikes.remove(&hash);
+        }
     }
     let mut saved = state.cleanup.saved.lock().unwrap();
     saved.strikes.retain(|_, s| {
@@ -417,8 +441,10 @@ async fn check_files(state: &State) {
         if bad.len() == files.len() {
             match queue(state, app).await {
                 Ok(mut downloads) => {
-                    if let Some(items) = downloads.remove(&hash) {
-                        remove(state, app, &items, title, "Every file is on the malware blocklist").await;
+                    if let Some(items) = downloads.remove(&hash)
+                        && !remove(state, app, &items, title, "Every file is on the malware blocklist").await
+                    {
+                        continue;
                     }
                 }
                 Err(e) => {
@@ -466,8 +492,19 @@ pub async fn get(AxumState(state): AxumState<State>) -> Json<Value> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Strikes, blocked, glob, patterns, strike};
+    use super::{Strikes, blocked, glob, implausible, patterns, strike};
     use serde_json::json;
+
+    #[test]
+    fn implausible_blocklists() {
+        assert_eq!(implausible(&patterns("*.exe\n*.lnk\n*.scr\n# comment")), None);
+        assert!(implausible(&patterns("*.exe\n*.mkv")).is_some());
+        assert!(implausible(&patterns("*")).is_some());
+        // The list as last fetched, when there is one to check.
+        if let Ok(path) = std::env::var("REAL_BLOCKLIST") {
+            assert_eq!(implausible(&patterns(&std::fs::read_to_string(path).unwrap())), None);
+        }
+    }
 
     #[test]
     fn strikes() {

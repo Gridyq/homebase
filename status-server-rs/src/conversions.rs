@@ -16,7 +16,8 @@
 //! the size and time the file had, so a changed file is looked at again. ffmpeg runs in a scope of
 //! its own with a low CPU and disk weight. Game mode stops it, and the file starts over
 //! afterwards. While Jellyfin transcodes video for someone, ffmpeg is paused (SIGSTOP) and no new
-//! file is started, so the stream gets the GPU.
+//! file is started, so the stream gets the GPU. A file still hard-linked to a seeding download
+//! waits until the torrent is removed.
 
 use std::collections::BTreeMap;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -409,7 +410,10 @@ async fn scan(state: &State) {
     }
     let now = now_ms();
     let busy = state.conversions.job.lock().unwrap().as_ref().map(|j| j.path.clone());
-    let to_probe: Vec<(String, u64, i64)> = {
+    // With each file, its entry as it was: probing takes a while, and the worker may finish one
+    // meanwhile, whose Done mustn't be overwritten.
+    type Seen = Option<(Verdict, u64, i64)>;
+    let to_probe: Vec<(String, u64, i64, Seen)> = {
         let mut saved = state.conversions.saved.lock().unwrap();
         let present: std::collections::HashSet<&str> = found.iter().map(|(p, ..)| p.as_str()).collect();
         // What's done stays for the totals; the rest of what's gone is forgotten.
@@ -421,16 +425,22 @@ async fn scan(state: &State) {
                     && now - mtime >= SETTLE_MS
                     && saved.files.get(p).is_none_or(|e| (e.size, e.mtime) != (*size, *mtime))
             })
-            .cloned()
+            .map(|(p, size, mtime)| {
+                let was = saved.files.get(p).map(|e| (e.verdict, e.size, e.mtime));
+                (p.clone(), *size, *mtime, was)
+            })
             .collect()
     };
-    for (path, size, mtime) in to_probe {
+    for (path, size, mtime, was) in to_probe {
         let (verdict, action, reason) = match probe(&path).await.map(|p| decide(&path, &p)) {
             Ok(Ok(action)) => (Verdict::Queued, Some(action), None),
             Ok(Err(why)) => (Verdict::Skipped, None, Some(why)),
             Err(e) => (Verdict::Failed, None, Some(e)),
         };
         let mut saved = state.conversions.saved.lock().unwrap();
+        if saved.files.get(&path).map(|e| (e.verdict, e.size, e.mtime)) != was {
+            continue;
+        }
         match saved.files.get_mut(&path) {
             // A converted file that's since been touched keeps its history.
             Some(e) if e.verdict == Verdict::Done && verdict == Verdict::Skipped => {
@@ -474,8 +484,10 @@ async fn run_ffmpeg(state: &State, args: Vec<String>) -> Result<(), RunError> {
         tokio::process::Command::new(ffmpeg())
     } else {
         let mut c = tokio::process::Command::new("systemd-run");
+        // A name per run: the CPU retry straight after a failed GPU run could otherwise find the
+        // old scope not yet collected, and fail a good file.
         c.args(["--user", "--scope", "--quiet", "--collect"])
-            .arg(format!("--unit={unit}"))
+            .arg(format!("--unit={unit}-{}", now_ms()))
             .args(["-p", "CPUWeight=20", "-p", "IOWeight=20", "-p", "MemoryHigh=1G", "-p", "MemoryMax=3G", "--"])
             .arg(ffmpeg());
         c
@@ -791,6 +803,8 @@ async fn record(state: &State, path: &str, outcome: Outcome) {
 }
 
 /// The next file to convert, unless it's paused, game mode is on or Jellyfin is transcoding.
+/// Files still hard-linked to a seeding download wait: converting one would free nothing until
+/// the torrent goes, and use room for the new copy meanwhile.
 fn next(state: &State) -> Option<String> {
     if state.game_mode.active() || state.jellyfin.transcoding_for().is_some() {
         return None;
@@ -799,7 +813,12 @@ fn next(state: &State) -> Option<String> {
     if saved.paused {
         return None;
     }
-    saved.files.iter().find(|(_, e)| e.verdict == Verdict::Queued).map(|(p, _)| p.clone())
+    saved
+        .files
+        .iter()
+        .filter(|(_, e)| e.verdict == Verdict::Queued)
+        .find(|(p, _)| std::fs::metadata(p).map_or(true, |m| m.nlink() <= 1))
+        .map(|(p, _)| p.clone())
 }
 
 /// Watches the libraries' folders for videos arriving, changing and going, on a thread of its own.
@@ -876,7 +895,8 @@ pub fn start(state: State) {
         // Cleared before either loop starts, or the first files fail on the old scope or folder.
         let unit = scope_unit();
         if !unit.is_empty() {
-            let _ = run("systemctl", &args!["--user", "stop", format!("{unit}.scope")], Duration::from_secs(30)).await;
+            let stop = args!["--user", "stop", format!("{unit}.scope"), format!("{unit}-*.scope")];
+            let _ = run("systemctl", &stop, Duration::from_secs(30)).await;
         }
         let _ = std::fs::remove_dir_all(cache_dir());
         let scanner = state.clone();

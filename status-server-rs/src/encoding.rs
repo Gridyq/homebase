@@ -22,13 +22,12 @@ pub fn base64url(data: &[u8]) -> String {
     base64(data).trim_end_matches('=').replace('+', "-").replace('/', "_")
 }
 
-/// Bytes from the system's random source.
+/// Bytes from the system's random source. Panics if there's none, rather than hand out zeros
+/// for a token.
 pub fn random_bytes(n: usize) -> Vec<u8> {
-    use std::io::Read;
+    use ring::rand::SecureRandom;
     let mut b = vec![0u8; n];
-    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-        let _ = f.read_exact(&mut b);
-    }
+    ring::rand::SystemRandom::new().fill(&mut b).expect("the system's random source failed");
     b
 }
 

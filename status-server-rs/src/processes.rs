@@ -115,7 +115,8 @@ pub async fn handler(AxumState(state): AxumState<State>) -> Result<Json<Processe
 
     let mut by_memory = with_cpu.clone();
     by_memory.sort_by_key(|p| std::cmp::Reverse(p.rss_bytes));
-    let mut by_cpu = with_cpu;
+    // The first call has no CPU to sort by, and sorting anyway would add arbitrary processes.
+    let mut by_cpu = if previous.is_some() { with_cpu } else { Vec::new() };
     by_cpu.sort_by(|a, b| b.cpu.unwrap_or(0.0).total_cmp(&a.cpu.unwrap_or(0.0)));
     let mut seen = HashSet::new();
     let processes = by_memory

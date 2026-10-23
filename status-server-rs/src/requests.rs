@@ -407,23 +407,26 @@ async fn search(state: &State, query: &str) -> Result<Value, String> {
     let shows = shows.unwrap_or_default();
     let movies = movies.unwrap_or_default();
 
-    let mut tv = Vec::new();
-    for s in shows.as_array().into_iter().flatten().take(SEARCH_RESULTS) {
-        let Some(tmdb) = s["tmdbId"].as_i64().filter(|id| *id > 0) else { continue };
+    // Shows already in Sonarr each need a look at their episodes; all at once, not one by one.
+    let tv = futures_util::future::join_all(shows.as_array().into_iter().flatten().take(SEARCH_RESULTS).filter_map(|s| {
+        let tmdb = s["tmdbId"].as_i64().filter(|id| *id > 0)?;
         let in_sonarr = series.as_ref().ok().and_then(|l| find_by(l, "tmdbId", tmdb));
-        let info = match in_sonarr {
-            Some(found) => series_info(state, tmdb, found).await.ok(),
-            None => None,
-        };
-        tv.push(json!({
-            "id": tmdb,
-            "mediaType": "tv",
-            "name": s["title"],
-            "firstAirDate": date(&s["firstAired"]),
-            "posterPath": image(s, "poster"),
-            "mediaInfo": info,
-        }));
-    }
+        Some(async move {
+            let info = match in_sonarr {
+                Some(found) => series_info(state, tmdb, found).await.ok(),
+                None => None,
+            };
+            json!({
+                "id": tmdb,
+                "mediaType": "tv",
+                "name": s["title"],
+                "firstAirDate": date(&s["firstAired"]),
+                "posterPath": image(s, "poster"),
+                "mediaInfo": info,
+            })
+        })
+    }))
+    .await;
     let film: Vec<Value> = movies
         .as_array()
         .into_iter()

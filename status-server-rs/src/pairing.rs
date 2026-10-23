@@ -98,8 +98,10 @@ pub async fn redeem(
         (Some(g), Some(code)) if !expired && !code.is_empty() && g.len() == code.len() => bool::from(g.as_bytes().ct_eq(code.as_bytes())),
         _ => false,
     };
+    // Removing the code claims it: of two requests with it at once, only one gets to remove it.
+    let ok = ok && std::fs::remove_file(&path).is_ok();
     println!("{} pairing {}", peer.ip().to_canonical(), if ok { "accepted" } else { "refused" });
-    if pending.is_some() && (ok || expired) {
+    if expired {
         let _ = std::fs::remove_file(&path);
     }
     if !ok {

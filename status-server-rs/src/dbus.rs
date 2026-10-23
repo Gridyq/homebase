@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use futures_util::StreamExt;
 use serde_json::{Map, Value, json};
-use tokio::sync::{Notify, OnceCell};
+use tokio::sync::Notify;
 use zbus::message::Type as MessageType;
 use zbus::zvariant::{Structure, Value as Variant};
 use zbus::{Connection, MatchRule, MessageStream};
@@ -24,10 +24,25 @@ const RECONNECT: Duration = Duration::from_secs(30);
 /// The system units the dashboard shows (see `UNITS`), as systemd names their objects.
 const SYSTEM_UNIT_PATHS: &[&str] = &["/org/freedesktop/systemd1/unit/tailscaled_2eservice"];
 
-static SYSTEM: OnceCell<Connection> = OnceCell::const_new();
+/// Shared, and made again after a failure: a connection from before dbus-broker restarted stays
+/// dead, so keeping it for good would leave service and drive signals dead until a restart.
+static SYSTEM: tokio::sync::Mutex<Option<Connection>> = tokio::sync::Mutex::const_new(None);
+/// SMART reads can take a while, but not this long.
+const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 
-async fn system_bus() -> zbus::Result<&'static Connection> {
-    SYSTEM.get_or_try_init(Connection::system).await
+async fn system_bus() -> zbus::Result<Connection> {
+    let mut slot = SYSTEM.lock().await;
+    if let Some(conn) = slot.as_ref() {
+        return Ok(conn.clone());
+    }
+    let conn = Connection::system().await?;
+    *slot = Some(conn.clone());
+    Ok(conn)
+}
+
+/// After a failure: the next use connects again.
+async fn forget_system_bus() {
+    *SYSTEM.lock().await = None;
 }
 
 /// A D-Bus value as busctl's JSON writes it.
@@ -67,13 +82,26 @@ pub fn to_json(v: &Variant) -> Value {
 /// Calls a method on the system bus; its results as busctl's `data`, one item per result.
 pub async fn system_call(destination: &str, path: &str, interface: &str, method: &str, options: bool) -> Result<Value, String> {
     let bus = system_bus().await.map_err(|e| e.to_string())?;
-    let reply = if options {
-        let none = std::collections::HashMap::<&str, Variant>::new();
-        bus.call_method(Some(destination), path, Some(interface), method, &(none,)).await
-    } else {
-        bus.call_method(Some(destination), path, Some(interface), method, &()).await
-    }
-    .map_err(|e| e.to_string())?;
+    let call = async {
+        if options {
+            let none = std::collections::HashMap::<&str, Variant>::new();
+            bus.call_method(Some(destination), path, Some(interface), method, &(none,)).await
+        } else {
+            bus.call_method(Some(destination), path, Some(interface), method, &()).await
+        }
+    };
+    let reply = match tokio::time::timeout(CALL_TIMEOUT, call).await {
+        Ok(Ok(reply)) => reply,
+        // A method error is the service saying no; anything else may be a dead connection.
+        Ok(Err(zbus::Error::MethodError(name, detail, _))) => {
+            return Err(detail.unwrap_or_else(|| name.to_string()));
+        }
+        Ok(Err(e)) => {
+            forget_system_bus().await;
+            return Err(e.to_string());
+        }
+        Err(_) => return Err(format!("{destination} didn't answer {method} within {}s", CALL_TIMEOUT.as_secs())),
+    };
     let body = reply.body();
     let fields: Structure = body.deserialize().map_err(|e| e.to_string())?;
     Ok(Value::Array(fields.fields().iter().map(to_json).collect()))
@@ -119,13 +147,16 @@ async fn follow(wake: Arc<Notify>, system: bool) {
     loop {
         if let Err(e) = follow_units(&wake, system).await {
             eprintln!("Following the {bus} services stopped: {e}");
+            if system {
+                forget_system_bus().await;
+            }
         }
         tokio::time::sleep(RECONNECT).await;
     }
 }
 
 async fn follow_units(wake: &Notify, system: bool) -> zbus::Result<()> {
-    let conn = if system { system_bus().await?.clone() } else { Connection::session().await? };
+    let conn = if system { system_bus().await? } else { Connection::session().await? };
     let rule = MatchRule::builder()
         .msg_type(MessageType::Signal)
         .sender("org.freedesktop.systemd1")?
@@ -186,16 +217,17 @@ async fn follow_udisks(wake: Arc<Notify>) {
                 .msg_type(MessageType::Signal)
                 .sender("org.freedesktop.UDisks2")?
                 .build();
-            let mut stream = MessageStream::for_match_rule(rule, conn, Some(256.try_into().unwrap())).await?;
+            let mut stream = MessageStream::for_match_rule(rule, &conn, Some(256.try_into().unwrap())).await?;
             while let Some(msg) = stream.next().await {
                 msg?;
                 wake.notify_one();
             }
-            Ok::<_, zbus::Error>(())
+            Err::<(), _>(zbus::Error::Failure("the bus closed the stream".into()))
         }
         .await;
         if let Err(e) = result {
             eprintln!("Following udisks stopped: {e}");
+            forget_system_bus().await;
         }
         tokio::time::sleep(RECONNECT).await;
     }

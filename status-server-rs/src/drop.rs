@@ -163,8 +163,7 @@ pub async fn receive(AxumState(_): AxumState<State>, req: Request) -> Result<Jso
     tokio::fs::create_dir_all(&dir)
         .await
         .map_err(|e| HttpError::internal(e.to_string()))?;
-    let mut random = [0u8; 6];
-    getrandom(&mut random);
+    let random = crate::encoding::random_bytes(6);
     let part = PartFile(dir.join(format!(".{}.part", random.iter().map(|b| format!("{b:02x}")).collect::<String>())));
     let (saved, size) = save(req.into_body(), &part.0, &dir, &name).await?;
     drop(part);
@@ -235,13 +234,6 @@ async fn save(body: Body, part: &std::path::Path, dir: &std::path::Path, name: &
         }
     }
     unreachable!()
-}
-
-fn getrandom(buf: &mut [u8]) {
-    use std::io::Read;
-    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-        let _ = f.read_exact(buf);
-    }
 }
 
 pub async fn send(req: Request) -> Result<Response, HttpError> {

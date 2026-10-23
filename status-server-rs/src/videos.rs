@@ -85,7 +85,8 @@ impl Videos {
 
     fn kill_running(&self, id: &str) -> bool {
         match &*self.running.lock().unwrap() {
-            Some((running, pid)) if running == id => {
+            // 0 while yt-dlp is still starting, and kill(0) would signal this whole process group.
+            Some((running, pid)) if running == id && *pid > 0 => {
                 // SAFETY: sends SIGTERM to the yt-dlp this server started.
                 unsafe { libc::kill(*pid as i32, libc::SIGTERM) };
                 true
@@ -258,9 +259,7 @@ pub async fn remove(AxumState(state): AxumState<State>, UrlPath(id): UrlPath<Str
 
 /// Starts the oldest queued download when nothing is downloading.
 fn next_video(state: &State) {
-    if state.videos.running.lock().unwrap().is_some() {
-        return;
-    }
+    // The jobs lock is let go first: elsewhere it's held while taking the running one.
     let job = state
         .videos
         .jobs
@@ -270,10 +269,17 @@ fn next_video(state: &State) {
         .rev()
         .find(|j| state_of(j) == "queued")
         .cloned();
-    if let Some(job) = job {
-        let state = state.clone();
-        tokio::spawn(async move { download(state, job).await });
+    let Some(job) = job else { return };
+    // Claimed before the task starts, so a second call meanwhile doesn't start another.
+    {
+        let mut running = state.videos.running.lock().unwrap();
+        if running.is_some() {
+            return;
+        }
+        *running = Some((id_of(&job).to_owned(), 0));
     }
+    let state = state.clone();
+    tokio::spawn(async move { download(state, job).await });
 }
 
 /// Lines yt-dlp prints for the app to follow along, as JSON so titles with spaces survive.

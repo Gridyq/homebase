@@ -90,8 +90,10 @@ impl Updates {
     }
 }
 
-/// Listens on `UPDATES_PORT` (8787; empty for none) for the app's update checks.
-pub fn start(state: State) {
+/// Listens on `UPDATES_PORT` (8787; empty for none) for the app's update checks. Bound before
+/// anything else runs, and the whole server stops if it can't be: a panic in the spawned task
+/// would only end that task, and the phones would quietly stop getting updates.
+pub async fn start(state: State) {
     let port = std::env::var("UPDATES_PORT").unwrap_or_else(|_| "8787".into());
     if port.is_empty() {
         return;
@@ -104,15 +106,15 @@ pub fn start(state: State) {
         .fallback(|| async { text(StatusCode::NOT_FOUND, "Not found") })
         .layer(middleware::from_fn(require_allowed_peer))
         .with_state(state);
+    // `::` also takes IPv4 connections.
+    let listener = tokio::net::TcpListener::bind((std::net::Ipv6Addr::UNSPECIFIED, port))
+        .await
+        .unwrap_or_else(|e| panic!("Couldn't listen on :{port}: {e}"));
+    println!("Homebase updates listening on :{port}");
     tokio::spawn(async move {
-        // `::` also takes IPv4 connections.
-        let listener = tokio::net::TcpListener::bind((std::net::Ipv6Addr::UNSPECIFIED, port))
-            .await
-            .unwrap_or_else(|e| panic!("Couldn't listen on :{port}: {e}"));
-        println!("Homebase updates listening on :{port}");
-        axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
-            .await
-            .expect("Update server stopped");
+        let served = axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await;
+        eprintln!("The update server stopped: {served:?}");
+        std::process::exit(1);
     });
 }
 
@@ -406,10 +408,9 @@ async fn asset(AxumState(state): AxumState<State>, Query(query): Query<HashMap<S
             content_type(Some(ext.unwrap_or_default()))
         };
         let data = if gzip {
-            let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-            encoder.write_all(&data).and_then(|_| encoder.finish()).map_err(|e| e.to_string())?
+            gzipped(&file, &data)?
         } else {
-            data
+            axum::body::Bytes::from(data)
         };
         Ok::<_, String>((content_type, data))
     })
@@ -431,6 +432,25 @@ async fn asset(AxumState(state): AxumState<State>, Query(query): Query<HashMap<S
         Ok(Err(e)) => internal(e),
         Err(e) => internal(e),
     }
+}
+
+/// A file's gzip, made once: published updates never change, and every phone asks for the same
+/// bundle.
+fn gzipped(file: &Path, data: &[u8]) -> Result<axum::body::Bytes, String> {
+    static CACHE: Mutex<Vec<(PathBuf, axum::body::Bytes)>> = Mutex::new(Vec::new());
+    /// The latest update's files, more or less.
+    const KEPT: usize = 64;
+    if let Some((_, hit)) = CACHE.lock().unwrap().iter().find(|(p, _)| p == file) {
+        return Ok(hit.clone());
+    }
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    let zipped = axum::body::Bytes::from(encoder.write_all(data).and_then(|_| encoder.finish()).map_err(|e| e.to_string())?);
+    let mut cache = CACHE.lock().unwrap();
+    if cache.len() >= KEPT {
+        cache.remove(0);
+    }
+    cache.push((file.to_owned(), zipped.clone()));
+    Ok(zipped)
 }
 
 #[cfg(test)]
