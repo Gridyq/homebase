@@ -1,0 +1,3 @@
+# Outside the project, so Metro does not crawl the build output.
+[build]
+target-dir = "/home/leonidas/.cache/homebase-updates-rs"

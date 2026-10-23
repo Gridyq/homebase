@@ -46,7 +46,12 @@ foreground, then shows "Update ready. Tap to restart" on the launcher.
 npm run publish-update
 ```
 
-- The server runs as a systemd user service: `systemctl --user status homebase-updates`.
+- The server is a Rust program in `update-server-rs/` that serves `update-server/`. It runs as a
+  systemd user service, `systemctl --user status homebase-updates`, running
+  `~/.local/bin/homebase-updates`. To deploy a change: `cargo build --release` in
+  `update-server-rs/` (build output goes to `~/.cache/homebase-updates-rs`), copy
+  `release/homebase-updates` from there to `~/.local/bin/`, and
+  `systemctl --user restart homebase-updates`.
   It listens on port 8787, and the app reaches it at `fedora.tail27f991.ts.net` (Tailscale).
   Without Tailscale the app keeps running the last update it downloaded.
 - Updates are signed with `update-server/keys/private-key.pem`, which is git-ignored. The app
