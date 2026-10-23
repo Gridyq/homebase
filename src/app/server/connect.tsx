@@ -25,13 +25,18 @@ export default function Connect() {
   const [error, setError] = useState<string>();
 
   const submit = async () => {
+    if (busy) return;
     if (!url.trim()) return setError('Enter the server address.');
     if (!token.trim() && !params.code) return setError('Enter the token.');
     setBusy(true);
     setError(undefined);
     try {
       const next = { url: normalizeUrl(url), token: token.trim() };
-      if (!next.token && params.code) next.token = await redeemPairingCode(next.url, params.code);
+      if (!next.token && params.code) {
+        next.token = await redeemPairingCode(next.url, params.code);
+        // The code only works once; keep the token in case the check below fails and they retry.
+        setToken(next.token);
+      }
       // Check it works before replacing a connection that might be fine.
       await fetchStatus(next);
       await save(next);

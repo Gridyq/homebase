@@ -1,5 +1,5 @@
 import { Stack, useLocalSearchParams } from 'expo-router';
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { Alert, ScrollView, StyleSheet, View } from 'react-native';
 
 import { Button } from '@/components/button';
@@ -23,6 +23,7 @@ import {
   serviceColor,
   serviceSummary,
   StatTile,
+  usePullToRefresh,
   useSeriesColors,
 } from '@/miniapps/server/components';
 import { useServerConnection } from '@/miniapps/server/connection';
@@ -52,10 +53,18 @@ export default function ServiceScreen() {
     () => fetchServiceHistory(conn, range, id),
     HISTORY_POLL_MS,
     `${conn.url}|${id}|${range}`,
+    { keepPrevious: true },
   );
+  const refreshControl = usePullToRefresh(status.refresh, history.refresh);
   const [busy, setBusy] = useState<ServiceAction>();
+  // State only updates on the next render, so a quick second tap could still get through.
+  const acting = useRef(false);
 
-  const service = status.data?.services.find((s) => s.id === id);
+  // A container being recreated drops out of the list for a moment; keep showing it meanwhile.
+  const [lastSeen, setLastSeen] = useState<Service>();
+  const current = status.data?.services.find((s) => s.id === id);
+  if (current && current !== lastSeen) setLastSeen(current);
+  const service = current ?? lastSeen;
   const header = <Stack.Screen options={{ title: service?.name ?? '' }} />;
 
   if (!status.data) {
@@ -70,12 +79,14 @@ export default function ServiceScreen() {
     return (
       <>
         {header}
-        <Centered error={new Error('This service is no longer on the server.')} />
+        <Centered error={new Error('This service is no longer on the server.')} onRetry={status.refresh} />
       </>
     );
   }
 
   const act = async (s: Service, action: ServiceAction) => {
+    if (acting.current) return;
+    acting.current = true;
     setBusy(action);
     try {
       await runAction(conn, s.id, action);
@@ -84,13 +95,16 @@ export default function ServiceScreen() {
     }
     await status.refresh();
     setBusy(undefined);
+    acting.current = false;
   };
 
+  // Stopping or restarting cuts off whatever it's doing, like a stream or a download.
   const confirm = (action: ServiceAction) => {
-    if (action !== 'stop') return act(service, action);
-    Alert.alert(`Stop ${service.name}?`, undefined, [
+    if (action !== 'stop' && action !== 'restart') return act(service, action);
+    const label = ACTION_LABELS[action];
+    Alert.alert(`${label} ${service.name}?`, undefined, [
       { text: 'Cancel', style: 'cancel' },
-      { text: 'Stop', style: 'destructive', onPress: () => act(service, action) },
+      { text: label, style: 'destructive', onPress: () => act(service, action) },
     ]);
   };
 
@@ -101,7 +115,8 @@ export default function ServiceScreen() {
     <ScrollView
       contentInsetAdjustmentBehavior="automatic"
       style={{ backgroundColor: theme.background }}
-      contentContainerStyle={[styles.content, gutter]}>
+      contentContainerStyle={[styles.content, gutter]}
+      refreshControl={refreshControl}>
       {header}
       <View style={styles.stateLine}>
         <View style={[styles.dot, { backgroundColor: serviceColor(service, theme.danger) }]} />
@@ -149,7 +164,7 @@ export default function ServiceScreen() {
       <Section title="History">
         <Segmented value={range} onChange={setRange} options={RANGES} />
         {history.data ? (
-          <>
+          <View style={[styles.trends, history.stale && styles.stale]}>
             <HistoryNote history={history.data} />
             <TrendCard
               title="Memory"
@@ -165,7 +180,7 @@ export default function ServiceScreen() {
               format={formatCpu}
               color={colors[1]}
             />
-          </>
+          </View>
         ) : (
           <Centered loading={!history.error} error={history.error} onRetry={history.refresh} />
         )}
@@ -200,5 +215,12 @@ const styles = StyleSheet.create({
   actions: {
     flexDirection: 'row',
     gap: Spacing.two,
+  },
+  trends: {
+    gap: Spacing.two,
+  },
+  /** The last range's charts, while the one just picked loads. */
+  stale: {
+    opacity: 0.5,
   },
 });

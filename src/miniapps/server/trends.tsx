@@ -1,3 +1,4 @@
+import { memo } from 'react';
 import { StyleSheet, View } from 'react-native';
 
 import { ThemedText } from '@/components/themed-text';
@@ -12,8 +13,12 @@ export const RANGES = [
   { value: 24 * 3600, label: '24 hours' },
 ];
 
-/** A card with a chart of one series, its average and peak, and how to read it. */
-export function TrendCard({
+/**
+ * A card with a chart of one series, its average and peak, and how to read it. Memoized: screens
+ * poll other things every few seconds, but the history only changes every 30. Pass a `format`
+ * that keeps its identity, or it redraws anyway.
+ */
+export const TrendCard = memo(function TrendCard({
   title,
   series,
   history,
@@ -58,7 +63,7 @@ export function TrendCard({
       </View>
     </Card>
   );
-}
+});
 
 /** How to read the charts, and when the history starts if that's later than the range shown. */
 export function HistoryNote({ history }: { history: History<string> }) {

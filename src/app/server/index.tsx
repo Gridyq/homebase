@@ -11,6 +11,7 @@ import { Centered } from '@/miniapps/jellyfin/components';
 import { fetchStatus, setGameMode, type Connection, type Status } from '@/miniapps/server/api';
 import {
   Card,
+  diskName,
   formatBytes,
   formatDuration,
   formatPercent,
@@ -69,7 +70,7 @@ function Dashboard() {
   const conn = connection!;
   const theme = useTheme();
   const gutter = useGutter();
-  const { data, error, refresh } = usePolling(() => fetchStatus(conn), POLL_MS, conn.url);
+  const { data, error, stale, refresh } = usePolling(() => fetchStatus(conn), POLL_MS, conn.url);
   const [pulled, setPulled] = useState(false);
 
   if (!data) {
@@ -97,7 +98,7 @@ function Dashboard() {
         />
       }>
       <View style={styles.hostLine}>
-        <View style={[styles.dot, { backgroundColor: error ? theme.danger : StatusColors.good }]} />
+        <View style={[styles.dot, { backgroundColor: error ? theme.danger : stale ? StatusColors.idle : StatusColors.good }]} />
         <ThemedText type="small" themeColor="textSecondary" style={styles.flex} numberOfLines={1}>
           {data.host.name} · up {formatDuration(data.host.uptimeSec * 1000)}
         </ThemedText>
@@ -178,7 +179,7 @@ function Dashboard() {
               <View key={d.mount} style={[styles.disk, i > 0 && styles.diskGap]}>
                 <View style={styles.diskLine}>
                   <ThemedText type="smallBold" style={styles.flex} numberOfLines={1}>
-                    {d.mount === '/' ? 'System' : d.mount}
+                    {diskName(d.mount)}
                   </ThemedText>
                   <ThemedText type="small" themeColor="textSecondary">
                     {formatBytes(d.availableBytes)} free of {formatBytes(d.totalBytes)}

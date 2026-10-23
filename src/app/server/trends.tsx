@@ -7,12 +7,20 @@ import { useGutter } from '@/hooks/use-gutter';
 import { useTheme } from '@/hooks/use-theme';
 import { Centered } from '@/miniapps/jellyfin/components';
 import { fetchHistory } from '@/miniapps/server/api';
-import { formatBytes, formatPercent, formatRate, Segmented, useSeriesColors } from '@/miniapps/server/components';
+import {
+  formatBytes,
+  formatPercent,
+  formatRate,
+  Segmented,
+  usePullToRefresh,
+  useSeriesColors,
+} from '@/miniapps/server/components';
 import { useServerConnection } from '@/miniapps/server/connection';
 import { HistoryNote, RANGES, TrendCard } from '@/miniapps/server/trends';
 import { usePolling } from '@/miniapps/server/use-polling';
 
 const POLL_MS = 30_000;
+const formatCelsius = (c: number) => `${Math.round(c)}°C`;
 
 export default function TrendsScreen() {
   const { connection } = useServerConnection();
@@ -21,13 +29,19 @@ export default function TrendsScreen() {
   const gutter = useGutter();
   const colors = useSeriesColors();
   const [range, setRange] = useState(RANGES[0].value);
-  const { data, error, refresh } = usePolling(() => fetchHistory(conn, range), POLL_MS, `${conn.url}|${range}`);
+  const { data, error, stale, refresh } = usePolling(() => fetchHistory(conn, range), POLL_MS, `${conn.url}|${range}`, {
+    keepPrevious: true,
+  });
+  const refreshControl = usePullToRefresh(refresh);
 
   const picker = <Segmented value={range} onChange={setRange} options={RANGES} />;
 
   if (!data) {
     return (
-      <ScrollView style={{ backgroundColor: theme.background }} contentContainerStyle={[styles.content, gutter]}>
+      <ScrollView
+        contentInsetAdjustmentBehavior="automatic"
+        style={{ backgroundColor: theme.background }}
+        contentContainerStyle={[styles.content, gutter]}>
         {picker}
         <Centered loading={!error} error={error} onRetry={refresh} />
       </ScrollView>
@@ -39,7 +53,8 @@ export default function TrendsScreen() {
     <ScrollView
       contentInsetAdjustmentBehavior="automatic"
       style={{ backgroundColor: theme.background }}
-      contentContainerStyle={[styles.content, gutter]}>
+      contentContainerStyle={[styles.content, gutter, stale && styles.stale]}
+      refreshControl={refreshControl}>
       {picker}
       {error ? (
         <ThemedText type="small" style={{ color: theme.danger }}>
@@ -78,7 +93,7 @@ export default function TrendsScreen() {
           title="CPU temperature"
           series={series.temp}
           history={data}
-          format={(c) => `${Math.round(c)}°C`}
+          format={formatCelsius}
           color={colors[1]}
           max={100}
         />
@@ -91,5 +106,8 @@ const styles = StyleSheet.create({
   content: {
     paddingVertical: Spacing.three,
     gap: Spacing.three,
+  },
+  stale: {
+    opacity: 0.5,
   },
 });

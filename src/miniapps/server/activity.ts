@@ -1,7 +1,7 @@
 import type { Activity } from '@/miniapps/registry';
 
 import { fetchStatus } from './api';
-import { formatPercent } from './components';
+import { diskName, formatPercent } from './components';
 import { loadConnection } from './connection';
 
 const DISK_WARN = 0.9;
@@ -29,7 +29,7 @@ export async function serverActivity(): Promise<Activity[]> {
     if (used < DISK_WARN) continue;
     items.push({
       key: `disk:${disk.mount}`,
-      title: `${disk.mount} is ${formatPercent(used)} full`,
+      title: `${diskName(disk.mount)} disk is ${formatPercent(used)} full`,
       fraction: used,
       tone: 'warn',
       href: '/server',

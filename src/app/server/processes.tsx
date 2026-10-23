@@ -7,7 +7,7 @@ import { useGutter } from '@/hooks/use-gutter';
 import { useTheme } from '@/hooks/use-theme';
 import { Centered } from '@/miniapps/jellyfin/components';
 import { fetchProcesses, type ProcessInfo } from '@/miniapps/server/api';
-import { Card, formatBytes, formatCpu, Meter, Segmented, useSeriesColors } from '@/miniapps/server/components';
+import { Card, formatBytes, formatCpu, Meter, Segmented, usePullToRefresh, useSeriesColors } from '@/miniapps/server/components';
 import { useServerConnection } from '@/miniapps/server/connection';
 import { usePolling } from '@/miniapps/server/use-polling';
 
@@ -23,6 +23,7 @@ export default function ProcessesScreen() {
   const gutter = useGutter();
   const colors = useSeriesColors();
   const { data, error, refresh } = usePolling(() => fetchProcesses(conn), POLL_MS, conn.url);
+  const refreshControl = usePullToRefresh(refresh);
   const [sortBy, setSortBy] = useState<SortBy>('memory');
 
   if (!data) return <Centered loading={!error} error={error} onRetry={refresh} />;
@@ -35,7 +36,8 @@ export default function ProcessesScreen() {
     <ScrollView
       contentInsetAdjustmentBehavior="automatic"
       style={{ backgroundColor: theme.background }}
-      contentContainerStyle={[styles.content, gutter]}>
+      contentContainerStyle={[styles.content, gutter]}
+      refreshControl={refreshControl}>
       {error ? (
         <ThemedText type="small" style={{ color: theme.danger }}>
           {error.message} Showing the last reading.

@@ -18,6 +18,7 @@ import {
   Section,
   Segmented,
   StackedBar,
+  usePullToRefresh,
   useSeriesColors,
 } from '@/miniapps/server/components';
 import { useServerConnection } from '@/miniapps/server/connection';
@@ -52,6 +53,7 @@ export default function MemoryScreen() {
   const gutter = useGutter();
   const colors = useSeriesColors();
   const { data, error, refresh } = usePolling(() => fetchUsage(conn), POLL_MS, conn.url);
+  const refreshControl = usePullToRefresh(refresh);
   const [sortBy, setSortBy] = useState<SortBy>('memory');
   const [showAll, setShowAll] = useState(false);
 
@@ -77,7 +79,8 @@ export default function MemoryScreen() {
     <ScrollView
       contentInsetAdjustmentBehavior="automatic"
       style={{ backgroundColor: theme.background }}
-      contentContainerStyle={[styles.content, gutter]}>
+      contentContainerStyle={[styles.content, gutter]}
+      refreshControl={refreshControl}>
       {error ? (
         <ThemedText type="small" style={{ color: theme.danger }}>
           {error.message} Showing the last reading.

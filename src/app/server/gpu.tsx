@@ -18,6 +18,7 @@ import {
   Segmented,
   StatTile,
   StatusColors,
+  usePullToRefresh,
   useSeriesColors,
 } from '@/miniapps/server/components';
 import { useServerConnection } from '@/miniapps/server/connection';
@@ -37,6 +38,9 @@ function formatLink(gts: number, width: number) {
   return `PCIe ${PCIE_GEN[gts] ?? `${gts} GT/s`} ×${width}`;
 }
 
+const formatCelsius = (c: number) => `${Math.round(c)}°C`;
+const formatWatts = (w: number) => `${Math.round(w)} W`;
+
 export default function GpuScreen() {
   const { connection } = useServerConnection();
   const conn = connection!;
@@ -45,7 +49,10 @@ export default function GpuScreen() {
   const colors = useSeriesColors();
   const { data, error, refresh } = usePolling(() => fetchGpu(conn), POLL_MS, conn.url);
   const [range, setRange] = useState(RANGES[0].value);
-  const history = usePolling(() => fetchHistory(conn, range), HISTORY_POLL_MS, `${conn.url}|${range}`);
+  const history = usePolling(() => fetchHistory(conn, range), HISTORY_POLL_MS, `${conn.url}|${range}`, {
+    keepPrevious: true,
+  });
+  const refreshControl = usePullToRefresh(refresh, history.refresh);
 
   if (!data) return <Centered loading={!error} error={error} onRetry={refresh} />;
 
@@ -64,7 +71,8 @@ export default function GpuScreen() {
     <ScrollView
       contentInsetAdjustmentBehavior="automatic"
       style={{ backgroundColor: theme.background }}
-      contentContainerStyle={[styles.content, gutter]}>
+      contentContainerStyle={[styles.content, gutter]}
+      refreshControl={refreshControl}>
       {error ? (
         <ThemedText type="small" style={{ color: theme.danger }}>
           {error.message} Showing the last reading.
@@ -186,7 +194,7 @@ export default function GpuScreen() {
       <Section title="Trends">
         <Segmented value={range} onChange={setRange} options={RANGES} />
         {history.data ? (
-          <>
+          <View style={[styles.trends, history.stale && styles.stale]}>
             <HistoryNote history={history.data} />
             <TrendCard
               title="Usage"
@@ -211,7 +219,7 @@ export default function GpuScreen() {
                 title="Hotspot temperature"
                 series={history.data.series.gpuTemp}
                 history={history.data}
-                format={(c) => `${Math.round(c)}°C`}
+                format={formatCelsius}
                 color={colors[1]}
                 max={110}
               />
@@ -221,12 +229,12 @@ export default function GpuScreen() {
                 title="Power"
                 series={history.data.series.gpuPower}
                 history={history.data}
-                format={(w) => `${Math.round(w)} W`}
+                format={formatWatts}
                 color={colors[1]}
                 max={power?.capWatts}
               />
             ) : null}
-          </>
+          </View>
         ) : (
           <Centered loading={!history.error} error={history.error} onRetry={history.refresh} />
         )}
@@ -313,6 +321,13 @@ const styles = StyleSheet.create({
   content: {
     paddingVertical: Spacing.three,
     gap: Spacing.three,
+  },
+  trends: {
+    gap: Spacing.two,
+  },
+  /** The last range's charts, while the one just picked loads. */
+  stale: {
+    opacity: 0.5,
   },
   flex: {
     flex: 1,

@@ -225,7 +225,7 @@ export async function request<T>(
   }
   const body = await res.json().catch(() => undefined);
   if (!res.ok) {
-    if (res.status === 401) throw new Error('The server rejected the token. Check it in Settings.');
+    if (res.status === 401) throw new Error('The server rejected the token. Pair again under Connection (the gear button).');
     throw new Error(body?.error ?? `The server answered ${res.status}.`);
   }
   return body as T;
@@ -244,8 +244,12 @@ export function fetchStatus(conn: Connection) {
   return request<Status>(conn, '/api/status');
 }
 
+/** The server answers once the service has stopped or started, which can take a while. */
 export function runAction(conn: Connection, id: string, action: ServiceAction) {
-  return request<{ ok: true }>(conn, `/api/services/${encodeURIComponent(id)}/${action}`, { method: 'POST' });
+  return request<{ ok: true }>(conn, `/api/services/${encodeURIComponent(id)}/${action}`, {
+    method: 'POST',
+    timeoutMs: 130_000,
+  });
 }
 
 export function fetchGameMode(conn: Connection) {
