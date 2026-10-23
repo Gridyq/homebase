@@ -1,7 +1,7 @@
 import { Image } from 'expo-image';
 import { router, Stack, useLocalSearchParams } from 'expo-router';
 import { SymbolView } from 'expo-symbols';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActionSheetIOS,
   ActivityIndicator,
@@ -76,8 +76,16 @@ function ChatView({ conn, id }: { conn: Connection; id: string }) {
   const [streaming, setStreaming] = useState(false);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [viewing, setViewing] = useState<string>();
+  const [openError, setOpenError] = useState<Error>();
   const scroll = useRef<ScrollViewInstance>(null);
   const following = useRef(true);
+  // Stops reading the answer when leaving the chat; the server finishes it either way.
+  const leaving = useRef(new AbortController());
+  useEffect(() => {
+    const controller = new AbortController();
+    leaving.current = controller;
+    return () => controller.abort();
+  }, []);
 
   const model = models.find((m) => m.id === (modelId ?? chat?.model)) ?? models[0];
   const answering = streaming || !!chat?.messages.at(-1)?.pending;
@@ -91,28 +99,38 @@ function ChatView({ conn, id }: { conn: Connection; id: string }) {
     return next;
   }, [conn, id]);
 
-  useEffect(() => {
+  const open = useCallback(() => {
     getChat(conn, id).then(
       (c) => {
         setChat(c);
         setLoaded(true);
       },
-      (e: Error) => {
-        setLoaded(true);
-        Alert.alert('Couldn’t open the chat', e.message);
-      },
+      // Showing an empty chat here would look like a new one, and a question would land at the end
+      // of history the screen isn't showing.
+      (e: Error) => setOpenError(e),
     );
     assistantState(conn)
       .then((s) => setModels(s.models))
       .catch(() => undefined);
   }, [conn, id]);
+  useEffect(open, [open]);
 
   // An answer the server is still writing (it went on while the app was closed): follow it.
   const catchingUp = !streaming && !!chat?.messages.at(-1)?.pending;
   useEffect(() => {
     if (!catchingUp) return;
-    const timer = setInterval(() => load().catch(() => undefined), CATCH_UP_MS);
-    return () => clearInterval(timer);
+    // Each look waits for the last, so a slow answer can't land after a newer one.
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const tick = async () => {
+      await load().catch(() => undefined);
+      if (!stopped) timer = setTimeout(tick, CATCH_UP_MS);
+    };
+    timer = setTimeout(tick, CATCH_UP_MS);
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+    };
   }, [catchingUp, load]);
 
   const updateLast = (change: (m: ChatMessage) => ChatMessage) =>
@@ -124,6 +142,7 @@ function ChatView({ conn, id }: { conn: Connection; id: string }) {
     if (!canSend || answering) return;
     const now = Date.now();
     const unsent = attachments;
+    const before = chat;
     setText('');
     setAttachments([]);
     following.current = true;
@@ -149,12 +168,15 @@ function ChatView({ conn, id }: { conn: Connection; id: string }) {
           updateLast((m) => ({ ...m, content: m.content + event.text }));
         } else if (event.type === 'done') updateLast(() => event.message);
         else if (event.type === 'error') updateLast((m) => ({ ...m, pending: undefined, error: event.error }));
-      });
+      }, leaving.current.signal);
     } catch (e) {
+      if (leaving.current.signal.aborted) return;
       // Refused before it started (the message wasn't added), or the connection dropped while the
       // server kept writing: either way the server's copy is the truth.
       const saved = await load().catch(() => undefined);
       if (!saved?.messages.some((m) => m.at === now && m.role === 'user')) {
+        // Take the question back out of the list, or its empty answer would wait there forever.
+        if (!saved) setChat(before);
         setText(question);
         setAttachments(unsent);
         Alert.alert('Couldn’t ask', e instanceof Error ? e.message : String(e));
@@ -165,7 +187,8 @@ function ChatView({ conn, id }: { conn: Connection; id: string }) {
     }
   };
 
-  const stop = () => stopAnswer(conn, id).catch(() => undefined);
+  const stop = () =>
+    stopAnswer(conn, id).catch((e: Error) => Alert.alert('Couldn’t stop the answer', e.message));
 
   const addPhotos = (from: 'library' | 'camera') =>
     pickPhotos(from, PHOTOS_PER_QUESTION - attachments.length).then(
@@ -177,7 +200,7 @@ function ChatView({ conn, id }: { conn: Connection; id: string }) {
             (photoId) => setAttachments((list) => list.map((x) => (x.key === a.key ? { ...x, id: photoId } : x))),
             (e: Error) => {
               setAttachments((list) => list.filter((x) => x.key !== a.key));
-              Alert.alert('Couldn’t add the photo', e.message);
+              if (!leaving.current.signal.aborted) Alert.alert('Couldn’t add the photo', e.message);
             },
           );
         }
@@ -221,7 +244,7 @@ function ChatView({ conn, id }: { conn: Connection; id: string }) {
       },
     ]);
 
-  const messageActions = (message: ChatMessage) => {
+  const messageActions = useCallback((message: ChatMessage) => {
     if (!message.content) return;
     const options = ['Share…', 'Send to PC clipboard', 'Cancel'];
     ActionSheetIOS.showActionSheetWithOptions({ options, cancelButtonIndex: 2 }, (i) => {
@@ -233,14 +256,20 @@ function ChatView({ conn, id }: { conn: Connection; id: string }) {
         );
       }
     });
-  };
+  }, [conn]);
 
   const onScroll = (e: NativeSyntheticEvent<NativeScrollEvent>) => {
     const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
     following.current = contentOffset.y + layoutMeasurement.height >= contentSize.height - FOLLOW_SLACK;
   };
 
-  if (!loaded) return <Centered loading />;
+  if (!loaded) {
+    const retry = () => {
+      setOpenError(undefined);
+      open();
+    };
+    return <Centered loading={!openError} error={openError} onRetry={retry} />;
+  }
 
   const messages = chat?.messages ?? [];
   return (
@@ -277,7 +306,7 @@ function ChatView({ conn, id }: { conn: Connection; id: string }) {
               conn={conn}
               message={m}
               status={i === messages.length - 1 ? status : undefined}
-              onLongPress={() => messageActions(m)}
+              onLongPress={messageActions}
               onOpenPhoto={setViewing}
             />
           ))
@@ -370,7 +399,8 @@ function useKeyboardOpen() {
   return open;
 }
 
-function MessageView({
+// Memoized so a streamed word only redraws the answer it belongs to, not the whole chat.
+const MessageView = memo(function MessageView({
   conn,
   message,
   status,
@@ -380,7 +410,7 @@ function MessageView({
   conn: Connection;
   message: ChatMessage;
   status?: string;
-  onLongPress: () => void;
+  onLongPress: (message: ChatMessage) => void;
   onOpenPhoto: (id: string) => void;
 }) {
   const theme = useTheme();
@@ -403,7 +433,7 @@ function MessageView({
           </View>
         ) : null}
         {message.content ? (
-          <Pressable onLongPress={onLongPress} style={[styles.user, { backgroundColor: theme.backgroundSelected }]}>
+          <Pressable onLongPress={() => onLongPress(message)} style={[styles.user, { backgroundColor: theme.backgroundSelected }]}>
             <ThemedText style={styles.userText}>{message.content}</ThemedText>
           </Pressable>
         ) : null}
@@ -417,7 +447,7 @@ function MessageView({
     message.cutOff ? 'Stopped at the length limit' : undefined,
   ].filter(Boolean);
   return (
-    <Pressable onLongPress={onLongPress} style={styles.answer}>
+    <Pressable onLongPress={() => onLongPress(message)} style={styles.answer}>
       {message.reasoning ? (
         <Pressable onPress={() => setShowThinking((s) => !s)} style={styles.thinkingRow}>
           <ThemedText type="small" themeColor="textSecondary" style={styles.caption}>
@@ -444,7 +474,7 @@ function MessageView({
       ) : null}
     </Pressable>
   );
-}
+});
 
 const styles = StyleSheet.create({
   flex: {

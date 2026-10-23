@@ -103,6 +103,7 @@ export async function ask(
   id: string,
   question: { text: string; images: string[]; model?: string; think: boolean },
   onEvent: (event: AnswerEvent) => void,
+  signal?: AbortSignal,
 ) {
   let res: Awaited<ReturnType<typeof fetch>>;
   try {
@@ -110,13 +111,14 @@ export async function ask(
       method: 'POST',
       headers: { Authorization: `Bearer ${conn.token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify(question),
+      signal,
     });
   } catch (e) {
     throw new Error(`Can't reach ${conn.url} (${e instanceof Error ? e.message : String(e)}). Is Tailscale connected?`);
   }
   if (!res.ok) {
     const body = await res.json().catch(() => undefined);
-    if (res.status === 401) throw new Error('The server rejected the token. Check it in Settings.');
+    if (res.status === 401) throw new Error('The server rejected the token. Pair again under Connection (the gear button).');
     throw new Error(body?.error ?? `The server answered ${res.status}.`);
   }
   const reader = res.body!.getReader();
@@ -150,7 +152,7 @@ export async function uploadPhoto(conn: Connection, uri: string) {
   try {
     body = JSON.parse(result.body);
   } catch {}
-  if (result.status === 401) throw new Error('The server rejected the token. Check it in Settings.');
+  if (result.status === 401) throw new Error('The server rejected the token. Pair again under Connection (the gear button).');
   if (result.status < 200 || result.status >= 300 || !body?.id) throw new Error(body?.error ?? `The server answered ${result.status}.`);
   return body.id;
 }
