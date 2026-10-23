@@ -19,8 +19,11 @@ export default function Connect() {
   const gutter = useGutter();
   const params = useLocalSearchParams<{ url?: string; code?: string }>();
   const { connection, save, forget } = useServerConnection();
+  // Anyone can make a link, so the saved token is only filled in for the saved server; otherwise
+  // Save would send it to whatever address the link named.
+  const otherServer = params.url != null && normalizeUrl(params.url) !== connection?.url;
   const [url, setUrl] = useState(params.url ?? connection?.url ?? DEFAULT_URL);
-  const [token, setToken] = useState(params.code ? '' : (connection?.token ?? ''));
+  const [token, setToken] = useState(params.code || otherServer ? '' : (connection?.token ?? ''));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
 
@@ -68,9 +71,11 @@ export default function Connect() {
         contentInsetAdjustmentBehavior="automatic"
         contentContainerStyle={[styles.form, gutter]}
         keyboardShouldPersistTaps="handled">
-        {params.code ? (
+        {params.url != null ? (
           <ThemedText type="small" themeColor="textSecondary" style={styles.note}>
-            From the pairing link. Check the address is your server, then tap Save to connect.
+            {params.code
+              ? 'From the pairing link. Check the address is your server, then tap Save to connect.'
+              : 'From a link. Check the address is your server before entering its token.'}
           </ThemedText>
         ) : null}
         <ThemedText type="small" themeColor="textSecondary">

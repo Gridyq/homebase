@@ -242,14 +242,14 @@ function Scrubber({
 
 /** The preview thumbnail for a moment, cut out of the tile image that holds it. */
 function TrickplayThumb({ trickplay, seconds, width }: { trickplay: Trickplay; seconds: number; width: number }) {
-  const { info, tileUrl } = trickplay;
+  const { info, tileUrl, headers } = trickplay;
   const { tile, column, row } = thumbnailAt(trickplay, seconds);
   const scale = width / info.Width;
   const height = info.Height * scale;
   return (
     <View style={[styles.thumb, { width, height }]}>
       <Image
-        source={tileUrl(tile)}
+        source={{ uri: tileUrl(tile), headers }}
         style={{
           position: 'absolute',
           width: info.Width * info.TileWidth * scale,
@@ -277,7 +277,7 @@ function prefetchTiles(trickplay: Trickplay, seconds: number) {
   const { tile } = thumbnailAt(trickplay, seconds);
   const last = Math.ceil(trickplay.info.ThumbnailCount / (trickplay.info.TileWidth * trickplay.info.TileHeight)) - 1;
   const tiles = [tile, tile - 1, tile + 1].filter((t) => t >= 0 && t <= last);
-  Image.prefetch(tiles.map(trickplay.tileUrl), 'memory-disk').catch(() => undefined);
+  Image.prefetch(tiles.map(trickplay.tileUrl), { cachePolicy: 'memory-disk', headers: trickplay.headers }).catch(() => undefined);
 }
 
 export function formatClock(seconds: number) {

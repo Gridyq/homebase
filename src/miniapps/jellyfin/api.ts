@@ -365,8 +365,9 @@ export function createClient(session: Session, onUnauthorized?: () => void) {
       const info = sizes && Object.values(sizes).sort((a, b) => a.Width - b.Width)[0];
       if (!info?.ThumbnailCount) return undefined;
       const tileUrl = (tile: number) =>
-        `${serverUrl}/Videos/${item.Id}/Trickplay/${info.Width}/${tile}.jpg?mediaSourceId=${mediaSourceId}&api_key=${accessToken}`;
-      return { info, tileUrl };
+        `${serverUrl}/Videos/${item.Id}/Trickplay/${info.Width}/${tile}.jpg?mediaSourceId=${mediaSourceId}`;
+      // The token goes in a header, since expo-image keeps the URL in its disk cache.
+      return { info, tileUrl, headers: { Authorization: authHeader(deviceId, accessToken) } };
     },
 
     playlists: () =>
@@ -519,6 +520,8 @@ export function createClient(session: Session, onUnauthorized?: () => void) {
 
       let url: string;
       let playMethod: 'DirectPlay' | 'Transcode';
+      // The key stays in these URLs: an AirPlay receiver fetches them itself, without our
+      // headers, and HLS segments rely on the server copying it into the playlists it writes.
       if (source.SupportsDirectPlay || !source.TranscodingUrl) {
         url =
           `${serverUrl}/Videos/${itemId}/stream?static=true&mediaSourceId=${source.Id}` +
