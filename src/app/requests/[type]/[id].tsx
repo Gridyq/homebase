@@ -82,9 +82,9 @@ export default function TitlePage() {
         </ThemedText>
         <StatusPill status={item.mediaInfo?.status} />
         {type === 'movie' ? (
-          <MovieActions conn={conn} item={item} onChange={reload} />
+          <MovieActions conn={conn} item={item} onChange={reload} reloadFailed={!!error} />
         ) : (
-          <SeasonPicker conn={conn} item={item} onChange={reload} />
+          <SeasonPicker conn={conn} item={item} onChange={reload} reloadFailed={!!error} />
         )}
         {item.tagline ? (
           <ThemedText type="smallBold" style={styles.tagline}>
@@ -102,13 +102,14 @@ function realSeasons(item: Details) {
   return (item.seasons ?? []).filter((s) => s.seasonNumber > 0);
 }
 
-function useRequest(conn: Connection, item: Details, type: MediaType, onDone: () => void) {
+function useRequest(conn: Connection, item: Details, type: MediaType, onDone: () => void, reloadFailed: boolean) {
   const [sending, setSending] = useState(false);
   // The details it was requested from: the button stays busy until fresh ones replace them, or
-  // it would offer the same request again in between.
+  // it would offer the same request again in between. A reload that fails brings none, so that
+  // frees it too.
   const [requestedFrom, setRequestedFrom] = useState<Details>();
   const [profileId, setProfileId] = useState<number>();
-  const busy = sending || requestedFrom === item;
+  const busy = sending || (requestedFrom === item && !reloadFailed);
   const send = async (seasons?: number[]) => {
     if (busy) return;
     setSending(true);
@@ -194,8 +195,10 @@ function releasesHref(app: 'sonarr' | 'radarr', id: number, title: string, seaso
   } as const;
 }
 
-function MovieActions({ conn, item, onChange }: { conn: Connection; item: Details; onChange: () => void }) {
-  const { busy, send, profileId, setProfileId } = useRequest(conn, item, 'movie', onChange);
+type ActionsProps = { conn: Connection; item: Details; onChange: () => void; reloadFailed: boolean };
+
+function MovieActions({ conn, item, onChange, reloadFailed }: ActionsProps) {
+  const { busy, send, profileId, setProfileId } = useRequest(conn, item, 'movie', onChange, reloadFailed);
   const status = item.mediaInfo?.status;
   const radarrId = item.mediaInfo?.externalServiceId;
   return (
@@ -217,9 +220,9 @@ function MovieActions({ conn, item, onChange }: { conn: Connection; item: Detail
   );
 }
 
-function SeasonPicker({ conn, item, onChange }: { conn: Connection; item: Details; onChange: () => void }) {
+function SeasonPicker({ conn, item, onChange, reloadFailed }: ActionsProps) {
   const theme = useTheme();
-  const { busy, send, profileId, setProfileId } = useRequest(conn, item, 'tv', onChange);
+  const { busy, send, profileId, setProfileId } = useRequest(conn, item, 'tv', onChange, reloadFailed);
   const statusOf = (s: Season) => item.mediaInfo?.seasons?.find((x) => x.seasonNumber === s.seasonNumber)?.status;
   const seasons = realSeasons(item);
   const requestable = seasons.filter((s) => missing(statusOf(s)));

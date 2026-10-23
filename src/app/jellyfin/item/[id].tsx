@@ -38,19 +38,17 @@ export default function ItemDetail() {
   const insets = useSafeAreaInsets();
 
   const { data: loaded, error, loading, reload } = useAsync(() => client.item(id), id);
-  // Watched/favorite changes made here, shown until the next reload catches up.
-  const [userData, setUserData] = useState<{ itemId: string; data: UserData }>();
+  // Watched/favorite changes made here, laid over the item they were made on until a reload brings
+  // a newer one; cleared any sooner, the old values would show while it loads.
+  const [userData, setUserData] = useState<{ base: BaseItem; data: UserData }>();
   const item =
-    loaded && userData?.itemId === loaded.Id ? { ...loaded, UserData: { ...loaded.UserData, ...userData.data } } : loaded;
+    loaded && userData?.base === loaded ? { ...loaded, UserData: { ...loaded.UserData, ...userData.data } } : loaded;
 
   // Pick up the new resume position after returning from the player.
   const focusedOnce = useRef(false);
   useFocusEffect(
     useCallback(() => {
-      if (focusedOnce.current) {
-        setUserData(undefined);
-        reload();
-      }
+      if (focusedOnce.current) reload();
       focusedOnce.current = true;
     }, [reload]),
   );
@@ -69,10 +67,10 @@ export default function ItemDetail() {
   const subtitles = subtitleStreams(item);
   const subtitle = selectedSubtitle ?? defaultSubtitleIndex(item);
   const toggle = async (change: (current: UserData) => Promise<UserData>) => {
-    const itemId = item.Id;
+    const base = loaded!;
     try {
       const data = await change(item.UserData ?? {});
-      setUserData((prev) => ({ itemId, data: { ...(prev?.itemId === itemId ? prev.data : {}), ...data } }));
+      setUserData((prev) => ({ base, data: { ...(prev?.base === base ? prev.data : {}), ...data } }));
     } catch (e) {
       Alert.alert("Couldn't update", e instanceof Error ? e.message : String(e));
     }

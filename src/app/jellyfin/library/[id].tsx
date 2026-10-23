@@ -1,5 +1,5 @@
 import { Stack, useLocalSearchParams } from 'expo-router';
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, FlatList, RefreshControl, ScrollView, StyleSheet, View } from 'react-native';
 
 import { ThemedText } from '@/components/themed-text';
@@ -41,7 +41,7 @@ export default function Library() {
   );
 
   // Pages fetched for an earlier sort or filter don't belong to this list.
-  const items = data ? [...data.Items, ...(more.after === data ? more.items : [])] : [];
+  const items = useMemo(() => (data ? [...data.Items, ...(more.after === data ? more.items : [])] : []), [data, more]);
   const hasMore = data ? items.length < data.TotalRecordCount : false;
 
   if (pulled && !loading) setPulled(false);
@@ -53,14 +53,18 @@ export default function Library() {
     setMoreError(undefined);
     try {
       const page = await client.libraryItems(library, query, items.length);
-      setMore((prev) => ({ after: data, items: [...(prev.after === data ? prev.items : []), ...page.Items] }));
+      // Paged by position, so something added or removed meanwhile shifts the next page by that
+      // much: leave out what's already listed.
+      const listed = new Set(items.map((i) => i.Id));
+      const fresh = page.Items.filter((i) => !listed.has(i.Id));
+      setMore((prev) => ({ after: data, items: [...(prev.after === data ? prev.items : []), ...fresh] }));
     } catch (e) {
       setMoreError(e instanceof Error ? e : new Error(String(e)));
     } finally {
       inFlight.current = false;
       setLoadingMore(false);
     }
-  }, [client, data, library, query, hasMore, loading, items.length]);
+  }, [client, data, library, query, hasMore, loading, items]);
 
   if (!library) return <Centered loading={!libraryError} error={libraryError} onRetry={reloadLibrary} />;
 

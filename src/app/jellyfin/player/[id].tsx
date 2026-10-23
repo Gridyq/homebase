@@ -39,7 +39,7 @@ export default function PlayerScreen() {
 }
 
 function PlayerLoader() {
-  const { id, start, subtitle, subtitleLang, playlist } = useLocalSearchParams<{
+  const { id, start, subtitle, subtitleLang, playlist, entry } = useLocalSearchParams<{
     id: string;
     start?: string;
     /** Subtitle stream index picked on the item screen. */
@@ -48,6 +48,8 @@ function PlayerLoader() {
     subtitleLang?: string;
     /** Playing through a playlist: what comes next is the playlist's next entry. */
     playlist?: string;
+    /** Which of the playlist's entries this is, since an item can be in it more than once. */
+    entry?: string;
   }>();
   const client = useJellyfin();
   const { settings } = useJellyfinSettings();
@@ -63,13 +65,13 @@ function PlayerLoader() {
     const [playback, next] = await Promise.all([
       client.playbackInfo(id, subtitleIndex, maxBitrate),
       playlist
-        ? client.playlistItems(playlist).then((items) => nextInPlaylist(items, id), () => undefined)
+        ? client.playlistItems(playlist).then((items) => nextInPlaylist(items, id, entry), () => undefined)
         : item.Type === 'Episode'
           ? client.nextEpisode(item).catch(() => undefined)
           : undefined,
     ]);
     return { item, playback: { ...playback, subtitleIndex }, next };
-  }, `${id}/${subtitle}/${playlist}`);
+  }, `${id}/${subtitle}/${playlist}/${entry}`);
   // Conversions give an item a new id, so Resume can point at one that's gone for good.
   const gone = error instanceof JellyfinError && error.status === 404;
   useEffect(() => {
@@ -97,12 +99,12 @@ function PlayerLoader() {
     );
   }
 
-  return <Player client={client} {...data} playlist={playlist} startSeconds={Number(start) || 0} />;
+  return <Player client={client} {...data} playlist={playlist} entry={entry} startSeconds={Number(start) || 0} />;
 }
 
-/** The first video after this item in a playlist. */
-function nextInPlaylist(items: BaseItem[], currentId: string) {
-  const at = items.findIndex((i) => i.Id === currentId);
+/** The first video after this entry in a playlist (or the item's first entry, without one). */
+function nextInPlaylist(items: BaseItem[], currentId: string, entry?: string) {
+  const at = entry ? items.findIndex((i) => i.PlaylistItemId === entry) : items.findIndex((i) => i.Id === currentId);
   return at < 0 ? undefined : items.slice(at + 1).find((i) => i.MediaType === 'Video');
 }
 
@@ -114,6 +116,7 @@ function Player({
   playback,
   next,
   playlist,
+  entry,
   startSeconds,
 }: {
   client: JellyfinClient;
@@ -121,6 +124,7 @@ function Player({
   playback: Playback;
   next: BaseItem | undefined;
   playlist: string | undefined;
+  entry: string | undefined;
   startSeconds: number;
 }) {
   const viewRef = useRef<VideoView>(null);
@@ -226,6 +230,7 @@ function Player({
   });
 
   const lang = () => subtitleLanguage(item, chosenSubtitle.current);
+  const inPlaylist = (at?: string) => (playlist ? { playlist, ...(at ? { entry: at } : {}) } : {});
   // Start over from where it stopped, with a fresh stream from the server.
   const retry = () => {
     const subtitle = chosenSubtitle.current;
@@ -235,7 +240,7 @@ function Player({
         id: item.Id,
         start: String(Math.floor(position.current)),
         ...(subtitle !== undefined ? { subtitle: String(subtitle) } : {}),
-        ...(playlist ? { playlist } : {}),
+        ...inPlaylist(entry),
       },
     });
   };
@@ -244,7 +249,7 @@ function Player({
     const l = lang();
     router.replace({
       pathname: '/jellyfin/player/[id]',
-      params: { id: next.Id, start: '0', ...(l ? { subtitleLang: l } : {}), ...(playlist ? { playlist } : {}) },
+      params: { id: next.Id, start: '0', ...(l ? { subtitleLang: l } : {}), ...inPlaylist(next.PlaylistItemId) },
     });
   };
 
@@ -297,7 +302,7 @@ function Player({
             id: item.Id,
             start: String(player.currentTime),
             subtitle: String(choice.index),
-            ...(playlist ? { playlist } : {}),
+            ...inPlaylist(entry),
           },
         });
       },

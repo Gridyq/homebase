@@ -38,8 +38,20 @@ export async function sendCrashReport(text: string) {
 export function useCrashReports() {
   useEffect(() => {
     if (!report.exists) return;
-    sendCrashReport(report.textSync()).then(
-      () => report.delete(),
+    let text: string;
+    try {
+      text = report.textSync();
+    } catch {
+      return;
+    }
+    sendCrashReport(text).then(
+      () => {
+        try {
+          report.delete();
+        } catch {
+          // Gone already; nothing to send again.
+        }
+      },
       () => {
         // Server unreachable; keep the report for the next launch.
       },

@@ -1,4 +1,4 @@
-import { router, Stack, useLocalSearchParams } from 'expo-router';
+import { router, Stack, useLocalSearchParams, useNavigation } from 'expo-router';
 import { useState } from 'react';
 import { ActionSheetIOS, ActivityIndicator, Alert, FlatList, Pressable, ScrollView, StyleSheet, View } from 'react-native';
 
@@ -46,6 +46,7 @@ export default function Releases() {
   const [hevcOnly, setHevcOnly] = useState(false);
   const [sort, setSort] = useState<Sort>('best');
   const [grabbing, setGrabbing] = useState<string>();
+  const screen = useNavigation();
   const { data, error, loading, reload } = useAsync(
     () => searchReleases(conn, app, Number(id), season !== undefined ? Number(season) : undefined),
     `${app}:${id}:${season}`,
@@ -118,7 +119,8 @@ export default function Releases() {
                 ),
               );
             }
-            router.back();
+            // Left meanwhile, going back would close whatever screen is showing now.
+            if (screen.isFocused()) router.back();
           } catch (e) {
             Alert.alert("Couldn't start the download", e instanceof Error ? e.message : String(e));
           } finally {

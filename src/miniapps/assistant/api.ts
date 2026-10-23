@@ -135,6 +135,9 @@ export async function ask(
     buffer = lines.pop() ?? '';
     for (const line of lines) if (line) onEvent(JSON.parse(line));
   }
+  // The last event, if the stream ended without a newline after it.
+  buffer += decoder.decode();
+  if (buffer.trim()) onEvent(JSON.parse(buffer));
 }
 
 /** Most photos one question can carry. */

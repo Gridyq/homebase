@@ -1,5 +1,5 @@
 import * as WebBrowser from 'expo-web-browser';
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { ActionSheetIOS, ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, View } from 'react-native';
 
 import { Button } from '@/components/button';
@@ -42,11 +42,14 @@ export default function UpdatesScreen() {
   // What the last action answered, until the next poll, so the screen shows the run starting.
   const [busy, setBusy] = useState(false);
   const [answer, setAnswer] = useState<ContainerUpdates>();
+  // A poll sent before the answer came back knows less than it, so only a later one replaces it.
+  const answers = useRef(0);
   const [pollMs, setPollMs] = useState(POLL_MS);
   const { data: polled, error, stale, refresh } = usePolling(
     async () => {
+      const answersBefore = answers.current;
       const next = await fetchContainerUpdates(conn);
-      setAnswer(undefined);
+      if (answers.current === answersBefore) setAnswer(undefined);
       setPollMs(next.running ? BUSY_POLL_MS : POLL_MS);
       return next;
     },
@@ -63,6 +66,7 @@ export default function UpdatesScreen() {
     setBusy(true);
     try {
       const next = await changeContainerUpdates(conn, body);
+      answers.current++;
       setAnswer(next);
       setPollMs(BUSY_POLL_MS);
     } catch (e) {

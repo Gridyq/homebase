@@ -125,6 +125,7 @@ function playEntry(playlistId: string, entry: BaseItem) {
       id: entry.Id,
       start: String((entry.UserData?.PlaybackPositionTicks ?? 0) / TICKS_PER_SECOND),
       playlist: playlistId,
+      ...(entry.PlaylistItemId ? { entry: entry.PlaylistItemId } : {}),
     },
   });
 }

@@ -36,11 +36,13 @@ const SettingsContext = createContext<SettingsState | null>(null);
 
 export function JellyfinSettingsProvider({ children }: { children: ReactNode }) {
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
+  const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
     SecureStore.getItemAsync(SETTINGS_KEY)
       .then((raw) => raw && setSettings({ ...DEFAULT_SETTINGS, ...JSON.parse(raw) }))
-      .catch(() => undefined);
+      .catch(() => undefined)
+      .finally(() => setLoaded(true));
   }, []);
 
   const value = useMemo<SettingsState>(
@@ -55,7 +57,9 @@ export function JellyfinSettingsProvider({ children }: { children: ReactNode }) 
     [settings],
   );
 
-  return <SettingsContext value={value}>{children}</SettingsContext>;
+  // The screens wait the moment it takes, or a Resume straight from the launcher would ask for a
+  // stream before the cellular limit is known.
+  return <SettingsContext value={value}>{loaded ? children : null}</SettingsContext>;
 }
 
 export function useJellyfinSettings() {
