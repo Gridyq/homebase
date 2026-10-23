@@ -1,5 +1,5 @@
 import { router } from 'expo-router';
-import { StyleSheet, View } from 'react-native';
+import { ScrollView, StyleSheet, useWindowDimensions, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Button } from '@/components/button';
@@ -11,6 +11,7 @@ import { useTheme } from '@/hooks/use-theme';
 export default function WhatsNew() {
   const theme = useTheme();
   const insets = useSafeAreaInsets();
+  const { height } = useWindowDimensions();
   const { update, notes, version } = Release;
 
   return (
@@ -21,7 +22,8 @@ export default function WhatsNew() {
           {describeRelease(version, update?.createdAt)}
         </ThemedText>
       </View>
-      <View style={styles.notes}>
+      {/* After a long gap between updates the notes can run past the screen; Done stays in reach. */}
+      <ScrollView style={{ maxHeight: height * 0.6 }} contentContainerStyle={styles.notes} bounces={false}>
         {notes.length ? (
           notes.map((note, i) => (
             <View key={i} style={styles.note}>
@@ -32,7 +34,7 @@ export default function WhatsNew() {
         ) : (
           <ThemedText themeColor="textSecondary">No notes for this version.</ThemedText>
         )}
-      </View>
+      </ScrollView>
       <Button title="Done" onPress={() => router.back()} />
     </View>
   );

@@ -30,8 +30,9 @@ export default function Launcher() {
   const gutter = useGutter();
   const { width } = useWindowDimensions();
   const shortcuts = useShortcuts();
-  const [apps, moveToStart] = useAppOrder();
-  const activity = usePolling(() => loadActivity(apps), ACTIVITY_POLL_MS, apps.map((a) => a.id).join());
+  const [apps, moveToStart, ordered] = useAppOrder();
+  // Waits for the saved order, so the first Now list isn't thrown away when the order arrives.
+  const activity = usePolling(() => loadActivity(apps), ACTIVITY_POLL_MS, 'launcher', { enabled: ordered });
   useWhatsNewOnce();
 
   return (
@@ -41,7 +42,8 @@ export default function Launcher() {
       style={{ backgroundColor: theme.background }}>
       {activity.data?.length ? <NowList items={activity.data} /> : null}
       <View style={[styles.grid, gutter]}>
-        {apps.map((app, i) => (
+        {/* Not drawn until the saved order is known, or the tiles would jump into place. */}
+        {!ordered ? null : apps.map((app, i) => (
           <View key={app.id} style={{ width: tileWidth(width - gutter.paddingLeft - gutter.paddingRight) }}>
             <AppTile
               app={app}
@@ -205,10 +207,12 @@ function useShortcuts() {
 /** The mini-apps in the order the user arranged them; new ones go at the end. */
 function useAppOrder() {
   const [order, setOrder] = useState<string[]>([]);
+  const [ordered, setOrdered] = useState(false);
   useEffect(() => {
     SecureStore.getItemAsync(ORDER_KEY)
       .then((raw) => raw && setOrder(JSON.parse(raw)))
-      .catch(() => undefined);
+      .catch(() => undefined)
+      .finally(() => setOrdered(true));
   }, []);
   const rank = (id: string) => {
     const i = order.indexOf(id);
@@ -220,7 +224,7 @@ function useAppOrder() {
     setOrder(next);
     SecureStore.setItemAsync(ORDER_KEY, JSON.stringify(next)).catch(() => undefined);
   };
-  return [apps, moveToStart] as const;
+  return [apps, moveToStart, ordered] as const;
 }
 
 /** Show "What's new" the first time the app starts on a newly downloaded update. */
