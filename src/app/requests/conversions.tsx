@@ -8,22 +8,12 @@ import { useGutter } from '@/hooks/use-gutter';
 import { useTheme } from '@/hooks/use-theme';
 import { Centered } from '@/miniapps/jellyfin/components';
 import { conversions, setConversionsPaused, type Conversions } from '@/miniapps/requests/api';
+import { displayName, formatEta } from '@/miniapps/requests/components';
 import { Card, formatBytes, formatWhen, Meter, Section, StatTile, StatusColors } from '@/miniapps/server/components';
 import { useServerConnection } from '@/miniapps/server/connection';
 import { usePolling } from '@/miniapps/server/use-polling';
 
 const POLL_MS = 5000;
-
-/** Sonarr and Radarr end file names with the quality ("… WEBDL-1080p"), which is noise here. */
-const QUALITY = / (WEBDL|WEBRip|Bluray|HDTV|DVD|Remux|SDTV|Raw-HD)[-\w ]*$/i;
-const displayName = (file: string) => file.replace(QUALITY, '');
-
-/** "0:01:12" → "1m 12s left"; Tdarr says "0:00:00" until it has an estimate. */
-function formatEta(eta: string) {
-  const [h = 0, m = 0, s = 0] = eta.split(':').map(Number);
-  if (!(h || m || s)) return undefined;
-  return `${h ? `${h}h ` : ''}${h || m ? `${m}m` : `${s}s`} left`;
-}
 
 /** What Tdarr is converting to HEVC MP4s, what's done, and how much space it saved. */
 export default function ConversionsScreen() {

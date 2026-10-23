@@ -8,14 +8,20 @@ import { describeRelease, Release } from '@/constants/release';
 import { Spacing } from '@/constants/theme';
 import { useGutter } from '@/hooks/use-gutter';
 import { useTheme } from '@/hooks/use-theme';
-import { miniApps, type MiniApp, type Shortcut } from '@/miniapps/registry';
+import { miniApps, type Activity, type MiniApp, type Shortcut } from '@/miniapps/registry';
+import { Card, Meter, StatusColors } from '@/miniapps/server/components';
+import { usePolling } from '@/miniapps/server/use-polling';
 
 const SEEN_UPDATE_KEY = 'homebase.seenUpdate';
+const ORDER_KEY = 'launcher.order';
+const ACTIVITY_POLL_MS = 10_000;
 
 export default function Launcher() {
   const theme = useTheme();
   const gutter = useGutter();
   const shortcuts = useShortcuts();
+  const [apps, moveToStart] = useAppOrder();
+  const activity = usePolling(() => loadActivity(apps), ACTIVITY_POLL_MS, apps.map((a) => a.id).join());
   useWhatsNewOnce();
 
   return (
@@ -23,9 +29,15 @@ export default function Launcher() {
       contentInsetAdjustmentBehavior="automatic"
       contentContainerStyle={styles.content}
       style={{ backgroundColor: theme.background }}>
+      {activity.data?.length ? <NowList items={activity.data} /> : null}
       <View style={[styles.grid, gutter]}>
-        {miniApps.map((app) => (
-          <AppTile key={app.id} app={app} shortcuts={shortcuts[app.id] ?? []} />
+        {apps.map((app, i) => (
+          <AppTile
+            key={app.id}
+            app={app}
+            shortcuts={shortcuts[app.id] ?? []}
+            onMoveToStart={i > 0 ? () => moveToStart(app.id) : undefined}
+          />
         ))}
       </View>
       <Pressable onPress={() => router.push('/whats-new')} style={[styles.footer, gutter]}>
@@ -37,8 +49,67 @@ export default function Launcher() {
   );
 }
 
-/** A tap opens the mini-app; a long press shows its shortcuts. */
-function AppTile({ app, shortcuts }: { app: MiniApp; shortcuts: Shortcut[] }) {
+type LiveActivity = Activity & { app: MiniApp };
+
+/** Every app's activity, in launcher order. An app that can't answer just stays quiet. */
+async function loadActivity(apps: MiniApp[]): Promise<LiveActivity[]> {
+  const lists = await Promise.all(
+    apps.map(async (app) => ((await app.activity?.().catch(() => [])) ?? []).map((a) => ({ ...a, app }))),
+  );
+  return lists.flat();
+}
+
+function NowList({ items }: { items: LiveActivity[] }) {
+  const gutter = useGutter();
+  return (
+    <View style={[styles.now, gutter]}>
+      <ThemedText type="smallBold" themeColor="textSecondary">
+        Now
+      </ThemedText>
+      <Card>
+        {items.map((item, i) => (
+          <ActivityRow key={`${item.app.id}:${item.key}`} item={item} first={i === 0} />
+        ))}
+      </Card>
+    </View>
+  );
+}
+
+function ActivityRow({ item, first }: { item: LiveActivity; first: boolean }) {
+  const theme = useTheme();
+  const color = item.tone === 'bad' ? theme.danger : item.tone === 'warn' ? StatusColors.warn : StatusColors.good;
+  return (
+    <Pressable
+      onPress={() => router.push(item.href)}
+      style={({ pressed }) => [
+        styles.activity,
+        !first && { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: theme.backgroundSelected },
+        { opacity: pressed ? 0.6 : 1 },
+      ]}>
+      <View style={[styles.badge, { backgroundColor: item.app.color }]}>
+        <ThemedText style={styles.badgeGlyph}>{item.app.glyph}</ThemedText>
+      </View>
+      <View style={styles.activityText}>
+        <ThemedText type="smallBold" numberOfLines={1}>
+          {item.title}
+        </ThemedText>
+        {item.fraction !== undefined ? <Meter fraction={item.fraction} color={color} /> : null}
+        {item.caption ? (
+          <ThemedText
+            type="small"
+            themeColor="textSecondary"
+            numberOfLines={1}
+            style={[styles.caption, item.tone === 'warn' || item.tone === 'bad' ? { color } : undefined]}>
+            {item.caption}
+          </ThemedText>
+        ) : null}
+      </View>
+    </Pressable>
+  );
+}
+
+/** A tap opens the mini-app; a long press shows its shortcuts and lets it move to the front. */
+function AppTile({ app, shortcuts, onMoveToStart }: { app: MiniApp; shortcuts: Shortcut[]; onMoveToStart?: () => void }) {
   return (
     <Link href={app.href} asChild>
       <Link.Trigger>
@@ -54,13 +125,18 @@ function AppTile({ app, shortcuts }: { app: MiniApp; shortcuts: Shortcut[] }) {
           </ThemedText>
         </TilePressable>
       </Link.Trigger>
-      {shortcuts.length ? (
+      {shortcuts.length || onMoveToStart ? (
         <Link.Menu>
           {shortcuts.map((s) => (
             <Link.MenuAction key={s.title} icon={s.icon} subtitle={s.subtitle} onPress={() => router.push(s.href)}>
               {s.title}
             </Link.MenuAction>
           ))}
+          {onMoveToStart ? (
+            <Link.MenuAction icon="arrow.up.left" onPress={onMoveToStart}>
+              Move to start
+            </Link.MenuAction>
+          ) : null}
         </Link.Menu>
       ) : null}
     </Link>
@@ -106,6 +182,27 @@ function useShortcuts() {
   return shortcuts;
 }
 
+/** The mini-apps in the order the user arranged them; new ones go at the end. */
+function useAppOrder() {
+  const [order, setOrder] = useState<string[]>([]);
+  useEffect(() => {
+    SecureStore.getItemAsync(ORDER_KEY)
+      .then((raw) => raw && setOrder(JSON.parse(raw)))
+      .catch(() => undefined);
+  }, []);
+  const rank = (id: string) => {
+    const i = order.indexOf(id);
+    return i < 0 ? order.length + miniApps.findIndex((a) => a.id === id) : i;
+  };
+  const apps = [...miniApps].sort((a, b) => rank(a.id) - rank(b.id));
+  const moveToStart = (id: string) => {
+    const next = [id, ...apps.map((a) => a.id).filter((a) => a !== id)];
+    setOrder(next);
+    SecureStore.setItemAsync(ORDER_KEY, JSON.stringify(next)).catch(() => undefined);
+  };
+  return [apps, moveToStart] as const;
+}
+
 /** Show "What's new" the first time the app starts on a newly downloaded update. */
 function useWhatsNewOnce() {
   useEffect(() => {
@@ -125,6 +222,36 @@ const styles = StyleSheet.create({
   content: {
     flexGrow: 1,
     paddingVertical: Spacing.three,
+  },
+  now: {
+    gap: Spacing.two,
+    marginBottom: Spacing.four,
+  },
+  activity: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.three,
+    paddingVertical: Spacing.two + Spacing.one,
+  },
+  activityText: {
+    flex: 1,
+    gap: Spacing.one,
+  },
+  badge: {
+    width: 32,
+    height: 32,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  badgeGlyph: {
+    color: '#fff',
+    fontSize: 16,
+    lineHeight: 20,
+  },
+  caption: {
+    fontSize: 13,
+    lineHeight: 17,
   },
   grid: {
     flexDirection: 'row',

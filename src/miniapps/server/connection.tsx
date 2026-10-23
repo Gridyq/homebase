@@ -12,6 +12,12 @@ type ConnectionState = {
   forget: () => Promise<void>;
 };
 
+/** The saved connection, for code outside the mini-apps' screens (the launcher). */
+export async function loadConnection(): Promise<Connection | null> {
+  const raw = await SecureStore.getItemAsync(CONNECTION_KEY);
+  return raw ? JSON.parse(raw) : null;
+}
+
 const ConnectionContext = createContext<ConnectionState | null>(null);
 
 export function ServerConnectionProvider({ children }: { children: ReactNode }) {
@@ -19,8 +25,8 @@ export function ServerConnectionProvider({ children }: { children: ReactNode }) 
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    SecureStore.getItemAsync(CONNECTION_KEY)
-      .then((raw) => raw && setConnection(JSON.parse(raw)))
+    loadConnection()
+      .then(setConnection)
       .catch(() => undefined)
       .finally(() => setLoading(false));
   }, []);

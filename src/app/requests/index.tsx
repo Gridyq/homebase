@@ -11,6 +11,7 @@ import { Centered, SectionTitle, usePosterGrid, useRowCardWidth } from '@/miniap
 import { useAsync } from '@/miniapps/jellyfin/use-async';
 import {
   checkDownloads,
+  conversions,
   details,
   downloads,
   importAnyway,
@@ -28,13 +29,15 @@ import {
   type Download,
   type Seeding,
 } from '@/miniapps/requests/api';
-import { DownloadRow, SeedingRow, SpeedLimitRow, TitleCard, titleHref, UpcomingRow } from '@/miniapps/requests/components';
+import { ConversionsRow, ConvertingRow, DownloadRow, SeedingRow, SpeedLimitRow, TitleCard, titleHref, UpcomingRow } from '@/miniapps/requests/components';
 import { fetchGameMode, setGameMode, type Connection, type GameMode } from '@/miniapps/server/api';
 import { Card } from '@/miniapps/server/components';
 import { useServerConnection } from '@/miniapps/server/connection';
 import { usePolling } from '@/miniapps/server/use-polling';
 
 const QUEUE_POLL_MS = 5000;
+/** Tdarr's file list is cached on the server for 15 s, so there's no point asking more often. */
+const CONVERSIONS_POLL_MS = 10_000;
 /** Download limits to pick from, in megabits per second to match the Server app. 0 is no limit. */
 const SPEED_LIMITS_MBPS = [0, 10, 25, 50, 100, 200];
 
@@ -115,6 +118,7 @@ function Overview({ conn }: { conn: Connection }) {
   const limit = usePolling(() => speedLimit(conn), QUEUE_POLL_MS, conn.url);
   const seed = usePolling(() => seeding(conn), QUEUE_POLL_MS, conn.url);
   const game = usePolling(() => fetchGameMode(conn), QUEUE_POLL_MS, conn.url);
+  const convert = usePolling(() => conversions(conn), CONVERSIONS_POLL_MS, conn.url);
   const rest = useAsync(() => Promise.all([upcoming(conn), requestedTitles(conn)]), 'overview');
   const [pulled, setPulled] = useState(false);
   if (pulled && !rest.loading) setPulled(false);
@@ -265,6 +269,7 @@ function Overview({ conn }: { conn: Connection }) {
           queue.refresh();
           limit.refresh();
           seed.refresh();
+          convert.refresh();
         }}
       />
     );
@@ -280,6 +285,8 @@ function Overview({ conn }: { conn: Connection }) {
   const nothing = !active.length && !comingUp?.length && !requested?.length;
   const speed = limit.data;
   const seeds = seed.data;
+  // Tdarr may be stopped or not set up; then the section just doesn't show.
+  const converting = convert.error ? undefined : convert.data;
 
   return (
     <ScrollView
@@ -295,6 +302,7 @@ function Overview({ conn }: { conn: Connection }) {
             queue.refresh();
             limit.refresh();
             seed.refresh();
+            convert.refresh();
           }}
         />
       }>
@@ -319,6 +327,24 @@ function Overview({ conn }: { conn: Connection }) {
                   onPress={() => showActions(d)}
                 />
               ))}
+            </Card>
+          </View>
+        </View>
+      ) : null}
+
+      {converting && (converting.workers.length || converting.counts.queued) ? (
+        <View style={styles.section}>
+          <SectionTitle title="Converting" />
+          <View style={gutter}>
+            <Card>
+              {converting.workers.map((w, i) => (
+                <ConvertingRow key={w.file} worker={w} first={i === 0} />
+              ))}
+              <ConversionsRow
+                conversions={converting}
+                first={!converting.workers.length}
+                onPress={() => router.push('/requests/conversions')}
+              />
             </Card>
           </View>
         </View>

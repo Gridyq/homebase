@@ -1,7 +1,9 @@
 import type { Href, Link } from 'expo-router';
 import type { ComponentProps } from 'react';
 
-import { jellyfinShortcuts } from './jellyfin/last-played';
+import { jellyfinActivity, jellyfinShortcuts } from './jellyfin/last-played';
+import { requestsActivity } from './requests/activity';
+import { serverActivity } from './server/activity';
 
 /**
  * Every mini-app bundled in the shell. To add one:
@@ -19,6 +21,8 @@ export type MiniApp = {
   href: Href;
   /** Extra entries for the tile's long-press menu, worked out each time the launcher shows. */
   shortcuts?: () => Promise<Shortcut[]>;
+  /** What's going on right now, for the launcher's Now list. Empty when there's nothing to say. */
+  activity?: () => Promise<Activity[]>;
 };
 
 export type Shortcut = {
@@ -26,6 +30,17 @@ export type Shortcut = {
   subtitle?: string;
   /** SF Symbol name. */
   icon: NonNullable<ComponentProps<typeof Link.MenuAction>['icon']>;
+  href: Href;
+};
+
+/** A line on the launcher about something under way or needing a look. */
+export type Activity = {
+  key: string;
+  title: string;
+  caption?: string;
+  /** 0–1; draws a meter. */
+  fraction?: number;
+  tone?: 'good' | 'warn' | 'bad';
   href: Href;
 };
 
@@ -38,6 +53,7 @@ export const miniApps: MiniApp[] = [
     color: '#7B4FD6',
     href: '/jellyfin',
     shortcuts: jellyfinShortcuts,
+    activity: jellyfinActivity,
   },
   {
     id: 'server',
@@ -46,6 +62,7 @@ export const miniApps: MiniApp[] = [
     glyph: '▤',
     color: '#12A594',
     href: '/server',
+    activity: serverActivity,
   },
   {
     id: 'requests',
@@ -54,6 +71,7 @@ export const miniApps: MiniApp[] = [
     glyph: '↓',
     color: '#E5484D',
     href: '/requests',
+    activity: requestsActivity,
   },
   {
     id: 'drop',

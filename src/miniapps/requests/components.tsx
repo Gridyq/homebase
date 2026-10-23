@@ -7,7 +7,7 @@ import { Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 import { formatBytes, formatRate, formatWhen, Meter, StatusColors } from '@/miniapps/server/components';
 
-import { MediaStatus, type Download, type MediaType, type Seeding, type SpeedLimit, type Upcoming } from './api';
+import { MediaStatus, type Conversions, type Download, type MediaType, type Seeding, type SpeedLimit, type Upcoming } from './api';
 
 export function titleHref(type: MediaType, id: number) {
   return { pathname: '/requests/[type]/[id]', params: { type, id: String(id) } } as const;
@@ -24,6 +24,17 @@ export function formatTimeLeft(timeleft: string | undefined) {
   if (d) return `${d}d ${h}h`;
   if (h) return `${h}h ${m}m`;
   return `${Math.max(m, 1)}m`;
+}
+
+/** Sonarr and Radarr end file names with the quality ("… WEBDL-1080p"), which is noise here. */
+const QUALITY = / (WEBDL|WEBRip|Bluray|HDTV|DVD|Remux|SDTV|Raw-HD)[-\w ]*$/i;
+export const displayName = (file: string) => file.replace(QUALITY, '');
+
+/** "0:01:12" → "1m 12s left"; Tdarr says "0:00:00" until it has an estimate. */
+export function formatEta(eta: string) {
+  const [h = 0, m = 0, s = 0] = eta.split(':').map(Number);
+  if (!(h || m || s)) return undefined;
+  return `${h ? `${h}h ` : ''}${h || m ? `${m}m` : `${s}s`} left`;
 }
 
 /** "2h", "3d", "5mo", "2y" since a release was posted. */
@@ -217,6 +228,63 @@ export function SeedingRow({ seeding, first, onPress }: { seeding: Seeding; firs
       </View>
       <ThemedText type="small" themeColor="textSecondary">
         {seeding.stopWhenDone ? 'Stops when done' : seeding.seeding ? 'On' : 'Off'}
+      </ThemedText>
+    </Pressable>
+  );
+}
+
+/** A file Tdarr is converting right now. */
+export function ConvertingRow({ worker, first }: { worker: Conversions['workers'][number]; first: boolean }) {
+  const theme = useTheme();
+  const line = [`${Math.round(worker.percent)}%`, formatEta(worker.eta)]
+    .filter(Boolean)
+    .join(' · ');
+  return (
+    <View
+      style={[
+        styles.row,
+        !first && { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: theme.backgroundSelected },
+      ]}>
+      <View style={styles.rowText}>
+        <ThemedText type="smallBold" numberOfLines={1}>
+          {displayName(worker.file)}
+        </ThemedText>
+        <Meter fraction={worker.percent / 100} color={StatusColors.good} />
+        <ThemedText type="small" themeColor="textSecondary" numberOfLines={1} style={styles.caption}>
+          {line}
+        </ThemedText>
+      </View>
+    </View>
+  );
+}
+
+/** What's waiting and what's been saved; leads to the Conversions screen. */
+export function ConversionsRow({ conversions, first, onPress }: { conversions: Conversions; first: boolean; onPress: () => void }) {
+  const theme = useTheme();
+  const { queued, failed } = conversions.counts;
+  const caption = [
+    conversions.paused ? 'Paused' : undefined,
+    queued ? `${queued} waiting` : 'Nothing waiting',
+    failed ? `${failed} failed` : undefined,
+  ]
+    .filter(Boolean)
+    .join(' · ');
+  return (
+    <Pressable
+      onPress={onPress}
+      style={({ pressed }) => [
+        styles.row,
+        !first && { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: theme.backgroundSelected },
+        { opacity: pressed ? 0.6 : 1 },
+      ]}>
+      <View style={styles.rowText}>
+        <ThemedText type="smallBold">Conversions</ThemedText>
+        <ThemedText type="small" themeColor="textSecondary" numberOfLines={1} style={styles.caption}>
+          {caption}
+        </ThemedText>
+      </View>
+      <ThemedText type="small" themeColor="textSecondary">
+        {formatBytes(conversions.savedBytes)} saved ›
       </ThemedText>
     </Pressable>
   );
