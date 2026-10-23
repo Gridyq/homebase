@@ -21,8 +21,24 @@ use crate::http::State;
 /// together rather than as a stop and then a start.
 const SETTLE: Duration = Duration::from_millis(1500);
 const RECONNECT: Duration = Duration::from_secs(30);
-/// The system units the dashboard shows (see `UNITS`), as systemd names their objects.
-const SYSTEM_UNIT_PATHS: &[&str] = &["/org/freedesktop/systemd1/unit/tailscaled_2eservice"];
+/// A unit's object path, as systemd escapes its name: anything but a letter or digit becomes
+/// `_` and its hex code.
+fn unit_object_path(unit: &str) -> String {
+    let mut path = String::from("/org/freedesktop/systemd1/unit/");
+    for b in unit.bytes() {
+        if b.is_ascii_alphanumeric() {
+            path.push(b as char);
+        } else {
+            path.push_str(&format!("_{b:02x}"));
+        }
+    }
+    path
+}
+
+/// One of the system units the dashboard shows (see `UNITS`).
+fn shown_system_unit(path: &str) -> bool {
+    crate::usage::UNITS.iter().any(|u| u.system && unit_object_path(u.unit) == path)
+}
 
 /// Shared, and made again after a failure: a connection from before dbus-broker restarted stays
 /// dead, so keeping it for good would leave service and drive signals dead until a restart.
@@ -183,7 +199,7 @@ async fn follow_units(wake: &Notify, system: bool) -> zbus::Result<()> {
         let msg = msg?;
         let header = msg.header();
         let Some(path) = header.path().map(|p| p.as_str().to_owned()) else { continue };
-        if system && !SYSTEM_UNIT_PATHS.contains(&path.as_str()) {
+        if system && !shown_system_unit(&path) {
             continue;
         }
         if !system && !watched_unit(&path) {
@@ -253,6 +269,9 @@ mod tests {
         let row = V::from((5u8, "reallocated", 0u16, 100i32, 100i32, 10i32, 3i64, 1i32));
         assert_eq!(to_json(&row), json!([5, "reallocated", 0, 100, 100, 10, 3, 1]));
         assert_eq!(to_json(&V::from(ObjectPath::try_from("/a/b").unwrap())), json!("/a/b"));
+        assert_eq!(unit_object_path("tailscaled.service"), "/org/freedesktop/systemd1/unit/tailscaled_2eservice");
+        assert_eq!(unit_object_path("app-org.kde.x-1.scope"), "/org/freedesktop/systemd1/unit/app_2dorg_2ekde_2ex_2d1_2escope");
+        assert!(shown_system_unit("/org/freedesktop/systemd1/unit/tailscaled_2eservice"));
         assert!(watched_unit("/org/freedesktop/systemd1/unit/sonarr_2eservice"));
         assert!(!watched_unit("/org/freedesktop/systemd1/unit/app_2dorg_2ekde_2ekonsole_2d12_2escope"));
     }

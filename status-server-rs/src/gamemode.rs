@@ -53,7 +53,7 @@ struct Mode {
 }
 
 pub struct GameMode {
-    path: PathBuf,
+    file: crate::files::JsonFile,
     mode: Mutex<Mode>,
     /// One change at a time.
     changing: tokio::sync::Mutex<()>,
@@ -70,7 +70,7 @@ fn unit_files(filter: impl Fn(&str) -> bool) -> Vec<String> {
 impl GameMode {
     pub fn new(dir: &Path) -> Self {
         Self {
-            path: dir.join("game-mode.json"),
+            file: crate::files::JsonFile::new(dir.join("game-mode.json"), "game mode"),
             mode: Mutex::default(),
             changing: Default::default(),
         }
@@ -127,9 +127,7 @@ impl GameMode {
         if let Some(g) = &m.game {
             saved.insert("game".into(), json!(g));
         }
-        if let Err(e) = crate::files::write_private(&self.path, Value::Object(saved).to_string().as_bytes()) {
-            eprintln!("Couldn't save game mode: {e}");
-        }
+        self.file.save(&saved);
     }
 }
 
@@ -268,9 +266,7 @@ async fn check(state: &State) {
 
 /// Picks up where it was, then follows games for as long as the server runs.
 pub async fn start(state: State) {
-    let saved = std::fs::read_to_string(&state.game_mode.path)
-        .ok()
-        .and_then(|t| serde_json::from_str::<Value>(&t).ok());
+    let saved = state.game_mode.file.load::<Value>();
     if let Some(saved) = saved.filter(|s| s["active"] == true) {
         // On while a game ran: give it the grace period from now, in case the game is still going.
         let now = now_ms();

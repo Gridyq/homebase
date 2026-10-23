@@ -2,8 +2,50 @@
 
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+
+use serde::Serialize;
+use serde::de::DeserializeOwned;
+
+/// A module's saved state, as JSON in one file.
+pub struct JsonFile {
+    path: PathBuf,
+    /// What it holds, for the log: "Couldn't save {what}".
+    what: &'static str,
+}
+
+impl JsonFile {
+    pub fn new(path: PathBuf, what: &'static str) -> Self {
+        Self { path, what }
+    }
+
+    /// What was saved: none when there's no file yet, or (logged) when it can't be read.
+    pub fn load<T: DeserializeOwned>(&self) -> Option<T> {
+        self.read().unwrap_or_else(|e| {
+            eprintln!("Couldn't read {}: {e}", self.path.display());
+            None
+        })
+    }
+
+    /// Like `load`, but tells a missing file (`Ok(None)`) from one that can't be read.
+    pub fn read<T: DeserializeOwned>(&self) -> Result<Option<T>, String> {
+        match std::fs::read(&self.path) {
+            Ok(bytes) => serde_json::from_slice(&bytes).map(Some).map_err(|e| e.to_string()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    pub fn save<T: Serialize + ?Sized>(&self, value: &T) {
+        let result = serde_json::to_vec(value)
+            .map_err(std::io::Error::other)
+            .and_then(|bytes| write_private(&self.path, &bytes));
+        if let Err(e) = result {
+            eprintln!("Couldn't save {}: {e}", self.what);
+        }
+    }
+}
 
 /// Replaces `path` all at once: a crash mid-write leaves the old file, never a cut-short one.
 pub fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {

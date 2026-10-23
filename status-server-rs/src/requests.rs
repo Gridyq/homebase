@@ -9,7 +9,7 @@
 //! Shows that TheTVDB has no TMDB id for are left out of searches, as they were in Seerr.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -79,7 +79,7 @@ impl<T> Timed<T> {
 }
 
 pub struct Requests {
-    path: PathBuf,
+    file: crate::files::JsonFile,
     saved: Mutex<Vec<Request>>,
     /// Sonarr's series list, Radarr's movie list, and a series' episodes, by "series", "movies"
     /// and "episodes:<id>".
@@ -90,13 +90,10 @@ pub struct Requests {
 
 impl Requests {
     pub fn new(dir: &Path) -> Self {
-        let path = dir.join("requests.json");
-        let saved = std::fs::read(&path)
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default();
+        let file = crate::files::JsonFile::new(dir.join("requests.json"), "requests");
+        let saved = file.load().unwrap_or_default();
         Self {
-            path,
+            file,
             saved: Mutex::new(saved),
             library: Timed::new(LIBRARY_FOR),
             lookups: Timed::new(LOOKUP_FOR),
@@ -104,12 +101,7 @@ impl Requests {
     }
 
     fn save(&self, saved: &[Request]) {
-        let result = serde_json::to_vec(saved)
-            .map_err(std::io::Error::other)
-            .and_then(|bytes| crate::files::write_private(&self.path, &bytes));
-        if let Err(e) = result {
-            eprintln!("Couldn't save requests: {e}");
-        }
+        self.file.save(saved);
     }
 }
 

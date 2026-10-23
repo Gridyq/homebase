@@ -151,7 +151,7 @@ struct Job {
 }
 
 pub struct Conversions {
-    path: PathBuf,
+    file: crate::files::JsonFile,
     saved: Mutex<Saved>,
     job: Mutex<Option<Job>>,
     /// Wakes the worker when there may be something to do.
@@ -166,17 +166,18 @@ pub struct Conversions {
 
 impl Conversions {
     pub fn new(dir: &Path) -> Self {
-        let path = dir.join("conversions.json");
-        let saved = match std::fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
-                eprintln!("Couldn't read {}: {e}", path.display());
-                Saved::default()
-            }),
+        let file = crate::files::JsonFile::new(dir.join("conversions.json"), "conversions");
+        let saved = match file.read() {
+            Ok(Some(saved)) => saved,
             // Paused at first, so it waits to be switched on from the app.
-            Err(_) => Saved { paused: true, ..Saved::default() },
+            Ok(None) => Saved { paused: true, ..Saved::default() },
+            Err(e) => {
+                eprintln!("Couldn't read conversions.json: {e}");
+                Saved::default()
+            }
         };
         Self {
-            path,
+            file,
             saved: Mutex::new(saved),
             job: Mutex::default(),
             work: Notify::new(),
@@ -187,12 +188,7 @@ impl Conversions {
     }
 
     fn save(&self, saved: &Saved) {
-        let result = serde_json::to_vec(saved)
-            .map_err(std::io::Error::other)
-            .and_then(|bytes| crate::files::write_private(&self.path, &bytes));
-        if let Err(e) = result {
-            eprintln!("Couldn't save conversions: {e}");
-        }
+        self.file.save(saved);
     }
 
     /// Files converting right now, for the history.

@@ -45,7 +45,7 @@ fn partial_dir() -> PathBuf {
 }
 
 pub struct Videos {
-    path: PathBuf,
+    file: crate::files::JsonFile,
     jobs: Mutex<Vec<Job>>,
     /// The job downloading now, and its yt-dlp's pid.
     running: Mutex<Option<(String, u32)>>,
@@ -67,7 +67,7 @@ fn not_found() -> HttpError {
 impl Videos {
     pub fn new(dir: &Path) -> Self {
         Self {
-            path: dir.join("videos.json"),
+            file: crate::files::JsonFile::new(dir.join("videos.json"), "video jobs"),
             jobs: Mutex::default(),
             running: Mutex::default(),
             ytdlp_updated_at: Mutex::default(),
@@ -77,10 +77,7 @@ impl Videos {
     /// Keeps the newest 50 and saves them.
     fn save(&self, jobs: &mut Vec<Job>) {
         jobs.truncate(VIDEO_KEEP);
-        let text = Value::Array(jobs.iter().cloned().map(Value::Object).collect()).to_string();
-        if let Err(e) = crate::files::write_private(&self.path, text.as_bytes()) {
-            eprintln!("Couldn't save video jobs: {e}");
-        }
+        self.file.save(jobs);
     }
 
     fn kill_running(&self, id: &str) -> bool {
@@ -100,10 +97,7 @@ impl Videos {
 /// it already has.
 pub fn start(state: State) {
     let videos = &state.videos;
-    let saved: Vec<Value> = std::fs::read_to_string(&videos.path)
-        .ok()
-        .and_then(|t| serde_json::from_str(&t).ok())
-        .unwrap_or_default();
+    let saved: Vec<Value> = videos.file.load().unwrap_or_default();
     let mut jobs: Vec<Job> = saved.into_iter().filter_map(|v| v.as_object().cloned()).collect();
     for job in &mut jobs {
         if state_of(job) == "downloading" {

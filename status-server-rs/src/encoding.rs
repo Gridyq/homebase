@@ -1,25 +1,15 @@
 //! Base64, for photos sent to the model and for tokens and pairing codes.
 
-const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+use base64::Engine;
+use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 
 pub fn base64(data: &[u8]) -> String {
-    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
-    for c in data.chunks(3) {
-        let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
-        for i in 0..4 {
-            out.push(if i <= c.len() {
-                ALPHABET[(n >> (18 - 6 * i)) as usize & 63] as char
-            } else {
-                '='
-            });
-        }
-    }
-    out
+    STANDARD.encode(data)
 }
 
 /// URL-safe and unpadded, as Node's `toString('base64url')`.
 pub fn base64url(data: &[u8]) -> String {
-    base64(data).trim_end_matches('=').replace('+', "-").replace('/', "_")
+    URL_SAFE_NO_PAD.encode(data)
 }
 
 /// Bytes from the system's random source. Panics if there's none, rather than hand out zeros

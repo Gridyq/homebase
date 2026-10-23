@@ -18,7 +18,7 @@
 //! are sent through ntfy.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -111,7 +111,7 @@ struct Running {
 }
 
 pub struct ContainerUpdates {
-    path: PathBuf,
+    file: crate::files::JsonFile,
     saved: Mutex<Saved>,
     running: Mutex<Option<Running>>,
     /// Pulled but not restarted, because someone was watching.
@@ -122,14 +122,11 @@ pub struct ContainerUpdates {
 
 impl ContainerUpdates {
     pub fn new(dir: &Path) -> Self {
-        let path = dir.join("container-updates.json");
+        let file = crate::files::JsonFile::new(dir.join("container-updates.json"), "container updates");
         // Started for the first time, the first run is the next night's rather than straight away.
-        let saved = std::fs::read(&path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_else(|| Saved { last_run: Some(now_ms()), ..Saved::default() });
+        let saved = file.load().unwrap_or_else(|| Saved { last_run: Some(now_ms()), ..Saved::default() });
         Self {
-            path,
+            file,
             saved: Mutex::new(saved),
             running: Mutex::default(),
             waiting: Mutex::default(),
@@ -138,12 +135,7 @@ impl ContainerUpdates {
     }
 
     fn save(&self, saved: &Saved) {
-        let result = serde_json::to_vec(saved)
-            .map_err(std::io::Error::other)
-            .and_then(|bytes| crate::files::write_private(&self.path, &bytes));
-        if let Err(e) = result {
-            eprintln!("Couldn't save container updates: {e}");
-        }
+        self.file.save(saved);
     }
 
     fn step(&self, step: String) {

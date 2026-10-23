@@ -528,19 +528,13 @@ pub async fn arr_call(state: &State, name: &str, method: Method, path: &str, bod
 
 /// `file` is the path as the app sees it, under /data.
 pub async fn rescan(state: &State, name: &str, file: &str) -> Result<(), String> {
-    let (name, app) = app(name).ok_or("No such app")?;
-    let key = api_key(name).ok_or_else(|| format!("{} isn't set up on the server", app.label))?;
+    let (_, app) = app(name).ok_or("No such app")?;
     let (list, command, id_field) = if name == "sonarr" {
         ("series", "RescanSeries", "seriesId")
     } else {
         ("movie", "RescanMovie", "movieId")
     };
-    let headers = [("X-Api-Key", key), ("Content-Type", "application/json".to_owned())];
-    let reply = call(&state.upstream, Method::GET, &format!("{}/{list}", app.base), &headers, None, Duration::from_secs(30)).await?;
-    if !reply.status.is_success() {
-        return Err(format!("{} answered {}", app.label, reply.status.as_u16()));
-    }
-    let items: Value = serde_json::from_slice(&reply.body).map_err(|e| e.to_string())?;
+    let items = arr_call(state, name, Method::GET, list, None).await?;
     let id = items
         .as_array()
         .into_iter()
@@ -552,11 +546,7 @@ pub async fn rescan(state: &State, name: &str, file: &str) -> Result<(), String>
         })
         .and_then(|i| i["id"].as_i64())
         .ok_or_else(|| format!("{} doesn't have a folder holding it", app.label))?;
-    let body = json!({ "name": command, id_field: id }).to_string();
-    let reply = call(&state.upstream, Method::POST, &format!("{}/command", app.base), &headers, Some(body.into()), Duration::from_secs(30)).await?;
-    if !reply.status.is_success() {
-        return Err(format!("{} answered {}", app.label, reply.status.as_u16()));
-    }
+    arr_call(state, name, Method::POST, "command", Some(json!({ "name": command, id_field: id }))).await?;
     Ok(())
 }
 

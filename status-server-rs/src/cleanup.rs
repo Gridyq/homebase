@@ -75,7 +75,7 @@ struct Saved {
 }
 
 pub struct Cleanup {
-    path: PathBuf,
+    file: crate::files::JsonFile,
     blocklist_path: PathBuf,
     saved: Mutex<Saved>,
     blocklist: Mutex<Vec<String>>,
@@ -89,15 +89,12 @@ pub struct Cleanup {
 
 impl Cleanup {
     pub fn new(dir: &Path) -> Self {
-        let path = dir.join("cleanup.json");
-        let saved = std::fs::read(&path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_default();
+        let file = crate::files::JsonFile::new(dir.join("cleanup.json"), "cleanup");
+        let saved = file.load().unwrap_or_default();
         let blocklist_path = dir.join("blocklist.txt");
         let blocklist = std::fs::read_to_string(&blocklist_path).map(|t| patterns(&t)).unwrap_or_default();
         Self {
-            path,
+            file,
             blocklist_path,
             saved: Mutex::new(saved),
             blocklist: Mutex::new(blocklist),
@@ -109,12 +106,7 @@ impl Cleanup {
     }
 
     fn save(&self, saved: &Saved) {
-        let result = serde_json::to_vec(saved)
-            .map_err(std::io::Error::other)
-            .and_then(|bytes| crate::files::write_private(&self.path, &bytes));
-        if let Err(e) = result {
-            eprintln!("Couldn't save cleanup: {e}");
-        }
+        self.file.save(saved);
     }
 
     /// Notes how the queue check went: `None` when it worked.
