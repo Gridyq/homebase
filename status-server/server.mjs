@@ -24,7 +24,7 @@
  * the home network.
  */
 import { execFile, spawn } from 'node:child_process';
-import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
+import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { constants, createWriteStream } from 'node:fs';
 import { appendFile, link, mkdir, open, readdir, readFile, readlink, realpath, rename, rm, stat, statfs, unlink, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
@@ -3228,7 +3228,7 @@ async function stopIdleAssistant() {
   const idle = () => !assistantStarting && !generations.size && Date.now() - assistantLastUsed >= ASSISTANT_IDLE_MS;
   if (!idle()) return;
   for (const model of ASSISTANT_MODELS) {
-    // Checked again after the wait, in case a question (or the digest) came in meanwhile.
+    // Checked again after the wait, in case a question came in meanwhile.
     if (!(await unitActive(model.unit)) || !idle()) continue;
     console.log(`Stopping ${model.name}, unused for a quarter of an hour`);
     await run('systemctl', ['--user', 'stop', model.unit], { timeout: 120_000 }).catch((e) =>
@@ -3637,61 +3637,6 @@ async function useTool(call, room) {
     console.error(`Assistant tool ${name} failed: ${e.message}`);
     return { label: `Tried ${name.replace(/_/g, ' ')}`, result: `Error: ${e.message}` };
   }
-}
-
-// ---------------------------------------------------------------------------------------------
-// Weekly digest: on Monday morning the assistant looks back over the last week and writes it up
-// as a new chat, and ntfy links to it. Missed while the PC was off or in game mode, it's written
-// at the next chance.
-
-const DIGEST_PATH = path.join(ROOT, 'digest.json');
-const DIGEST_DAY = 1; // Monday
-const DIGEST_HOUR = 9;
-const DIGEST_RETRY_MS = 3600_000;
-const DIGEST_QUESTION =
-  'Write my weekly server digest for the last 7 days. Look at reliability and server_events for the week, server_history for the week, and drives, ' +
-  'then check service_logs (problems only) of any service that crashed, failed or was killed. ' +
-  'Start with one line on whether all is well. Then only what is worth knowing: what broke and why if the logs say, anything getting worse, drives, disk space. Skip whatever was normal.';
-
-let digestTriedAt = 0;
-
-/** When this week's digest is due: the last DIGEST_DAY at DIGEST_HOUR. */
-function digestDue(now = new Date()) {
-  const due = new Date(now);
-  due.setHours(DIGEST_HOUR, 0, 0, 0);
-  due.setDate(due.getDate() - ((due.getDay() - DIGEST_DAY + 7) % 7));
-  if (due > now) due.setDate(due.getDate() - 7);
-  return due.getTime();
-}
-
-async function checkDigest() {
-  const due = digestDue();
-  const last = (await readFile(DIGEST_PATH, 'utf8').then(JSON.parse, () => undefined))?.writtenAt ?? 0;
-  // A digest days late isn't worth the wait for a model to start; the next one comes Monday.
-  if (last >= due || Date.now() - due > 2 * DAY_MS) return;
-  if (gameMode.active || generations.size || Date.now() - digestTriedAt < DIGEST_RETRY_MS) return;
-  digestTriedAt = Date.now();
-  const model = ASSISTANT_MODELS.find((m) => m.tools);
-  if (!model) return;
-  const id = randomUUID();
-  const now = Date.now();
-  const title = `Week to ${new Date(now).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`;
-  const message = { role: 'assistant', content: '', reasoning: '', model: model.id, at: now, pending: true };
-  const chat = { id, title, model: model.id, createdAt: now, updatedAt: now, messages: [{ role: 'user', content: DIGEST_QUESTION, at: now }, message] };
-  const controller = new AbortController();
-  generations.set(id, { chat, message, controller });
-  await saveChat(chat);
-  console.log('Writing the weekly digest');
-  await answer({ chat, message, model, think: false, controller, send: () => {} });
-  if (message.error || !message.content) {
-    console.error(`The weekly digest failed: ${message.error ?? 'no answer'}`);
-    await deleteChat(id).catch(() => {});
-    return;
-  }
-  await writeFile(DIGEST_PATH, JSON.stringify({ writtenAt: now, chat: id }));
-  // The first line is meant to say whether all is well; enough for the notification.
-  const headline = message.content.replace(/[#*_`>]/g, '').trim().split('\n')[0].slice(0, 200);
-  await notify('Weekly server digest', headline, 'memo', `homebase://assistant/${id}`);
 }
 
 function systemPrompt(model) {
@@ -4165,10 +4110,6 @@ if (process.argv[2] === 'pair') {
   setInterval(checkGame, GAME_CHECK_INTERVAL).unref();
   setInterval(stopIdleSeerr, 60_000).unref();
   setInterval(stopIdleAssistant, 60_000).unref();
-  const digest = () => checkDigest().catch((e) => console.error('The weekly digest failed:', e.message));
-  // Off the minute, so it doesn't land on the idle check that stops the model after a restart.
-  setTimeout(digest, 90_000).unref();
-  setInterval(digest, 10 * 60_000).unref();
   setInterval(() => sweepImages().catch((e) => console.error("Couldn't clear old photos:", e.message)), 3600_000).unref();
   setInterval(() => sortTvQueue().catch(() => {}), 60_000).unref();
   await loadVideoJobs();
