@@ -219,7 +219,7 @@ pub async fn action(
                     "Only failed or cancelled downloads can be retried".into(),
                 ));
             }
-            // Cancelled but yt-dlp hasn't exited yet: finish() would mark the retry failed.
+            // yt-dlp hasn't exited or been cleaned up after yet: finish() would settle the retry.
             if state.videos.running.lock().unwrap().as_ref().is_some_and(|(running, _)| *running == id) {
                 return Err(HttpError(StatusCode::CONFLICT, "Still stopping it; try again in a moment".into()));
             }
@@ -476,12 +476,14 @@ async fn download(state: State, job: Job) {
     };
     finish(&state, &id, code, failure).await;
     let _ = tokio::fs::remove_dir_all(&partial).await;
+    // Free only now: a Retry is refused while it's taken, so a new download of this id can't be
+    // settled by finish() above or lose its partial folder to the line before.
+    *state.videos.running.lock().unwrap() = None;
     update_ytdlp(&state).await;
     next_video(&state);
 }
 
 async fn finish(state: &State, id: &str, code: i32, failure: Option<String>) {
-    *state.videos.running.lock().unwrap() = None;
     let mut notice = None;
     let mut announce = Vec::new();
     {

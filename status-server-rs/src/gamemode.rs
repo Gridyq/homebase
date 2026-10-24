@@ -15,7 +15,7 @@ use serde_json::{Map, Value, json};
 
 use crate::args;
 use crate::command::run;
-use crate::events::Event;
+use crate::events::{Event, Notice, notify};
 use crate::http::{HttpError, State};
 use crate::kernel;
 use crate::usage::now_ms;
@@ -43,6 +43,9 @@ const UNITS_TIMEOUT: Duration = Duration::from_secs(180);
 /// Between tries at starting the services after that failed: rarely enough not to hit systemd's
 /// start limit on a unit that keeps failing.
 const START_RETRY_MS: i64 = 5 * 60_000;
+/// Tries in all, about half an hour, before giving up and saying so: a unit broken for good
+/// (gluetun with expired credentials) would otherwise be started, with the rest, forever.
+const START_TRIES: u32 = 6;
 
 #[derive(Default, Clone)]
 struct Mode {
@@ -53,9 +56,11 @@ struct Mode {
     game: Option<String>,
     last_seen: Option<i64>,
     since: Option<i64>,
-    /// Starting the services when game mode went off failed: when to try again. Not saved; a
-    /// restart of this server tries nothing, but the services start with the machine anyway.
+    /// Starting the services when game mode went off failed: when to try again. Saved as
+    /// `retryStart`, so a restart of this server tries again straight away.
     retry_start_at: Option<i64>,
+    /// Tries at starting them so far.
+    start_tries: u32,
 }
 
 pub struct GameMode {
@@ -133,6 +138,9 @@ impl GameMode {
         if let Some(g) = &m.game {
             saved.insert("game".into(), json!(g));
         }
+        if m.retry_start_at.is_some() {
+            saved.insert("retryStart".into(), json!(true));
+        }
         self.file.save(&saved);
     }
 }
@@ -150,7 +158,6 @@ async fn stop_units(state: &State) -> Result<(), String> {
     result.map(|_| ())
 }
 
-/// Starts or stops the services if game mode should change.
 /// Starts what game mode stopped, apart from the services that only run on demand.
 async fn start_units(state: &State) -> Result<(), String> {
     let mut start = args!["--user", "start"].to_vec();
@@ -160,6 +167,7 @@ async fn start_units(state: &State) -> Result<(), String> {
     result
 }
 
+/// Starts or stops the services if game mode should change.
 async fn update(state: &State) {
     let gm = &state.game_mode;
     let _changing = gm.changing.lock().await;
@@ -176,6 +184,7 @@ async fn update(state: &State) {
             m.active = want;
             m.since = Some(now_ms());
             m.retry_start_at = None;
+            m.start_tries = 0;
             Next::Change(want, m.game.clone())
         } else if !want && m.retry_start_at.is_some_and(|at| now_ms() >= at) {
             Next::RetryStart
@@ -200,7 +209,9 @@ async fn update(state: &State) {
     if let Err(e) = result {
         eprintln!("Couldn't {} all the game mode services: {e}", if want { "stop" } else { "start" });
         if !want {
-            gm.mode.lock().unwrap().retry_start_at = Some(now_ms() + START_RETRY_MS);
+            let mut m = gm.mode.lock().unwrap();
+            m.retry_start_at = Some(now_ms() + START_RETRY_MS);
+            m.start_tries = 1;
         }
     }
     let mut e = Event::new(now_ms(), "game");
@@ -210,24 +221,46 @@ async fn update(state: &State) {
     gm.save(&gm.mode.lock().unwrap());
 }
 
-/// Another go at starting the services after it failed when game mode went off.
+/// Another go at starting the services after it failed when game mode went off. Runs from
+/// update(), holding `changing`, so game mode can't come back on meanwhile.
 async fn retry_start(state: &State) {
+    let gm = &state.game_mode;
     let result = start_units(state).await;
-    let mut m = state.game_mode.mode.lock().unwrap();
-    // Game mode may have come back on meanwhile; then there's nothing to start.
-    if m.active {
+    let give_up = {
+        let mut m = gm.mode.lock().unwrap();
+        m.start_tries += 1;
+        let give_up = match &result {
+            Ok(()) => {
+                println!("Started the game mode services on another try");
+                None
+            }
+            Err(e) if m.start_tries >= START_TRIES => {
+                eprintln!("Starting the game mode services failed {} times, giving up: {e}", m.start_tries);
+                Some(e.clone())
+            }
+            Err(e) => {
+                eprintln!("Starting the game mode services failed again: {e}");
+                m.retry_start_at = Some(now_ms() + START_RETRY_MS);
+                gm.save(&m);
+                return;
+            }
+        };
         m.retry_start_at = None;
-        return;
-    }
-    match result {
-        Ok(()) => {
-            println!("Started the game mode services on another try");
-            m.retry_start_at = None;
-        }
-        Err(e) => {
-            eprintln!("Starting the game mode services failed again: {e}");
-            m.retry_start_at = Some(now_ms() + START_RETRY_MS);
-        }
+        m.start_tries = 0;
+        gm.save(&m);
+        give_up
+    };
+    if let Some(e) = give_up {
+        notify(
+            &state.upstream,
+            Notice {
+                title: "Services didn't come back after game mode".into(),
+                message: format!("Starting them failed {START_TRIES} times: {e}"),
+                tags: "warning",
+                click: Some("homebase://server".into()),
+            },
+        )
+        .await;
     }
 }
 
@@ -308,7 +341,7 @@ async fn check(state: &State) {
 /// Picks up where it was, then follows games for as long as the server runs.
 pub async fn start(state: State) {
     let saved = state.game_mode.file.load::<Value>();
-    if let Some(saved) = saved.filter(|s| s["active"] == true) {
+    if let Some(saved) = saved.as_ref().filter(|s| s["active"] == true) {
         // On while a game ran: give it the grace period from now, in case the game is still going.
         let now = now_ms();
         *state.game_mode.mode.lock().unwrap() = Mode {
@@ -318,14 +351,22 @@ pub async fn start(state: State) {
             last_seen: Some(now),
             since: Some(now),
             retry_start_at: None,
+            start_tries: 0,
         };
         // After a reboot the services started with everything else, so stop them again.
         if let Err(e) = stop_units(&state).await {
             eprintln!("Couldn't stop the game mode services: {e}");
         }
+    } else if saved.is_some_and(|s| s["retryStart"] == true) {
+        // Starting the services was still failing when this server stopped: try again now.
+        let mut m = state.game_mode.mode.lock().unwrap();
+        m.retry_start_at = Some(now_ms());
+        m.start_tries = 1;
     }
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(GAME_CHECK_INTERVAL);
+        // A slow change holds up the checks; don't make up the missed ones back to back.
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tick.tick().await;
             check(&state).await;
