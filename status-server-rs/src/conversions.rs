@@ -15,8 +15,9 @@
 //! and every half hour besides; what's been decided is kept in `conversions.json` by path, with
 //! the size and time the file had, so a changed file is looked at again. ffmpeg runs in a scope of
 //! its own with a low CPU and disk weight. Game mode stops it, and the file starts over
-//! afterwards. While Jellyfin transcodes video for someone, ffmpeg is paused (SIGSTOP) and no new
-//! file is started, so the stream gets the GPU. A file still hard-linked to a seeding download
+//! afterwards. While Jellyfin transcodes video for someone, or any of Jellyfin's ffmpegs uses the
+//! GPU, ours is paused (SIGSTOP) and no new file is started: the RX 5700's video engine hard-froze
+//! the machine on 2026-10-23 with our encode and Jellyfin's trickplay on it at once. A file still hard-linked to a seeding download
 //! waits until the torrent is removed.
 
 use std::collections::BTreeMap;
@@ -62,6 +63,8 @@ const GPU_PIXEL_FORMATS: &[&str] = &["yuv420p", "yuvj420p", "yuv420p10le"];
 const PHONE_AUDIO: &[&str] = &["aac", "ac3", "eac3", "mp3", "alac", "flac", "opus"];
 const TEXT_SUBTITLES: &[&str] = &["subrip", "srt", "ass", "ssa", "webvtt", "mov_text", "text"];
 const HDR_TRANSFERS: &[&str] = &["smpte2084", "arib-std-b67"];
+/// Shown as `heldFor` when Jellyfin has the GPU without anyone watching (trickplay and the like).
+const BACKGROUND_TASK: &str = "a background task";
 /// How often a running job checks whether game mode wants the GPU.
 const GAME_CHECK: Duration = Duration::from_secs(5);
 /// A job that hasn't moved in this long, while nothing's holding it, is reported as stuck.
@@ -478,6 +481,23 @@ enum RunError {
     Stopped,
 }
 
+/// Whether one of Jellyfin's own ffmpegs has the GPU, read from the command lines in /proc.
+fn jellyfin_on_gpu() -> bool {
+    let Ok(dir) = std::fs::read_dir("/proc") else { return false };
+    dir.flatten().any(|e| {
+        let Ok(cmdline) = std::fs::read(e.path().join("cmdline")) else { return false };
+        let mut args = cmdline.split(|&b| b == 0).map(String::from_utf8_lossy);
+        args.next().is_some_and(|a| a.contains("jellyfin-ffmpeg"))
+            && args.any(|a| a.contains(RENDER_NODE) || a.contains("vaapi"))
+    })
+}
+
+/// What's holding the conversions back for the GPU's sake: who Jellyfin transcodes for, or a
+/// background task when one of its ffmpegs is on the GPU anyway.
+fn gpu_hold(state: &State) -> Option<String> {
+    state.jellyfin.transcoding_for().or_else(|| jellyfin_on_gpu().then(|| BACKGROUND_TASK.into()))
+}
+
 /// Runs ffmpeg in its scope, following its progress, until it finishes or game mode stops it.
 async fn run_ffmpeg(state: &State, args: Vec<String>) -> Result<(), RunError> {
     let unit = scope_unit();
@@ -530,10 +550,10 @@ async fn run_ffmpeg(state: &State, args: Vec<String>) -> Result<(), RunError> {
                     let _ = child.kill().await;
                     return Err(RunError::Stopped);
                 }
-                let hold = state.jellyfin.transcoding_for();
+                let hold = gpu_hold(state);
                 if let Some(pid) = pid && hold.is_some() != held {
                     held = hold.is_some();
-                    println!("{} converting while Jellyfin transcodes", if held { "Paused" } else { "Resumed" });
+                    println!("{} converting while Jellyfin uses the GPU", if held { "Paused" } else { "Resumed" });
                     // SAFETY: signals the child this owns, which kill_on_drop reaps.
                     unsafe { libc::kill(pid, if held { libc::SIGSTOP } else { libc::SIGCONT }) };
                     if let Some(job) = state.conversions.job.lock().unwrap().as_mut() {
@@ -803,11 +823,11 @@ async fn record(state: &State, path: &str, outcome: Outcome) {
     }
 }
 
-/// The next file to convert, unless it's paused, game mode is on or Jellyfin is transcoding.
+/// The next file to convert, unless it's paused, game mode is on or Jellyfin is using the GPU.
 /// Files still hard-linked to a seeding download wait: converting one would free nothing until
 /// the torrent goes, and use room for the new copy meanwhile.
 fn next(state: &State) -> Option<String> {
-    if state.game_mode.active() || state.jellyfin.transcoding_for().is_some() {
+    if state.game_mode.active() || gpu_hold(state).is_some() {
         return None;
     }
     let queued: Vec<String> = {
@@ -1052,7 +1072,7 @@ pub fn summary(state: &State) -> Value {
         })
         .collect();
     // Who Jellyfin is transcoding for, when that's holding the conversions up.
-    let held_for = state.jellyfin.transcoding_for().filter(|_| !saved.paused && (queued > 0 || !workers.is_empty()));
+    let held_for = gpu_hold(state).filter(|_| !saved.paused && (queued > 0 || !workers.is_empty()));
     json!({
         "paused": saved.paused,
         "gameMode": state.game_mode.active(),
