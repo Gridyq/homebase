@@ -130,7 +130,16 @@ function useOverview(conn: Connection) {
   // Nothing else is asked for while game mode is on: Sonarr and Radarr are stopped then.
   // An older status server without game mode answers with an error; carry on then.
   const ready = !!game.error || game.data?.on === false;
-  const queue = usePolling(() => downloads(conn), QUEUE_POLL_MS, conn.url, { enabled: ready });
+  // When each load started, so the screen can tell one that began before a drag was saved.
+  const queue = usePolling(
+    () => {
+      const at = Date.now();
+      return downloads(conn).then((list) => ({ list, at }));
+    },
+    QUEUE_POLL_MS,
+    conn.url,
+    { enabled: ready },
+  );
   const limit = usePolling(() => speedLimit(conn), QUEUE_POLL_MS, conn.url, { enabled: ready });
   const seed = usePolling(() => seeding(conn), QUEUE_POLL_MS, conn.url, { enabled: ready });
   const convert = usePolling(() => conversions(conn), CONVERSIONS_POLL_MS, conn.url, { enabled: ready });
@@ -178,22 +187,16 @@ function Overview({ conn, data }: { conn: Connection; data: ReturnType<typeof us
   if (pulled && !coming.loading && !requested.loading) setPulled(false);
   // Downloads being acted on, with what's happening to them.
   const [working, setWorking] = useState<Record<string, string>>({});
-  // The order just dragged into, shown until the queue comes back from the server that way.
-  const [dragged, setDragged] = useState<string[]>();
+  // The order the downloads are shown in from a drag until a load that started after it was saved
+  // comes back. `savedAt` is unset while a save is on its way.
+  const [dragged, setDragged] = useState<{ keys: string[]; savedAt?: number }>();
   const [dragging, setDragging] = useState(false);
-
-  const moveDownload = async (list: Download[], from: number, to: number) => {
-    const next = [...list];
-    next.splice(to, 0, ...next.splice(from, 1));
-    setDragged(next.map((d) => d.key));
-    try {
-      await setQueueOrder(conn, next.filter((d) => d.queuePosition !== undefined));
-    } catch (e) {
-      Alert.alert(`Couldn't move ${list[from].title}`, errorText(e));
-    }
-    await queue.refresh();
+  if (dragged?.savedAt !== undefined && !dragging && queue.data && queue.data.at > dragged.savedAt) {
     setDragged(undefined);
-  };
+  }
+  // Saves go one at a time, and only the latest order is sent.
+  const saving = useRef(Promise.resolve());
+  const saves = useRef(0);
 
   const showActions = (d: Download) => {
     if (working[d.key]) return;
@@ -353,12 +356,49 @@ function Overview({ conn, data }: { conn: Connection; data: ReturnType<typeof us
 
   const comingUp = coming.data;
   const recent = requested.data;
-  const queued = queue.data ?? [];
-  // Downloads come back with qBittorrent's waiting and downloading ones first.
+  const queued = queue.data?.list ?? [];
+  // Downloads come back with qBittorrent's waiting and downloading ones first. While a drag's order
+  // is shown, ones that weren't in it go after the rest of their kind.
+  const rank = new Map(dragged?.keys.map((k, i) => [k, i]));
+  const unmovable = (d: Download) => Number(d.queuePosition === undefined);
   const active = dragged
-    ? [...queued].sort((a, b) => dragged.indexOf(a.key) - dragged.indexOf(b.key))
+    ? [...queued].sort(
+        (a, b) =>
+          unmovable(a) - unmovable(b) ||
+          (rank.get(a.key) ?? Number.MAX_SAFE_INTEGER) - (rank.get(b.key) ?? Number.MAX_SAFE_INTEGER),
+      )
     : queued;
-  const movable = active.filter((d) => d.queuePosition !== undefined).length;
+  const movable = active.filter((d) => !unmovable(d)).length;
+
+  const moveDownload = (from: number, to: number) => {
+    const moved = active[from];
+    const next = [...active];
+    next.splice(to, 0, ...next.splice(from, 1));
+    const keys = next.map((d) => d.key);
+    setDragged({ keys });
+    const save = ++saves.current;
+    saving.current = saving.current.then(async () => {
+      // A later drag sends its own, newer order.
+      if (save !== saves.current) return;
+      try {
+        await setQueueOrder(conn, next.filter((d) => !unmovable(d)));
+      } catch (e) {
+        if (save !== saves.current) return;
+        Alert.alert(`Couldn't move ${moved.title}`, errorText(e));
+        setDragged(undefined);
+        queue.refresh();
+        return;
+      }
+      if (save !== saves.current) return;
+      setDragged({ keys, savedAt: Date.now() });
+      queue.refresh();
+    });
+  };
+  // Hold the order still while a row is lifted, so a load landing mid-drag doesn't shift it.
+  const onDragging = (on: boolean) => {
+    setDragging(on);
+    if (on) setDragged((d) => d ?? { keys: active.map((x) => x.key), savedAt: Date.now() });
+  };
   const nothing =
     !active.length && !comingUp?.length && !recent?.length && !queue.error && !coming.error && !requested.error;
   const speed = limit.data;
@@ -397,9 +437,9 @@ function Overview({ conn, data }: { conn: Connection; data: ReturnType<typeof us
               <ReorderableList
                 items={active}
                 keyOf={(d) => d.key}
-                movable={dragged ? 0 : movable}
-                onMove={(from, to) => moveDownload(active, from, to)}
-                onDragging={setDragging}
+                movable={movable}
+                onMove={moveDownload}
+                onDragging={onDragging}
                 renderItem={(d, i) => (
                   <DownloadRow
                     download={d}

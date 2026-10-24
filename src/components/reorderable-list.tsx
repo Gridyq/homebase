@@ -1,6 +1,6 @@
-import { useLayoutEffect, useRef, type ReactNode } from 'react';
+import { useCallback, useLayoutEffect, useMemo, useRef, type ReactNode } from 'react';
 import { View } from 'react-native';
-import { GestureDetector, usePanGesture } from 'react-native-gesture-handler';
+import { GestureDetector, usePanGesture, type PanGestureConfig } from 'react-native-gesture-handler';
 import Animated, { useAnimatedStyle, useSharedValue, withTiming, type SharedValue } from 'react-native-reanimated';
 import { scheduleOnRN } from 'react-native-worklets';
 
@@ -43,40 +43,64 @@ export function ReorderableList<T>({
   /** While a row is lifted, so the screen can stop scrolling under it. */
   onDragging?: (dragging: boolean) => void;
 }) {
-  const drag: Drag = {
-    heights: useSharedValue<number[]>([]),
-    active: useSharedValue(-1),
-    target: useSharedValue(-1),
-    offset: useSharedValue(0),
-    last: useSharedValue(movable - 1),
-  };
-  const heights = useRef<number[]>([]);
-  const order = items.map(keyOf).join('\n');
+  const heights = useSharedValue<number[]>([]);
+  const active = useSharedValue(-1);
+  const target = useSharedValue(-1);
+  const offset = useSharedValue(0);
+  const last = useSharedValue(movable - 1);
+  const drag: Drag = useMemo(
+    () => ({ heights, active, target, offset, last }),
+    [heights, active, target, offset, last],
+  );
+  const keys = items.map(keyOf);
+  const order = keys.join('\n');
+
+  // Heights by key, so a row that moves or a row that leaves can't leave another's height behind.
+  const sizes = useRef(new Map<string, number>());
+  const keysRef = useRef(keys);
+  const syncHeights = useCallback(() => {
+    heights.set(keysRef.current.map((k) => sizes.current.get(k) ?? 0));
+  }, [heights]);
+  const onHeight = useCallback(
+    (key: string, h: number) => {
+      sizes.current.set(key, h);
+      syncHeights();
+    },
+    [syncHeights],
+  );
+
+  // The gestures call these through refs, so they keep their handlers from one render to the next.
+  const latest = useRef({ onMove, onDragging });
+  useLayoutEffect(() => {
+    latest.current = { onMove, onDragging };
+  });
+  const move = useCallback((from: number, to: number) => latest.current.onMove(from, to), []);
+  const dragging = useCallback((on: boolean) => latest.current.onDragging?.(on), []);
 
   useLayoutEffect(() => {
-    drag.last.set(movable - 1);
-  }, [drag.last, movable]);
+    last.set(movable - 1);
+  }, [last, movable]);
   // Once the rows come back in their new order, drop the drag's shifts without animating them.
   useLayoutEffect(() => {
-    drag.active.set(-1);
-    drag.target.set(-1);
-    drag.offset.set(0);
-  }, [order, drag.active, drag.target, drag.offset]);
+    keysRef.current = order ? order.split('\n') : [];
+    syncHeights();
+    active.set(-1);
+    target.set(-1);
+    offset.set(0);
+  }, [order, syncHeights, active, target, offset]);
 
   return (
     <View>
       {items.map((item, i) => (
         <Row
-          key={keyOf(item)}
+          key={keys[i]}
+          id={keys[i]}
           index={i}
           drag={drag}
           enabled={i < movable && movable > 1}
-          onMove={onMove}
-          onDragging={onDragging}
-          onHeight={(h) => {
-            heights.current[i] = h;
-            drag.heights.set(heights.current.slice(0, items.length));
-          }}>
+          onMove={move}
+          onDragging={dragging}
+          onHeight={onHeight}>
           {renderItem(item, i)}
         </Row>
       ))}
@@ -85,6 +109,7 @@ export function ReorderableList<T>({
 }
 
 function Row({
+  id,
   index,
   drag,
   enabled,
@@ -93,71 +118,76 @@ function Row({
   onHeight,
   children,
 }: {
+  id: string;
   index: number;
   drag: Drag;
   enabled: boolean;
   onMove: (from: number, to: number) => void;
-  onDragging?: (dragging: boolean) => void;
-  onHeight: (height: number) => void;
+  onDragging: (dragging: boolean) => void;
+  onHeight: (key: string, height: number) => void;
   children: ReactNode;
 }) {
   const theme = useTheme();
   const { heights, active, target, offset, last } = drag;
-  const dragging = (on: boolean) => onDragging?.(on);
 
-  const pan = usePanGesture({
-    enabled,
-    activateAfterLongPress: LIFT_MS,
-    onActivate: () => {
-      'worklet';
-      active.set(index);
-      target.set(index);
-      offset.set(0);
-      scheduleOnRN(dragging, true);
-    },
-    onUpdate: (e) => {
-      'worklet';
-      offset.set(e.translationY);
-      // The slot the middle of the dragged row is over, by where the rows sit before the drag.
-      const h = heights.get();
-      let top = 0;
-      for (let j = 0; j < index; j++) top += h[j] ?? 0;
-      const middle = top + (h[index] ?? 0) / 2 + e.translationY;
-      let slot = 0;
-      let edge = 0;
-      for (let j = 0; j <= last.get(); j++) {
-        edge += h[j] ?? 0;
-        slot = j;
-        if (middle < edge) break;
-      }
-      target.set(Math.max(0, Math.min(last.get(), slot)));
-    },
-    onDeactivate: () => {
-      'worklet';
-      const from = active.get();
-      const to = target.get();
-      if (from < 0) return;
-      if (from === to) {
-        offset.set(
-          withTiming(0, { duration: SHIFT_MS }, () => {
-            active.set(-1);
-          }),
-        );
-      } else {
-        // Settle into the new slot; the shifts are dropped when the rows come back reordered.
+  // Made once per index, so a screen re-rendering under a drag doesn't reconfigure its gesture.
+  const config = useMemo<PanGestureConfig>(
+    () => ({
+      enabled,
+      activateAfterLongPress: LIFT_MS,
+      onActivate: () => {
+        'worklet';
+        active.set(index);
+        target.set(index);
+        offset.set(0);
+        scheduleOnRN(onDragging, true);
+      },
+      onUpdate: (e) => {
+        'worklet';
+        offset.set(e.translationY);
+        // The slot the middle of the dragged row is over, by where the rows sit before the drag.
         const h = heights.get();
-        let settle = 0;
-        if (to > from) for (let j = from + 1; j <= to; j++) settle += h[j] ?? 0;
-        else for (let j = to; j < from; j++) settle -= h[j] ?? 0;
-        offset.set(withTiming(settle, { duration: SHIFT_MS }));
-        scheduleOnRN(onMove, from, to);
-      }
-    },
-    onFinalize: () => {
-      'worklet';
-      scheduleOnRN(dragging, false);
-    },
-  });
+        let top = 0;
+        for (let j = 0; j < index; j++) top += h[j] ?? 0;
+        const middle = top + (h[index] ?? 0) / 2 + e.translationY;
+        let slot = 0;
+        let edge = 0;
+        for (let j = 0; j <= last.get(); j++) {
+          edge += h[j] ?? 0;
+          slot = j;
+          if (middle < edge) break;
+        }
+        target.set(Math.max(0, Math.min(last.get(), slot)));
+      },
+      onDeactivate: () => {
+        'worklet';
+        const from = active.get();
+        const to = target.get();
+        if (from < 0) return;
+        if (from === to) {
+          offset.set(
+            withTiming(0, { duration: SHIFT_MS }, () => {
+              active.set(-1);
+            }),
+          );
+        } else {
+          // Settle into the new slot; the shifts are dropped when the rows come back reordered.
+          const h = heights.get();
+          let settle = 0;
+          if (to > from) for (let j = from + 1; j <= to; j++) settle += h[j] ?? 0;
+          else for (let j = to; j < from; j++) settle -= h[j] ?? 0;
+          offset.set(withTiming(settle, { duration: SHIFT_MS }));
+          scheduleOnRN(onMove, from, to);
+        }
+      },
+      onFinalize: () => {
+        'worklet';
+        scheduleOnRN(onDragging, false);
+      },
+    }),
+    [enabled, index, heights, active, target, offset, last, onMove, onDragging],
+  );
+  const pan = usePanGesture(config);
 
   const style = useAnimatedStyle(() => {
     const from = active.get();
@@ -174,7 +204,12 @@ function Row({
       from >= 0 && index > from && index <= to ? -lifted : from >= 0 && index < from && index >= to ? lifted : 0;
     return {
       zIndex: 0,
-      transform: [{ translateY: from >= 0 ? withTiming(shift, { duration: SHIFT_MS }) : shift }, { scale: 1 }],
+      transform: [
+        {
+          translateY: from >= 0 ? withTiming(shift, { duration: SHIFT_MS }) : shift,
+        },
+        { scale: 1 },
+      ],
       shadowOpacity: 0,
     };
   });
@@ -182,7 +217,7 @@ function Row({
   return (
     <GestureDetector gesture={pan}>
       <Animated.View
-        onLayout={(e) => onHeight(e.nativeEvent.layout.height)}
+        onLayout={(e) => onHeight(id, e.nativeEvent.layout.height)}
         style={[
           {
             backgroundColor: theme.backgroundElement,

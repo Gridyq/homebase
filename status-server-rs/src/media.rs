@@ -472,14 +472,30 @@ async fn queued(state: &State) -> Result<Vec<Value>, HttpError> {
         .collect())
 }
 
+/// The qBittorrent calls that put the queue in `wanted` order, one torrent each: either the ones
+/// ahead of the longest stretch at the end that's already in the queue's order go to the top, or
+/// the ones behind the longest such stretch at the start go to the bottom, whichever is fewer. A
+/// torrent dragged to either end is one call. Nothing when it's already in order.
+fn reorder_moves(queue: &[&Value], wanted: &[&Value]) -> (&'static str, Vec<String>) {
+    let place: HashMap<String, usize> = queue.iter().enumerate().map(|(i, t)| (hash_of(t), i)).collect();
+    let at: Vec<usize> = wanted.iter().map(|t| place.get(&hash_of(t)).copied().unwrap_or(usize::MAX)).collect();
+    let in_order = |i: usize| at[i - 1] < at[i];
+    let tail = (1..at.len()).rev().find(|&i| !in_order(i)).unwrap_or(0);
+    let head = (1..at.len()).find(|&i| !in_order(i)).unwrap_or(at.len());
+    if tail <= at.len() - head {
+        // Moving each to the top, last first, puts them ahead of the rest, which are in order.
+        ("torrents/topPrio", wanted[..tail].iter().rev().map(|t| hash_of(t)).collect())
+    } else {
+        // Moving each to the bottom, first first, puts them behind the rest.
+        ("torrents/bottomPrio", wanted[head..].iter().map(|t| hash_of(t)).collect())
+    }
+}
+
 /// Puts the queue in `wanted` order, unless it already is.
 async fn reorder(state: &State, queue: &[&Value], wanted: &[&Value]) -> Result<(), HttpError> {
-    if wanted.iter().map(|t| hash_of(t)).eq(queue.iter().map(|t| hash_of(t))) {
-        return Ok(());
-    }
-    // Moving each to the top, last first, leaves them in the wanted order.
-    for t in wanted.iter().rev() {
-        qbit(state, "torrents/topPrio", Some(&[("hashes", &hash_of(t))])).await?;
+    let (endpoint, hashes) = reorder_moves(queue, wanted);
+    for h in hashes {
+        qbit(state, endpoint, Some(&[("hashes", &h)])).await?;
     }
     Ok(())
 }
@@ -657,7 +673,7 @@ mod tests {
 
     use serde_json::{Value, json};
 
-    use super::{episode_of, episode_order, hash_of};
+    use super::{episode_of, episode_order, hash_of, reorder_moves};
 
     fn torrents(names: &[&str]) -> Vec<Value> {
         names
@@ -670,6 +686,56 @@ mod tests {
         let queue: Vec<&Value> = queue.iter().collect();
         let manual: HashSet<String> = manual.iter().map(|s| s.to_string()).collect();
         episode_order(&queue, &manual).unwrap().into_iter().map(hash_of).collect()
+    }
+
+    #[test]
+    fn reorder_moves_reach_every_order() {
+        let q = torrents(&["a", "b", "c", "d", "e"]);
+        let queue: Vec<&Value> = q.iter().collect();
+        let mut orders: Vec<Vec<usize>> = vec![vec![]];
+        for i in 0..queue.len() {
+            orders = orders
+                .into_iter()
+                .flat_map(|o| {
+                    (0..=o.len()).map(move |at| {
+                        let mut o = o.clone();
+                        o.insert(at, i);
+                        o
+                    })
+                })
+                .collect();
+        }
+        // Every order of five, played against a queue that moves torrents to its top or bottom.
+        for o in orders {
+            let wanted: Vec<&Value> = o.iter().map(|&i| queue[i]).collect();
+            let (endpoint, hashes) = reorder_moves(&queue, &wanted);
+            let mut now: Vec<String> = queue.iter().map(|t| hash_of(t)).collect();
+            for h in &hashes {
+                now.retain(|x| x != h);
+                if endpoint == "torrents/topPrio" {
+                    now.insert(0, h.clone());
+                } else {
+                    now.push(h.clone());
+                }
+            }
+            assert_eq!(now, wanted.iter().map(|t| hash_of(t)).collect::<Vec<_>>(), "{o:?}");
+            // None when nothing moved; one torrent dragged takes no more calls than the places
+            // between where it lands and the nearer end, and one to either end is a single call.
+            let ordered = |o: &[usize]| o.windows(2).all(|w| w[0] < w[1]);
+            if ordered(&o) {
+                assert!(hashes.is_empty());
+            }
+            for (to, &i) in o.iter().enumerate() {
+                let mut rest = o.clone();
+                rest.retain(|&x| x != i);
+                if !ordered(&o) && ordered(&rest) {
+                    assert!(hashes.len() <= (to + 1).min(o.len() - to), "{o:?}");
+                    if to == 0 || to == o.len() - 1 {
+                        assert_eq!(hashes.len(), 1, "{o:?}");
+                    }
+                }
+            }
+        }
     }
 
     #[test]
