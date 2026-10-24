@@ -102,6 +102,7 @@ async fn main() {
         .route("/api/game-mode", get(gamemode::get).post(gamemode::set))
         .route("/api/qbittorrent/limit", get(media::speed_limit).post(media::set_speed_limit))
         .route("/api/qbittorrent/seeding", get(media::seeding).post(media::set_seeding))
+        .route("/api/qbittorrent/order", get(media::queue_order).post(media::set_queue_order))
         .route("/api/conversions", get(conversions::get).post(conversions::set))
         .route("/api/requests/{*rest}", any(media::requests))
         .route("/api/arr/{*rest}", any(media::arr))

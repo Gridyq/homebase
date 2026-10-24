@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { ActionSheetIOS, ActivityIndicator, Alert, FlatList, RefreshControl, ScrollView, StyleSheet, View } from 'react-native';
 
 import { Button } from '@/components/button';
+import { ReorderableList } from '@/components/reorderable-list';
 import { ThemedText } from '@/components/themed-text';
 import { Centered } from '@/components/centered';
 import { Spacing } from '@/constants/theme';
@@ -22,6 +23,7 @@ import {
   requestsMade,
   search,
   seeding,
+  setQueueOrder,
   setSeeding,
   setSpeedLimit,
   speedLimit,
@@ -176,6 +178,22 @@ function Overview({ conn, data }: { conn: Connection; data: ReturnType<typeof us
   if (pulled && !coming.loading && !requested.loading) setPulled(false);
   // Downloads being acted on, with what's happening to them.
   const [working, setWorking] = useState<Record<string, string>>({});
+  // The order just dragged into, shown until the queue comes back from the server that way.
+  const [dragged, setDragged] = useState<string[]>();
+  const [dragging, setDragging] = useState(false);
+
+  const moveDownload = async (list: Download[], from: number, to: number) => {
+    const next = [...list];
+    next.splice(to, 0, ...next.splice(from, 1));
+    setDragged(next.map((d) => d.key));
+    try {
+      await setQueueOrder(conn, next.filter((d) => d.queuePosition !== undefined));
+    } catch (e) {
+      Alert.alert(`Couldn't move ${list[from].title}`, errorText(e));
+    }
+    await queue.refresh();
+    setDragged(undefined);
+  };
 
   const showActions = (d: Download) => {
     if (working[d.key]) return;
@@ -335,7 +353,12 @@ function Overview({ conn, data }: { conn: Connection; data: ReturnType<typeof us
 
   const comingUp = coming.data;
   const recent = requested.data;
-  const active = queue.data ?? [];
+  const queued = queue.data ?? [];
+  // Downloads come back with qBittorrent's waiting and downloading ones first.
+  const active = dragged
+    ? [...queued].sort((a, b) => dragged.indexOf(a.key) - dragged.indexOf(b.key))
+    : queued;
+  const movable = active.filter((d) => d.queuePosition !== undefined).length;
   const nothing =
     !active.length && !comingUp?.length && !recent?.length && !queue.error && !coming.error && !requested.error;
   const speed = limit.data;
@@ -346,6 +369,7 @@ function Overview({ conn, data }: { conn: Connection; data: ReturnType<typeof us
   return (
     <ScrollView
       contentInsetAdjustmentBehavior="automatic"
+      scrollEnabled={!dragging}
       style={{ backgroundColor: theme.background }}
       contentContainerStyle={styles.content}
       refreshControl={
@@ -370,15 +394,21 @@ function Overview({ conn, data }: { conn: Connection; data: ReturnType<typeof us
             <Card>
               {speed ? <SpeedLimitRow limit={speed} onPress={() => pickSpeedLimit(speed.limit)} /> : null}
               {seeds ? <SeedingRow seeding={seeds} first={!speed} onPress={() => pickSeeding(seeds)} /> : null}
-              {active.map((d, i) => (
-                <DownloadRow
-                  key={d.key}
-                  download={d}
-                  first={i === 0 && !speed && !seeds}
-                  working={working[d.key]}
-                  onPress={() => showActions(d)}
-                />
-              ))}
+              <ReorderableList
+                items={active}
+                keyOf={(d) => d.key}
+                movable={dragged ? 0 : movable}
+                onMove={(from, to) => moveDownload(active, from, to)}
+                onDragging={setDragging}
+                renderItem={(d, i) => (
+                  <DownloadRow
+                    download={d}
+                    first={i === 0 && !speed && !seeds}
+                    working={working[d.key]}
+                    onPress={() => showActions(d)}
+                  />
+                )}
+              />
             </Card>
           </View>
         </View>

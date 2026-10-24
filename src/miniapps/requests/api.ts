@@ -181,6 +181,8 @@ export type Download = {
   /** The first episode it covers, for listing a show's downloads in order. */
   episodeNumber?: number;
   added?: string;
+  /** Its place in qBittorrent's queue from 0, when it's waiting or downloading and can be moved. */
+  queuePosition?: number;
 };
 
 const poster = (images: ArrImage[] | undefined) => images?.find((i) => i.coverType === 'poster')?.remoteUrl;
@@ -279,13 +281,21 @@ async function queueOf(conn: Connection, app: Arr) {
   });
 }
 
-/** Everything Sonarr and Radarr are downloading. A side that fails is left out. */
+/** Everything Sonarr and Radarr are downloading, in the order qBittorrent will get to them. A side that fails is left out. */
 export async function downloads(conn: Connection) {
-  const results = await Promise.allSettled([queueOf(conn, 'sonarr'), queueOf(conn, 'radarr')]);
-  if (results.every((r) => r.status === 'rejected')) throw (results[0] as PromiseRejectedResult).reason;
-  const all = results.flatMap((r) => (r.status === 'fulfilled' ? r.value : []));
-  // The order the server keeps qBittorrent's queue in: shows and movies in the order they were
-  // first grabbed, and a show's downloads by season and episode.
+  const [sonarr, radarr, order] = await Promise.allSettled([
+    queueOf(conn, 'sonarr'),
+    queueOf(conn, 'radarr'),
+    queueOrder(conn),
+  ]);
+  const sides = [sonarr, radarr];
+  if (sides.every((r) => r.status === 'rejected')) throw (sides[0] as PromiseRejectedResult).reason;
+  const all = sides.flatMap((r) => (r.status === 'fulfilled' ? r.value : []));
+  // An older server can't say, and then they can't be moved.
+  const position = new Map(order.status === 'fulfilled' ? order.value.map((h, i) => [h, i]) : []);
+  for (const d of all) d.queuePosition = d.downloadId ? position.get(d.downloadId.toLowerCase()) : undefined;
+  // Without a place in the queue, the order the server keeps it in by itself: shows and movies in
+  // the order they were first grabbed, and a show's downloads by season and episode.
   const group = (d: Download) => `${d.arr}:${d.arrId ?? d.key}`;
   const first = new Map<string, string>();
   for (const d of all) {
@@ -293,8 +303,10 @@ export async function downloads(conn: Connection) {
     const seen = first.get(group(d));
     if (seen === undefined || added < seen) first.set(group(d), added);
   }
+  const queued = (d: Download) => (d.queuePosition === undefined ? Infinity : d.queuePosition);
   return [...all].sort(
     (a, b) =>
+      queued(a) - queued(b) ||
       first.get(group(a))!.localeCompare(first.get(group(b))!) ||
       group(a).localeCompare(group(b)) ||
       (a.seasonNumber ?? 0) - (b.seasonNumber ?? 0) ||
@@ -674,6 +686,24 @@ export function speedLimit(conn: Connection) {
 
 export function setSpeedLimit(conn: Connection, limit: number) {
   return request<SpeedLimit>(conn, '/api/qbittorrent/limit', { method: 'POST', body: JSON.stringify({ limit }) });
+}
+
+/** Hashes of the torrents waiting or downloading in qBittorrent, first to start first. */
+async function queueOrder(conn: Connection) {
+  const res = await request<{ hashes: string[] }>(conn, '/api/qbittorrent/order');
+  return res.hashes;
+}
+
+/**
+ * Put downloads in this order in qBittorrent's queue. Torrents not given keep their places; the
+ * server stops keeping a show's episodes in order if they're put out of it.
+ */
+export function setQueueOrder(conn: Connection, order: Pick<Download, 'downloadId'>[]) {
+  const hashes = order.flatMap((d) => (d.downloadId ? [d.downloadId.toLowerCase()] : []));
+  return request<{ hashes: string[] }>(conn, '/api/qbittorrent/order', {
+    method: 'POST',
+    body: JSON.stringify({ hashes }),
+  });
 }
 
 /** Finished torrents seeding and stopped, and the upload speed in bytes per second. */

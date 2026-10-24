@@ -1,10 +1,10 @@
 //! Media: the Requests mini-app talks to Sonarr and Radarr through here, so their API keys stay
 //! on this machine. Keys are read from each app's own config on every call, so a rotated key just
 //! works. Only the calls the app makes are let through. Search and requests are requests.rs.
-//! qBittorrent's speed limit and seeding have a small client of their own, since it logs in
-//! rather than taking a key.
+//! qBittorrent's speed limit, seeding and queue order have a small client of their own, since it
+//! logs in rather than taking a key.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
@@ -121,12 +121,18 @@ fn api_key(name: &str) -> Option<String> {
 
 pub struct Media {
     qbit_cookie: Mutex<Option<String>>,
+    /// Held while the queue is being reordered, so the app and the episode sort don't interleave.
+    queue_lock: tokio::sync::Mutex<()>,
+    /// Shows whose episodes were dragged out of order in the app; the episode sort leaves them be.
+    manual_shows: Mutex<HashSet<String>>,
 }
 
 impl Media {
     pub fn new() -> Self {
         Self {
             qbit_cookie: Mutex::new(None),
+            queue_lock: tokio::sync::Mutex::new(()),
+            manual_shows: Mutex::new(HashSet::new()),
         }
     }
 }
@@ -449,56 +455,140 @@ fn episode_of(name: &str) -> Option<(String, u32, u32)> {
     None
 }
 
-/// Keeps queued TV torrents in episode order, so a show grabbed one episode at a time comes in from
-/// the first episode on. Shows go in the order they were first added; movies keep their places.
-/// Sonarr also asks for sequential download, which does the same for the files in a season pack.
-async fn sort_tv_queue(state: &State) -> Result<(), HttpError> {
-    if state.game_mode.active() {
-        return Ok(());
-    }
-    // Queue positions start at 1; finished torrents have none.
+fn hash_of(t: &Value) -> String {
+    t["hash"].as_str().unwrap_or_default().to_owned()
+}
+
+/// Torrents waiting or downloading, first to start first. Queue positions start at 1; finished
+/// torrents have none, and neither does anything when qBittorrent's queueing is off.
+async fn queued(state: &State) -> Result<Vec<Value>, HttpError> {
     let all = qbit(state, "torrents/info?sort=priority", None).await?;
-    let queue: Vec<&Value> = all
+    Ok(all
         .as_array()
         .into_iter()
         .flatten()
         .filter(|t| t["priority"].as_f64().is_some_and(|p| p > 0.0))
-        .collect();
-    let mut tv = Vec::new();
-    for t in queue.iter().filter(|t| t["category"] == "tv") {
-        let Some(e) = episode_of(t["name"].as_str().unwrap_or_default()) else {
-            return Ok(());
-        };
-        tv.push((*t, e));
-    }
-    let mut first_added: HashMap<String, f64> = HashMap::new();
-    for (t, (show, ..)) in &tv {
-        let added = t["added_on"].as_f64().unwrap_or(f64::INFINITY);
-        let was = first_added.entry(show.clone()).or_insert(added);
-        *was = was.min(added);
-    }
-    let mut sorted = tv.clone();
-    sorted.sort_by(|(_, a), (_, b)| {
-        first_added[&a.0]
-            .total_cmp(&first_added[&b.0])
-            .then_with(|| a.0.cmp(&b.0))
-            .then(a.1.cmp(&b.1))
-            .then(a.2.cmp(&b.2))
-    });
-    let mut next = sorted.iter().map(|(t, _)| *t);
-    let wanted: Vec<&Value> = queue
-        .iter()
-        .map(|t| if t["category"] == "tv" { next.next().unwrap_or(t) } else { t })
-        .collect();
-    let hash = |t: &Value| t["hash"].as_str().unwrap_or_default().to_owned();
-    if wanted.iter().zip(&queue).all(|(a, b)| hash(a) == hash(b)) {
+        .cloned()
+        .collect())
+}
+
+/// Puts the queue in `wanted` order, unless it already is.
+async fn reorder(state: &State, queue: &[&Value], wanted: &[&Value]) -> Result<(), HttpError> {
+    if wanted.iter().map(|t| hash_of(t)).eq(queue.iter().map(|t| hash_of(t))) {
         return Ok(());
     }
     // Moving each to the top, last first, leaves them in the wanted order.
     for t in wanted.iter().rev() {
-        qbit(state, "torrents/topPrio", Some(&[("hashes", &hash(t))])).await?;
+        qbit(state, "torrents/topPrio", Some(&[("hashes", &hash_of(t))])).await?;
     }
     Ok(())
+}
+
+/// The queue with its TV torrents in episode order, so a show grabbed one episode at a time comes
+/// in from the first episode on. Shows keep the place of their first torrent in the queue, which is
+/// the order they were added unless one was dragged in the app; movies keep their places, and so do
+/// the shows in `manual`. None when a TV torrent's name has no episode in it.
+fn episode_order<'a>(queue: &[&'a Value], manual: &HashSet<String>) -> Option<Vec<&'a Value>> {
+    let mut show_of: HashMap<String, (String, u32, u32)> = HashMap::new();
+    for t in queue.iter().filter(|t| t["category"] == "tv") {
+        let e = episode_of(t["name"].as_str().unwrap_or_default())?;
+        if !manual.contains(&e.0) {
+            show_of.insert(hash_of(t), e);
+        }
+    }
+    let mut first_at: HashMap<&str, usize> = HashMap::new();
+    for (i, t) in queue.iter().enumerate() {
+        if let Some((show, ..)) = show_of.get(&hash_of(t)) {
+            first_at.entry(show).or_insert(i);
+        }
+    }
+    let mut sorted: Vec<(&Value, &(String, u32, u32))> =
+        queue.iter().filter_map(|t| Some((*t, show_of.get(&hash_of(t))?))).collect();
+    sorted.sort_by(|(_, a), (_, b)| first_at[a.0.as_str()].cmp(&first_at[b.0.as_str()]).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
+    let mut next = sorted.iter().map(|(t, _)| *t);
+    Some(
+        queue
+            .iter()
+            .map(|t| if show_of.contains_key(&hash_of(t)) { next.next().unwrap_or(t) } else { t })
+            .collect(),
+    )
+}
+
+/// Keeps the queue in episode order, every minute. Sonarr also asks for sequential download, which
+/// does the same for the files in a season pack.
+async fn sort_tv_queue(state: &State) -> Result<(), HttpError> {
+    if state.game_mode.active() {
+        return Ok(());
+    }
+    let _held = state.media.queue_lock.lock().await;
+    let queue = queued(state).await?;
+    let queue: Vec<&Value> = queue.iter().collect();
+    let manual = {
+        let mut manual = state.media.manual_shows.lock().unwrap();
+        // A show that left the queue goes back to episode order if it comes back.
+        manual.retain(|show| {
+            queue
+                .iter()
+                .any(|t| episode_of(t["name"].as_str().unwrap_or_default()).is_some_and(|e| &e.0 == show))
+        });
+        manual.clone()
+    };
+    let Some(wanted) = episode_order(&queue, &manual) else {
+        return Ok(());
+    };
+    reorder(state, &queue, &wanted).await
+}
+
+/// The queue's torrent hashes, first to start first.
+pub async fn queue_order(AxumState(state): AxumState<State>) -> Result<Json<Value>, HttpError> {
+    let queue = queued(&state).await?;
+    Ok(Json(json!({ "hashes": queue.iter().map(hash_of).collect::<Vec<_>>() })))
+}
+
+/// Reorders the queue as dragged in the app. `hashes` is the order the app shows; torrents it
+/// doesn't list keep their places, and the listed ones fill the places they held between them.
+pub async fn set_queue_order(AxumState(state): AxumState<State>, body: Bytes) -> Result<Json<Value>, HttpError> {
+    let body = json_body(&body)?;
+    let Some(hashes) = body["hashes"].as_array().and_then(|h| h.iter().map(Value::as_str).collect::<Option<Vec<_>>>()) else {
+        return Err(status(400, "hashes must be a list of torrent hashes"));
+    };
+    let hashes: Vec<String> = hashes.iter().map(|h| h.to_lowercase()).collect();
+    println!("queue order {}", hashes.len());
+    let _held = state.media.queue_lock.lock().await;
+    let queue = queued(&state).await?;
+    let queue: Vec<&Value> = queue.iter().collect();
+    let listed: Vec<&Value> = hashes
+        .iter()
+        .filter_map(|h| queue.iter().copied().find(|t| &hash_of(t) == h))
+        .collect();
+    let listed_hashes: HashSet<String> = listed.iter().map(|t| hash_of(t)).collect();
+    let mut next = listed.iter().copied();
+    let wanted: Vec<&Value> = queue
+        .iter()
+        .map(|t| if listed_hashes.contains(&hash_of(t)) { next.next().unwrap_or(t) } else { t })
+        .collect();
+    // Whatever the episode sort would move back was put there on purpose: leave those shows be.
+    if let Some(sorted) = episode_order(&wanted, &HashSet::new()) {
+        let moved: HashSet<String> = sorted
+            .iter()
+            .zip(&wanted)
+            .filter(|(a, b)| hash_of(a) != hash_of(b))
+            .filter_map(|(t, _)| episode_of(t["name"].as_str().unwrap_or_default()).map(|e| e.0))
+            .collect();
+        let mut manual = state.media.manual_shows.lock().unwrap();
+        for t in &wanted {
+            if let Some((show, ..)) = episode_of(t["name"].as_str().unwrap_or_default()) {
+                if moved.contains(&show) {
+                    manual.insert(show);
+                } else {
+                    manual.remove(&show);
+                }
+            }
+        }
+    }
+    reorder(&state, &queue, &wanted).await?;
+    let queue = queued(&state).await?;
+    Ok(Json(json!({ "hashes": queue.iter().map(hash_of).collect::<Vec<_>>() })))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -563,7 +653,35 @@ pub fn start(state: State) {
 
 #[cfg(test)]
 mod tests {
-    use super::episode_of;
+    use std::collections::HashSet;
+
+    use serde_json::{Value, json};
+
+    use super::{episode_of, episode_order, hash_of};
+
+    fn torrents(names: &[&str]) -> Vec<Value> {
+        names
+            .iter()
+            .map(|n| json!({ "hash": n, "name": n, "category": if n.contains(" S0") { "tv" } else { "movies" } }))
+            .collect()
+    }
+
+    fn order(queue: &[Value], manual: &[&str]) -> Vec<String> {
+        let queue: Vec<&Value> = queue.iter().collect();
+        let manual: HashSet<String> = manual.iter().map(|s| s.to_string()).collect();
+        episode_order(&queue, &manual).unwrap().into_iter().map(hash_of).collect()
+    }
+
+    #[test]
+    fn episode_order_keeps_show_places_and_movies() {
+        let q = torrents(&["B S01E02", "Film", "A S01E03", "B S01E01", "A S01E01"]);
+        // B's first torrent comes first, so B's episodes take the first TV places, then A's.
+        assert_eq!(order(&q, &[]), ["B S01E01", "Film", "B S01E02", "A S01E01", "A S01E03"]);
+        // A show dragged out of order keeps its places; the rest sort around it.
+        assert_eq!(order(&q, &["b"]), ["B S01E02", "Film", "A S01E01", "B S01E01", "A S01E03"]);
+        // A name without an episode leaves the whole queue alone.
+        assert!(episode_order(&[&json!({ "hash": "x", "name": "Odd", "category": "tv" })], &HashSet::new()).is_none());
+    }
 
     #[test]
     fn episodes_like_the_javascript_pattern() {

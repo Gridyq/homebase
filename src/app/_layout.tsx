@@ -1,6 +1,7 @@
 import { DarkTheme, DefaultTheme, Stack, ThemeProvider, type ErrorBoundaryProps } from 'expo-router';
 import { useEffect } from 'react';
 import { ScrollView, StyleSheet, useColorScheme } from 'react-native';
+import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { Button } from '@/components/button';
@@ -22,31 +23,33 @@ export default function RootLayout() {
   return (
     // One connection and one sign-in for all the mini-apps, so connecting or signing in from one
     // shows in the others.
-    <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
-      <ServerConnectionProvider>
-        <JellyfinSessionProvider>
-          <Stack>
-            <Stack.Screen name="index" options={{ title: 'Apps', headerLargeTitle: true }} />
-            <Stack.Screen name="jellyfin" options={{ headerShown: false }} />
-            <Stack.Screen name="server" options={{ headerShown: false }} />
-            <Stack.Screen name="requests" options={{ headerShown: false }} />
-            <Stack.Screen name="drop" options={{ headerShown: false }} />
-            <Stack.Screen name="videos" options={{ headerShown: false }} />
-            <Stack.Screen name="assistant" options={{ headerShown: false }} />
-            <Stack.Screen name="history" options={{ headerShown: false }} />
-            <Stack.Screen
-              name="whats-new"
-              options={{
-                presentation: 'formSheet',
-                headerShown: false,
-                sheetAllowedDetents: 'fitToContents',
-                sheetGrabberVisible: true,
-              }}
-            />
-          </Stack>
-        </JellyfinSessionProvider>
-      </ServerConnectionProvider>
-    </ThemeProvider>
+    <GestureHandlerRootView style={styles.flex}>
+      <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
+        <ServerConnectionProvider>
+          <JellyfinSessionProvider>
+            <Stack>
+              <Stack.Screen name="index" options={{ title: 'Apps', headerLargeTitle: true }} />
+              <Stack.Screen name="jellyfin" options={{ headerShown: false }} />
+              <Stack.Screen name="server" options={{ headerShown: false }} />
+              <Stack.Screen name="requests" options={{ headerShown: false }} />
+              <Stack.Screen name="drop" options={{ headerShown: false }} />
+              <Stack.Screen name="videos" options={{ headerShown: false }} />
+              <Stack.Screen name="assistant" options={{ headerShown: false }} />
+              <Stack.Screen name="history" options={{ headerShown: false }} />
+              <Stack.Screen
+                name="whats-new"
+                options={{
+                  presentation: 'formSheet',
+                  headerShown: false,
+                  sheetAllowedDetents: 'fitToContents',
+                  sheetGrabberVisible: true,
+                }}
+              />
+            </Stack>
+          </JellyfinSessionProvider>
+        </ServerConnectionProvider>
+      </ThemeProvider>
+    </GestureHandlerRootView>
   );
 }
 
