@@ -4,7 +4,7 @@ import { router, useLocalSearchParams } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { useVideoPlayer, VideoView, type AudioTrack, type VideoPlayer, type VideoSource } from 'expo-video';
 import { useEffect, useRef, useState } from 'react';
-import { ActionSheetIOS, ActivityIndicator, AppState, Pressable, StyleSheet, View } from 'react-native';
+import { ActionSheetIOS, ActivityIndicator, Pressable, StyleSheet, View } from 'react-native';
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Button } from '@/components/button';
@@ -272,17 +272,6 @@ function Player({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [player]);
 
-  // Coming back to the app (iOS suspends it in the background while nothing plays), don't wait
-  // another STALL_SECONDS on a stream that was already stuck: let the next check act on it.
-  useEffect(() => {
-    const sub = AppState.addEventListener('change', (state) => {
-      if (state !== 'active' || !wantsToPlay.current || player.status !== 'loading') return;
-      stall.current.since = Date.now() - STALL_SECONDS * 1000;
-      stall.current.buffered = player.bufferedPosition;
-    });
-    return () => sub.remove();
-  }, [player]);
-
   useEventListener(player, 'playingChange', ({ isPlaying }) => {
     if (isPlaying) stall.current.reloads = 0;
     if (isPlaying) wantsToPlay.current = true;
@@ -448,11 +437,6 @@ function Player({
           fallbackDuration={(item.RunTimeTicks ?? 0) / TICKS_PER_SECOND}
           trickplay={trickplay}
           actions={actions}
-          // A play that's still waiting on the stream hasn't reached `playingChange`, but it should
-          // count for the stall check, or a resume that never gets going is never rescued.
-          onPlayPause={(play) => {
-            wantsToPlay.current = play;
-          }}
           onClose={() => router.back()}
         />
       ) : null}

@@ -28,7 +28,6 @@ export function PlayerControls({
   fallbackDuration,
   trickplay,
   actions,
-  onPlayPause,
   onClose,
 }: {
   player: VideoPlayer;
@@ -39,8 +38,6 @@ export function PlayerControls({
   trickplay?: Trickplay;
   /** Buttons along the top right, such as Subtitles or the iOS player. */
   actions: ControlAction[];
-  /** Told whether the play button asked to play or to pause, before the player has done either. */
-  onPlayPause?: (play: boolean) => void;
   onClose: () => void;
 }) {
   const insets = useSafeAreaInsets();
@@ -121,7 +118,6 @@ export function PlayerControls({
                 busy={loading}
                 huge
                 onPress={() => {
-                  onPlayPause?.(!playing);
                   if (playing) player.pause();
                   else player.play();
                   touched();
