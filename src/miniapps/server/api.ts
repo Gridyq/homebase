@@ -1,4 +1,5 @@
 import { errorText } from '@/utils/error-text';
+import { homeServerHttps } from '@/utils/home-server-https';
 
 /** Talks to the status server (`status-server-rs/`) on the home server. */
 
@@ -7,7 +8,7 @@ export type Connection = {
   token: string;
 };
 
-export const DEFAULT_URL = 'http://fedora.tail27f991.ts.net:8788';
+export const DEFAULT_URL = 'https://fedora.tail27f991.ts.net';
 
 const TAILNET_DOMAIN = '.tail27f991.ts.net';
 
@@ -286,11 +287,11 @@ export type History<K extends string> = {
 
 const TIMEOUT_MS = 8000;
 
-/** Add http:// when missing and drop a trailing slash. */
+/** Add http:// when missing, drop a trailing slash, and move the old plain-HTTP address to HTTPS. */
 export function normalizeUrl(input: string) {
   let url = input.trim().replace(/\/+$/, '');
   if (!/^https?:\/\//i.test(url)) url = `http://${url}`;
-  return url;
+  return homeServerHttps(url);
 }
 
 /** What the server refused, with its HTTP status; none when it couldn't be reached at all. */

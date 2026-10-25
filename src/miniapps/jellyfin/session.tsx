@@ -6,6 +6,8 @@ import { createClient, signIn as apiSignIn, type JellyfinClient, type Session } 
 import { clearLastPlayed } from './last-played';
 import { useAsync } from './use-async';
 
+import { homeServerHttps } from '@/utils/home-server-https';
+
 export const SESSION_KEY = 'jellyfin.session';
 /** The server and username last signed in with, to fill in the login form after a sign-out. */
 export const LAST_LOGIN_KEY = 'jellyfin.lastLogin';
@@ -35,7 +37,16 @@ export function JellyfinSessionProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     SecureStore.getItemAsync(SESSION_KEY)
-      .then((raw) => raw && setSession(JSON.parse(raw)))
+      .then((raw) => {
+        if (!raw) return;
+        const saved: Session = JSON.parse(raw);
+        const serverUrl = homeServerHttps(saved.serverUrl);
+        if (serverUrl === saved.serverUrl) return setSession(saved);
+        // Signed in before the server moved to HTTPS: the token still works at the new address.
+        const moved = { ...saved, serverUrl };
+        SecureStore.setItemAsync(SESSION_KEY, JSON.stringify(moved)).catch(() => undefined);
+        setSession(moved);
+      })
       .catch(() => undefined)
       .finally(() => setLoading(false));
   }, []);

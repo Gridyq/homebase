@@ -10,6 +10,7 @@ import { useTheme } from '@/hooks/use-theme';
 import { normalizeServerUrl } from '@/miniapps/jellyfin/api';
 import { LAST_LOGIN_KEY, useJellyfinSession } from '@/miniapps/jellyfin/session';
 import { errorText } from '@/utils/error-text';
+import { homeServerHttps } from '@/utils/home-server-https';
 
 export default function Login() {
   const theme = useTheme();
@@ -29,7 +30,7 @@ export default function Login() {
       .then((raw) => {
         if (!raw) return;
         const last: { server?: string; username?: string } = JSON.parse(raw);
-        setServer((s) => s || (last.server ?? ''));
+        setServer((s) => s || homeServerHttps(last.server ?? ''));
         setUsername((u) => u || (last.username ?? ''));
       })
       .catch(() => undefined);

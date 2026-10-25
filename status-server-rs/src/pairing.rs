@@ -35,12 +35,12 @@ pub fn ensure_token(path: &Path) {
 }
 
 /// Address the phone uses, sent in the pairing link.
+/// The real server is reached through `tailscale serve`, which takes HTTPS on 443 and forwards
+/// it to 8788; a test instance on another port is plain HTTP.
 fn public_url() -> String {
-    std::env::var("PUBLIC_URL").unwrap_or_else(|_| {
-        format!(
-            "http://fedora.tail27f991.ts.net:{}",
-            std::env::var("PORT").unwrap_or_else(|_| "8788".into())
-        )
+    std::env::var("PUBLIC_URL").unwrap_or_else(|_| match std::env::var("PORT").as_deref() {
+        Ok(port) if port != "8788" => format!("http://fedora.tail27f991.ts.net:{port}"),
+        _ => "https://fedora.tail27f991.ts.net".into(),
     })
 }
 

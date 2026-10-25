@@ -3,6 +3,7 @@ import Constants from 'expo-constants';
 import { noteChange } from './changes';
 
 import { errorText } from '@/utils/error-text';
+import { homeServerHttps } from '@/utils/home-server-https';
 
 /** Jellyfin counts time in ticks of 100ns. */
 export const TICKS_PER_SECOND = 10_000_000;
@@ -175,7 +176,7 @@ export class JellyfinError extends Error {
 export function normalizeServerUrl(input: string): string {
   let url = input.trim().replace(/\/+$/, '');
   if (!/^https?:\/\//i.test(url)) url = `http://${url}`;
-  return url;
+  return homeServerHttps(url);
 }
 
 function authHeader(deviceId: string, token?: string): string {

@@ -3,6 +3,8 @@ import { createContext, use, useEffect, useMemo, useState, type ReactNode } from
 
 import type { Connection } from './api';
 
+import { homeServerHttps } from '@/utils/home-server-https';
+
 const CONNECTION_KEY = 'server.connection';
 
 type ConnectionState = {
@@ -15,7 +17,14 @@ type ConnectionState = {
 /** The saved connection, for code outside the mini-apps' screens (the launcher). */
 export async function loadConnection(): Promise<Connection | null> {
   const raw = await SecureStore.getItemAsync(CONNECTION_KEY);
-  return raw ? JSON.parse(raw) : null;
+  if (!raw) return null;
+  const saved: Connection = JSON.parse(raw);
+  const url = homeServerHttps(saved.url);
+  if (url === saved.url) return saved;
+  // Saved before the server moved to HTTPS: same token, new address.
+  const moved = { ...saved, url };
+  await SecureStore.setItemAsync(CONNECTION_KEY, JSON.stringify(moved)).catch(() => undefined);
+  return moved;
 }
 
 const ConnectionContext = createContext<ConnectionState | null>(null);

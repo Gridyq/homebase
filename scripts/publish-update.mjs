@@ -47,10 +47,20 @@ console.log('Open Homebase on your phone to download it; it switches over the ne
 
 // Ping the phone through the self-hosted ntfy server. Tapping the notification opens Homebase,
 // which downloads the update as it comes to the foreground and applies it once it's left again.
+// ntfy only takes posts with the status server's write-only token.
 try {
+  let ntfyToken = '';
+  try {
+    ntfyToken = readFileSync(path.join(root, 'status-server', 'ntfy-token'), 'utf8').trim();
+  } catch {}
   const res = await fetch(process.env.NTFY_URL ?? 'http://localhost:2586/Homebase', {
     method: 'POST',
-    headers: { Title: 'Homebase update ready', Tags: 'arrows_counterclockwise', Click: 'homebase://' },
+    headers: {
+      Title: 'Homebase update ready',
+      Tags: 'arrows_counterclockwise',
+      Click: 'homebase://',
+      ...(ntfyToken && { Authorization: `Bearer ${ntfyToken}` }),
+    },
     body: [...notes, 'Open Homebase to download it; it switches over the next time you leave the app.'].join('\n'),
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
