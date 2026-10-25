@@ -484,6 +484,16 @@ pub fn problems(status: &Value, drives: &[crate::drives::Drive]) -> Vec<(String,
     out
 }
 
+/// The `Authorization` value for posting to ntfy, which refuses anonymous posts: a write-only
+/// token in `ntfy-token` beside the server's token. A test instance with its own `TOKEN_PATH`
+/// has none, so it can't reach the phone.
+pub fn ntfy_auth() -> Option<String> {
+    let path = PathBuf::from(crate::env_or("TOKEN_PATH", crate::DEFAULT_TOKEN_PATH)).with_file_name("ntfy-token");
+    let token = std::fs::read_to_string(path).ok()?;
+    let token = token.trim();
+    (!token.is_empty()).then(|| format!("Bearer {token}"))
+}
+
 /// Sends a notification through ntfy; the app can't get push notifications any other way.
 pub async fn notify(upstream: &crate::client::Upstream, n: Notice) {
     let url = std::env::var("NTFY_URL").unwrap_or_else(|_| "http://localhost:2586/Homebase".into());
@@ -495,6 +505,9 @@ pub async fn notify(upstream: &crate::client::Upstream, n: Notice) {
         .header("Tags", n.tags)
         .header("Click", n.click.unwrap_or_else(|| "homebase://server".into()));
     req = req.header("Content-Type", "text/plain; charset=utf-8");
+    if let Some(auth) = ntfy_auth() {
+        req = req.header("Authorization", auth);
+    }
     let Ok(req) = req.body(axum::body::Body::from(n.message)) else {
         return;
     };

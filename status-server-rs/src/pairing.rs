@@ -55,11 +55,12 @@ pub async fn pair(config: &crate::Config) {
     let link = format!("homebase://server/connect?{}", form(&[("url", &public_url()), ("code", &code)]));
     println!("Pairing link: {link}");
     let url = std::env::var("NTFY_URL").unwrap_or_else(|_| "http://localhost:2586/Homebase".into());
-    let headers = [
+    let mut headers = vec![
         ("Title", "Connect Homebase to this server".to_owned()),
         ("Tags", "link".to_owned()),
         ("Click", link),
     ];
+    headers.extend(crate::events::ntfy_auth().map(|auth| ("Authorization", auth)));
     let body = Bytes::from("Tap to fill in the Server mini-app settings. The link works once, within 10 minutes.");
     let client = crate::client::Upstream::new();
     match crate::client::call(
