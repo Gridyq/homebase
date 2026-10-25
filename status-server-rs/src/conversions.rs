@@ -83,6 +83,41 @@ fn ffprobe() -> String {
     std::env::var("FFPROBE").unwrap_or_else(|_| "ffprobe".into())
 }
 
+/// ffprobe and ffmpeg parse files from strangers' torrents, so they run in bubblewrap: no
+/// network, no home folder, nothing of the media drive but the files they're given. Returns the
+/// program to run and the arguments that go before `program`'s own. CONVERSIONS_SANDBOX=off runs
+/// them straight, for testing with fakes outside /usr.
+fn sandboxed(program: String, read: &[&str], write: &[&str]) -> (String, Vec<String>) {
+    if std::env::var("CONVERSIONS_SANDBOX").as_deref() == Ok("off") {
+        return (program, Vec::new());
+    }
+    let mut a = args![
+        "--unshare-all", "--die-with-parent", "--new-session",
+        "--ro-bind", "/usr", "/usr",
+        "--symlink", "usr/bin", "/bin",
+        "--symlink", "usr/sbin", "/sbin",
+        "--symlink", "usr/lib", "/lib",
+        "--symlink", "usr/lib64", "/lib64",
+        "--ro-bind", "/etc", "/etc",
+        "--proc", "/proc",
+        "--dev", "/dev",
+        "--dev-bind", "/dev/dri", "/dev/dri",
+        // libva finds the GPU's driver through /sys.
+        "--ro-bind", "/sys", "/sys",
+        "--tmpfs", "/tmp",
+        "--clearenv", "--setenv", "PATH", "/usr/bin",
+    ]
+    .to_vec();
+    for path in read {
+        a.extend(args!["--ro-bind", *path, *path]);
+    }
+    for path in write {
+        a.extend(args!["--bind", *path, *path]);
+    }
+    a.extend(args!["--", program]);
+    ("bwrap".into(), a)
+}
+
 /// The scope ffmpeg runs in; empty runs it straight from the server (for testing).
 fn scope_unit() -> String {
     std::env::var("CONVERT_UNIT").unwrap_or_else(|_| "homebase-convert".into())
@@ -216,7 +251,8 @@ fn extension(path: &str) -> String {
         .unwrap_or_default()
 }
 
-/// Every video under `dir`, with its size and modification time. Hidden folders are skipped.
+/// Every video under `dir`, with its size and modification time. Hidden folders are skipped, and
+/// so are symlinks, which could lead the walk (and the replacing) out of the library.
 fn walk(dir: &Path, out: &mut Vec<(String, u64, i64)>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -226,7 +262,7 @@ fn walk(dir: &Path, out: &mut Vec<(String, u64, i64)>) {
             continue;
         }
         let path = entry.path();
-        let Ok(meta) = std::fs::metadata(&path) else {
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
             continue;
         };
         if meta.is_dir() {
@@ -293,13 +329,11 @@ fn parse_probe(v: &Value) -> Probe {
 }
 
 async fn probe(path: &str) -> Result<Probe, String> {
-    let out = run(
-        &ffprobe(),
-        &args!["-v", "error", "-print_format", "json", "-show_format", "-show_streams", path],
-        PROBE_TIMEOUT,
-    )
-    .await
-    .map_err(|e| format!("Couldn't read it: {}", e.lines().next().unwrap_or_default()))?;
+    let (program, mut a) = sandboxed(ffprobe(), &[path], &[]);
+    a.extend(args!["-v", "error", "-protocol_whitelist", "file", "-print_format", "json", "-show_format", "-show_streams", path]);
+    let out = run(&program, &a, PROBE_TIMEOUT)
+        .await
+        .map_err(|e| format!("Couldn't read it: {}", e.lines().next().unwrap_or_default()))?;
     let v: Value = serde_json::from_str(&out).map_err(|e| format!("Couldn't read it: {e}"))?;
     Ok(parse_probe(&v))
 }
@@ -337,7 +371,7 @@ fn ffmpeg_args(input: &str, output: &str, probe: &Probe, action: Action, gpu_dec
             a.extend(args!["-init_hw_device", format!("vaapi=va:{RENDER_NODE}"), "-filter_hw_device", "va"]);
         }
     }
-    a.extend(args!["-i", input]);
+    a.extend(args!["-protocol_whitelist", "file", "-i", input]);
 
     let mut codecs: Vec<String> = Vec::new();
     let mut out = 0;
@@ -499,10 +533,15 @@ fn gpu_hold(state: &State) -> Option<String> {
 }
 
 /// Runs ffmpeg in its scope, following its progress, until it finishes or game mode stops it.
-async fn run_ffmpeg(state: &State, args: Vec<String>) -> Result<(), RunError> {
+/// It sees only `input` and the cache folder it writes to.
+async fn run_ffmpeg(state: &State, input: &str, args: Vec<String>) -> Result<(), RunError> {
     let unit = scope_unit();
+    let cache = cache_dir();
+    let (program, sandbox) = sandboxed(ffmpeg(), &[input], &[&cache.to_string_lossy()]);
     let mut command = if unit.is_empty() {
-        tokio::process::Command::new(ffmpeg())
+        let mut c = tokio::process::Command::new(program);
+        c.args(sandbox);
+        c
     } else {
         let mut c = tokio::process::Command::new("systemd-run");
         // A name per run: the CPU retry straight after a failed GPU run could otherwise find the
@@ -510,7 +549,8 @@ async fn run_ffmpeg(state: &State, args: Vec<String>) -> Result<(), RunError> {
         c.args(["--user", "--scope", "--quiet", "--collect"])
             .arg(format!("--unit={unit}-{}", now_ms()))
             .args(["-p", "CPUWeight=20", "-p", "IOWeight=20", "-p", "MemoryHigh=1G", "-p", "MemoryMax=3G", "--"])
-            .arg(ffmpeg());
+            .arg(program)
+            .args(sandbox);
         c
     };
     let mut child = command
@@ -709,7 +749,7 @@ async fn convert(state: &State, path: &str) -> Outcome {
         if let Some(job) = state.conversions.job.lock().unwrap().as_mut() {
             (job.done, job.written, job.progressed_at) = (0.0, 0, now_ms());
         }
-        match run_ffmpeg(state, ffmpeg_args(path, &made_str, &probe, action, gpu_decode)).await {
+        match run_ffmpeg(state, path, ffmpeg_args(path, &made_str, &probe, action, gpu_decode)).await {
             Err(RunError::Stopped) => break Outcome::Stopped,
             // The GPU can't decode everything it claims to; the CPU can.
             Err(RunError::Failed(e)) if action == Action::Encode && gpu_decode => {
@@ -1172,14 +1212,16 @@ mod tests {
             stream(5, "attachment", "ttf"),
         ]);
         let a = ffmpeg_args("in.mkv", "out.mp4", &p, Action::Encode, true).join(" ");
-        assert!(a.contains("-hwaccel vaapi -hwaccel_device /dev/dri/renderD128 -hwaccel_output_format vaapi -i in.mkv"));
+        assert!(a.contains(
+            "-hwaccel vaapi -hwaccel_device /dev/dri/renderD128 -hwaccel_output_format vaapi -protocol_whitelist file -i in.mkv"
+        ));
         assert!(a.contains("-map 0:0 -map 0:1 -map 0:2 -map 0:3 -c:0 hevc_vaapi"));
         assert!(!a.contains("0:4") && !a.contains("0:5"));
         assert!(a.contains("-filter:0 scale_vaapi=format=p010 -tag:0 hvc1"));
         assert!(a.contains("-c:1 copy -c:2 eac3 -b:2 640k -ac:2 6 -c:3 mov_text"));
         assert!(a.ends_with("-movflags +faststart -max_muxing_queue_size 9999 out.mp4"));
         let cpu = ffmpeg_args("in.mkv", "out.mp4", &p, Action::Encode, false).join(" ");
-        assert!(cpu.contains("-init_hw_device vaapi=va:/dev/dri/renderD128 -filter_hw_device va -i"));
+        assert!(cpu.contains("-init_hw_device vaapi=va:/dev/dri/renderD128 -filter_hw_device va -protocol_whitelist file -i"));
         assert!(cpu.contains("-filter:0 format=p010le,hwupload"));
         let remux = ffmpeg_args("in.mkv", "out.mp4", &p, Action::Remux, true).join(" ");
         assert!(!remux.contains("vaapi"));

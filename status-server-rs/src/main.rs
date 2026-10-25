@@ -46,7 +46,6 @@ mod updates;
 mod usage;
 mod videos;
 
-use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -150,7 +149,7 @@ async fn main() {
         .await
         .unwrap_or_else(|e| panic!("Couldn't listen on :{port}: {e}"));
     println!("Homebase status server listening on :{port}");
-    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
+    axum::serve(listener, app.into_make_service_with_connect_info::<http::Conn>())
         .await
         .expect("Server stopped");
 }

@@ -30,7 +30,7 @@ use ring::rand::SystemRandom;
 use ring::signature::{RSA_PKCS1_SHA256, RsaKeyPair};
 use serde_json::{Value, json};
 
-use crate::http::{State, allowed_peer};
+use crate::http::{Conn, State, refusal};
 
 const KEY_ID: &str = "main";
 
@@ -112,7 +112,7 @@ pub async fn start(state: State) {
         .unwrap_or_else(|e| panic!("Couldn't listen on :{port}: {e}"));
     println!("Homebase updates listening on :{port}");
     tokio::spawn(async move {
-        let served = axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await;
+        let served = axum::serve(listener, app.into_make_service_with_connect_info::<Conn>()).await;
         eprintln!("The update server stopped: {served:?}");
         std::process::exit(1);
     });
@@ -139,13 +139,14 @@ fn header_str<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     headers.get(name).and_then(|v| v.to_str().ok())
 }
 
-async fn require_allowed_peer(ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request, next: Next) -> Response {
-    if !allowed_peer(peer.ip()) {
-        return text(StatusCode::FORBIDDEN, "Only reachable over Tailscale");
+async fn require_allowed_peer(ConnectInfo(conn): ConnectInfo<Conn>, mut req: Request, next: Next) -> Response {
+    if let Some(why) = refusal(conn, header_str(req.headers(), "host")) {
+        return text(StatusCode::FORBIDDEN, why);
     }
     if req.method() != axum::http::Method::GET {
         return text(StatusCode::METHOD_NOT_ALLOWED, "Method not allowed");
     }
+    req.extensions_mut().insert(ConnectInfo(conn.peer));
     next.run(req).await
 }
 
@@ -330,6 +331,7 @@ async fn manifest(AxumState(state): AxumState<State>, ConnectInfo(peer): Connect
     else {
         return text(StatusCode::BAD_REQUEST, "Missing expo-runtime-version");
     };
+    // require_allowed_peer checked it's one of this machine's own names.
     let host = header_str(&headers, "host").unwrap_or("localhost").to_owned();
     let wants_signature = headers.contains_key("expo-expect-signature");
 

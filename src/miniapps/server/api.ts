@@ -9,6 +9,25 @@ export type Connection = {
 
 export const DEFAULT_URL = 'http://fedora.tail27f991.ts.net:8788';
 
+const TAILNET_DOMAIN = '.tail27f991.ts.net';
+
+/**
+ * Whether a URL's server is on the tailnet: one of its MagicDNS names, or a Tailscale address.
+ * Anyone who can post to ntfy can make a pairing link, so a link naming any other server is ignored.
+ */
+export function isTailnetUrl(url: string): boolean {
+  const match = /^https?:\/\/([^/?#@]+)(?:[/?#]|$)/i.exec(url.trim());
+  if (!match) return false;
+  const authority = match[1].toLowerCase();
+  const host = authority.startsWith('[')
+    ? authority.slice(1, authority.indexOf(']'))
+    : authority.replace(/:\d+$/, '');
+  if (host.endsWith(TAILNET_DOMAIN) && host.length > TAILNET_DOMAIN.length) return true;
+  const v4 = /^100\.(\d{1,3})\.\d{1,3}\.\d{1,3}$/.exec(host);
+  if (v4) return Number(v4[1]) >= 64 && Number(v4[1]) <= 127;
+  return host.startsWith('fd7a:115c:a1e0:');
+}
+
 export type ServiceState = 'running' | 'stopped' | 'failed' | 'changing';
 export type ServiceAction = 'start' | 'stop' | 'restart' | 'run';
 

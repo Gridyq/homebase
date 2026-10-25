@@ -456,6 +456,7 @@ pub async fn receive_image(AxumState(state): AxumState<State>, req: Request) -> 
             .await
             .map_err(internal)?;
         let mut size = 0u64;
+        let mut head = Vec::new();
         let mut stream = req.into_body().into_data_stream();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|e| bad(StatusCode::BAD_REQUEST, e.to_string()))?;
@@ -463,14 +464,20 @@ pub async fn receive_image(AxumState(state): AxumState<State>, req: Request) -> 
             if size > IMAGE_MAX_BYTES {
                 return Err(too_big());
             }
+            if head.len() < 12 {
+                head.extend(chunk.iter().take(12 - head.len()));
+            }
             file.write_all(&chunk).await.map_err(internal)?;
         }
         file.flush().await.map_err(internal)?;
         drop(file);
+        let unreadable = || bad(StatusCode::UNSUPPORTED_MEDIA_TYPE, "Couldn’t read that photo. JPEG, PNG and WebP work.");
+        let coder = image_coder(&head).ok_or_else(unreadable)?;
         let out = a.image_path(&id)?;
-        // [0]: the first frame of a GIF or the like.
+        // The coder is named so ImageMagick never guesses: a guess can hand PostScript to
+        // Ghostscript or run an SVG. [0]: the first frame of a GIF or the like.
         let convert = args![
-            format!("{}[0]", part.to_string_lossy()),
+            format!("{coder}:{}[0]", part.to_string_lossy()),
             "-auto-orient",
             "-resize",
             format!("{IMAGE_MAX_SIDE}x{IMAGE_MAX_SIDE}>"),
@@ -481,16 +488,24 @@ pub async fn receive_image(AxumState(state): AxumState<State>, req: Request) -> 
         ];
         if let Err(e) = run("magick", &convert, Duration::from_secs(60)).await {
             eprintln!("Assistant: couldn't read a photo: {e}");
-            return Err(bad(
-                StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                "Couldn’t read that photo. JPEG, PNG and WebP work.",
-            ));
+            return Err(unreadable());
         }
         Ok(json!({ "id": id }))
     }
     .await;
     let _ = tokio::fs::remove_file(&part).await;
     Ok(Json(result?))
+}
+
+/// The ImageMagick coder for a photo's first bytes, or None for anything that isn't a photo.
+fn image_coder(head: &[u8]) -> Option<&'static str> {
+    match head {
+        [0xff, 0xd8, 0xff, ..] => Some("jpeg"),
+        [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, ..] => Some("png"),
+        [b'G', b'I', b'F', b'8', ..] => Some("gif"),
+        [b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'E', b'B', b'P', ..] => Some("webp"),
+        _ => None,
+    }
 }
 
 pub async fn send_image(AxumState(state): AxumState<State>, UrlPath(id): UrlPath<String>) -> Result<Response, HttpError> {
@@ -991,5 +1006,17 @@ mod tests {
         assert!(a.chat_path("../../etc/passwd").is_err());
         assert!(a.image_path("0123456789abcdef01234567").is_ok());
         assert!(a.image_path("0123456789ABCDEF01234567").is_err());
+    }
+
+    #[test]
+    fn photos() {
+        assert_eq!(image_coder(&[0xff, 0xd8, 0xff, 0xe0]), Some("jpeg"));
+        assert_eq!(image_coder(b"\x89PNG\r\n\x1a\n\0\0\0\r"), Some("png"));
+        assert_eq!(image_coder(b"RIFF\0\0\0\0WEBPVP8 "), Some("webp"));
+        assert_eq!(image_coder(b"GIF89a"), Some("gif"));
+        assert_eq!(image_coder(b"%!PS-Adobe-3.0"), None);
+        assert_eq!(image_coder(b"<svg xmlns="), None);
+        assert_eq!(image_coder(b"push graphic"), None);
+        assert_eq!(image_coder(b""), None);
     }
 }

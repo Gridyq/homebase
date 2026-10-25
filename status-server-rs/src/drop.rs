@@ -133,7 +133,8 @@ pub async fn list() -> Result<Json<Value>, HttpError> {
 }
 
 fn notify_desktop(title: &str, body: &str) {
-    let a = args!["--app-name=Homebase", "--icon=smartphone", title, body];
+    // "--": a file named "--wait" is a body, not an option.
+    let a = args!["--app-name=Homebase", "--icon=smartphone", "--", title, body];
     tokio::spawn(async move {
         if let Err(e) = crate::command::run("notify-send", &a, Duration::from_secs(5)).await {
             eprintln!("Couldn't show a desktop notification: {e}");

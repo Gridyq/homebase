@@ -7,7 +7,7 @@ import { ThemedText } from '@/components/themed-text';
 import { Spacing } from '@/constants/theme';
 import { useGutter } from '@/hooks/use-gutter';
 import { useTheme } from '@/hooks/use-theme';
-import { DEFAULT_URL, fetchStatus, normalizeUrl, redeemPairingCode } from '@/miniapps/server/api';
+import { DEFAULT_URL, fetchStatus, isTailnetUrl, normalizeUrl, redeemPairingCode } from '@/miniapps/server/api';
 import { useServerConnection } from '@/miniapps/server/connection';
 import { errorText } from '@/utils/error-text';
 
@@ -20,24 +20,29 @@ export default function Connect() {
   const gutter = useGutter();
   const params = useLocalSearchParams<{ url?: string; code?: string }>();
   const { connection, save, forget } = useServerConnection();
-  // Anyone can make a link, so the saved token is only filled in for the saved server; otherwise
-  // Save would send it to whatever address the link named.
-  const otherServer = params.url != null && normalizeUrl(params.url) !== connection?.url;
-  const [url, setUrl] = useState(params.url ?? connection?.url ?? DEFAULT_URL);
-  const [token, setToken] = useState(params.code || otherServer ? '' : (connection?.token ?? ''));
+  // Anyone can make a link, so one naming a server off the tailnet is ignored, code and all:
+  // pairing with it would send Drop files and Assistant chats to whoever runs it.
+  const linkUrl = params.url != null && isTailnetUrl(params.url) ? params.url : undefined;
+  const ignoredLink = params.url != null && linkUrl == null;
+  const code = linkUrl != null ? params.code : undefined;
+  // The saved token is only filled in for the saved server; otherwise Save would send it to
+  // whatever address the link named.
+  const otherServer = linkUrl != null && normalizeUrl(linkUrl) !== connection?.url;
+  const [url, setUrl] = useState(linkUrl ?? connection?.url ?? DEFAULT_URL);
+  const [token, setToken] = useState(code || otherServer ? '' : (connection?.token ?? ''));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
 
   const submit = async () => {
     if (busy) return;
     if (!url.trim()) return setError('Enter the server address.');
-    if (!token.trim() && !params.code) return setError('Enter the token.');
+    if (!token.trim() && !code) return setError('Enter the token.');
     setBusy(true);
     setError(undefined);
     try {
       const next = { url: normalizeUrl(url), token: token.trim() };
-      if (!next.token && params.code) {
-        next.token = await redeemPairingCode(next.url, params.code);
+      if (!next.token && code) {
+        next.token = await redeemPairingCode(next.url, code);
         // The code only works once; keep the token in case the check below fails and they retry.
         setToken(next.token);
       }
@@ -72,9 +77,14 @@ export default function Connect() {
         contentInsetAdjustmentBehavior="automatic"
         contentContainerStyle={[styles.form, gutter]}
         keyboardShouldPersistTaps="handled">
-        {params.url != null ? (
+        {ignoredLink ? (
+          <ThemedText type="small" style={[styles.note, { color: theme.danger }]}>
+            Ignored a link to a server that isn’t on your tailnet. If you didn’t make it, someone
+            may be trying to get you to connect to theirs.
+          </ThemedText>
+        ) : linkUrl != null ? (
           <ThemedText type="small" themeColor="textSecondary" style={styles.note}>
-            {params.code
+            {code
               ? 'From the pairing link. Check the address is your server, then tap Save to connect.'
               : 'From a link. Check the address is your server before entering its token.'}
           </ThemedText>
@@ -100,7 +110,7 @@ export default function Connect() {
           style={inputStyle}
           value={token}
           onChangeText={setToken}
-          placeholder={params.code ? 'Comes from the pairing link' : 'From status-server/token'}
+          placeholder={code ? 'Comes from the pairing link' : 'From status-server/token'}
           placeholderTextColor={theme.textSecondary}
           autoCapitalize="none"
           autoCorrect={false}

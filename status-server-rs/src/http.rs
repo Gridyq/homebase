@@ -4,10 +4,13 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use axum::Json;
+use axum::extract::connect_info::Connected;
 use axum::extract::{ConnectInfo, Request, State as AxumState};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
+use axum::serve::IncomingStream;
+use tokio::net::TcpListener;
 use serde_json::json;
 use subtle::ConstantTimeEq;
 
@@ -118,11 +121,67 @@ pub fn allowed_peer(ip: IpAddr) -> bool {
     }
 }
 
-pub async fn require_allowed_peer(ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request, next: Next) -> Response {
-    if !allowed_peer(peer.ip()) {
-        println!("{} refused: not a Tailscale or local address", peer.ip());
-        return HttpError(StatusCode::FORBIDDEN, "Only reachable over Tailscale".into()).into_response();
+/// Both ends of a connection. Rootless containers reach this machine's Tailscale address through
+/// pasta and arrive from that same address, so a peer is only a Tailscale device when it isn't
+/// the address it connected to.
+#[derive(Clone, Copy, Debug)]
+pub struct Conn {
+    pub peer: SocketAddr,
+    pub local: Option<SocketAddr>,
+}
+
+impl Connected<IncomingStream<'_, TcpListener>> for Conn {
+    fn connect_info(stream: IncomingStream<'_, TcpListener>) -> Self {
+        Conn { peer: *stream.remote_addr(), local: stream.io().local_addr().ok() }
     }
+}
+
+/// The machine's tailnet; its MagicDNS names end in this.
+pub const TAILNET_DOMAIN: &str = "tail27f991.ts.net";
+
+/// Why a connection is refused, if it is.
+pub fn refusal(conn: Conn, host: Option<&str>) -> Option<&'static str> {
+    let peer = conn.peer.ip().to_canonical();
+    if !allowed_peer(peer) {
+        return Some("Only reachable over Tailscale");
+    }
+    if !peer.is_loopback() && conn.local.is_some_and(|l| l.ip().to_canonical() == peer) {
+        return Some("Not reachable from this machine's containers");
+    }
+    if !host.is_some_and(allowed_host) {
+        return Some("Unexpected Host");
+    }
+    None
+}
+
+/// Against DNS rebinding: a web page can point its own name at this machine, but it can't make
+/// the browser send an IP address or one of this machine's names as the Host.
+pub fn allowed_host(host: &str) -> bool {
+    let name = match host.strip_prefix('[') {
+        Some(rest) => match rest.split_once(']') {
+            Some((ip, port)) if port.is_empty() || port.strip_prefix(':').is_some_and(|p| p.parse::<u16>().is_ok()) => ip,
+            _ => return false,
+        },
+        None => match host.rsplit_once(':') {
+            Some((name, port)) if port.parse::<u16>().is_ok() => name,
+            Some(_) => return false,
+            None => host,
+        },
+    };
+    let name = name.strip_suffix('.').unwrap_or(name).to_ascii_lowercase();
+    name.parse::<IpAddr>().is_ok()
+        || name == "localhost"
+        || name.strip_suffix(TAILNET_DOMAIN).is_some_and(|n| n.ends_with('.') && n.len() > 1)
+}
+
+/// Checks [`refusal`], then hands handlers the peer as `ConnectInfo<SocketAddr>`.
+pub async fn require_allowed_peer(ConnectInfo(conn): ConnectInfo<Conn>, mut req: Request, next: Next) -> Response {
+    let host = req.headers().get(header::HOST).and_then(|v| v.to_str().ok());
+    if let Some(why) = refusal(conn, host) {
+        println!("{} refused: {why}", conn.peer.ip().to_canonical());
+        return HttpError(StatusCode::FORBIDDEN, why.into()).into_response();
+    }
+    req.extensions_mut().insert(ConnectInfo(conn.peer));
     next.run(req).await
 }
 
@@ -149,7 +208,7 @@ pub async fn require_token(AxumState(state): AxumState<State>, req: Request, nex
 
 #[cfg(test)]
 mod tests {
-    use super::allowed_peer;
+    use super::{Conn, allowed_host, allowed_peer, refusal};
 
     #[test]
     fn peers() {
@@ -173,5 +232,46 @@ mod tests {
         ] {
             assert!(!allowed_peer(no.parse().unwrap()), "{no}");
         }
+    }
+
+    #[test]
+    fn hosts() {
+        for ok in [
+            "fedora.tail27f991.ts.net:8788",
+            "FEDORA.tail27f991.ts.net.",
+            "localhost:8787",
+            "127.0.0.1:8788",
+            "100.118.162.26",
+            "[::1]:8788",
+            "[fd7a:115c:a1e0::1]",
+        ] {
+            assert!(allowed_host(ok), "{ok}");
+        }
+        for no in [
+            "evil.example:8788",
+            "tail27f991.ts.net",
+            "evil.example.tail27f991.ts.net.evil.example",
+            "fedora.tail27f991.ts.net:x",
+            "fedora.tail27f991.ts.net@evil.example",
+            "eviltail27f991.ts.net",
+            "[::1]x",
+            "",
+        ] {
+            assert!(!allowed_host(no), "{no}");
+        }
+    }
+
+    #[test]
+    fn containers() {
+        let conn = |peer: &str, local: &str| Conn { peer: peer.parse().unwrap(), local: Some(local.parse().unwrap()) };
+        let host = Some("fedora.tail27f991.ts.net:8788");
+        assert_eq!(refusal(conn("100.119.9.44:5000", "100.118.162.26:8788"), host), None);
+        assert_eq!(refusal(conn("127.0.0.1:5000", "127.0.0.1:8788"), Some("localhost:8788")), None);
+        assert_eq!(
+            refusal(conn("[::ffff:100.118.162.26]:5000", "[::ffff:100.118.162.26]:8788"), host),
+            Some("Not reachable from this machine's containers")
+        );
+        assert_eq!(refusal(conn("100.119.9.44:5000", "100.118.162.26:8788"), Some("evil.example")), Some("Unexpected Host"));
+        assert_eq!(refusal(conn("100.119.9.44:5000", "100.118.162.26:8788"), None), Some("Unexpected Host"));
     }
 }

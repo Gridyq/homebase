@@ -82,8 +82,18 @@ pub async fn pair(config: &crate::Config) {
 pub async fn redeem(
     AxumState(state): AxumState<State>,
     ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
+    headers: axum::http::HeaderMap,
     body: Bytes,
 ) -> Result<Json<Value>, HttpError> {
+    // A web page can only send JSON here after a CORS preflight, which this server never allows,
+    // so a page that read the code from ntfy can't spend it.
+    let json = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.split(';').next().is_some_and(|t| t.trim().eq_ignore_ascii_case("application/json")));
+    if !json {
+        return Err(HttpError(StatusCode::UNSUPPORTED_MEDIA_TYPE, "Expected JSON".into()));
+    }
     let given = crate::machine::json_body(&body)?.get("code").cloned();
     let path = data_dir(&state.config).join("pairing");
     let pending = std::fs::read_to_string(&path)
