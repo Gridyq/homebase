@@ -142,6 +142,11 @@ function Player({
   const position = useRef(startSeconds);
   const lastReport = useRef(0);
   const finished = useRef(false);
+  /**
+   * Playing, or told to play and waiting on the stream; not paused. A paused player can sit at
+   * 'loading', and one that never got going (it happens over HTTPS) hasn't played yet.
+   */
+  const wantsToPlay = useRef(false);
   /** Where to pick up once the stream has been loaded again after a stall. */
   const reload = useRef<{ at: number; audio: AudioTrack | null }>(undefined);
 
@@ -217,6 +222,7 @@ function Player({
     if (started.current) return;
     started.current = true;
     if (startSeconds > 0) player.seekBy(startSeconds);
+    wantsToPlay.current = true;
     player.play();
     report('start');
     applySubtitle();
@@ -234,8 +240,6 @@ function Player({
   // that doesn't help is the stream loaded again: a new item has no picture size yet, so picture
   // in picture shrinks to its smallest, but it stays open where `retry` would close it.
   const stall = useRef({ since: 0, buffered: 0, reloads: 0 });
-  /** Playing, or waiting on the stream to play; not paused. A paused player can sit at 'loading'. */
-  const wantsToPlay = useRef(false);
   useEffect(() => {
     const timer = setInterval(() => {
       const s = stall.current;
