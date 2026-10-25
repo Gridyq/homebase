@@ -29,7 +29,7 @@ const PROGRESS_INTERVAL_SECONDS = 10;
 const UP_NEXT_SECONDS = 10;
 /** How long the player may buffer without getting anything before the stream is loaded again. */
 const STALL_SECONDS = 15;
-/** Reloads in a row that didn't get it playing before giving up and offering Try again. */
+/** Tries in a row (a seek, then loading the stream again) that didn't get it playing before offering Try again. */
 const MAX_RELOADS = 3;
 
 // A full-screen modal gets the insets of the screen under it, which stay portrait when the
@@ -229,13 +229,17 @@ function Player({
   });
 
   // AVPlayer can wait forever on a stream whose connection died under it (it happens going into
-  // picture in picture), so buffering that gets nothing for STALL_SECONDS loads the same stream
-  // again where it stopped. That keeps the player, and so picture in picture, where `retry` wouldn't.
+  // picture in picture), so buffering that gets nothing for STALL_SECONDS while it's meant to be
+  // playing first seeks to where it stopped, which makes it ask again on the same item. Only if
+  // that doesn't help is the stream loaded again: a new item has no picture size yet, so picture
+  // in picture shrinks to its smallest, but it stays open where `retry` would close it.
   const stall = useRef({ since: 0, buffered: 0, reloads: 0 });
+  /** Playing, or waiting on the stream to play; not paused. A paused player can sit at 'loading'. */
+  const wantsToPlay = useRef(false);
   useEffect(() => {
     const timer = setInterval(() => {
       const s = stall.current;
-      if (!started.current || player.status !== 'loading') {
+      if (!started.current || !wantsToPlay.current || player.status !== 'loading') {
         s.since = 0;
         return;
       }
@@ -252,6 +256,10 @@ function Player({
         setFailure('The stream stopped and reloading it didn’t help.');
         return;
       }
+      if (s.reloads === 1) {
+        player.currentTime = position.current;
+        return;
+      }
       reload.current = { at: position.current, audio: player.audioTrack };
       subtitleApplied.current = false;
       player.replaceAsync(source).catch(() => undefined);
@@ -262,6 +270,8 @@ function Player({
 
   useEventListener(player, 'playingChange', ({ isPlaying }) => {
     if (isPlaying) stall.current.reloads = 0;
+    if (isPlaying) wantsToPlay.current = true;
+    else if (player.status !== 'loading') wantsToPlay.current = false;
     position.current = player.currentTime;
     report('progress', !isPlaying);
   });
