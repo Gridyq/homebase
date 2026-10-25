@@ -27,6 +27,10 @@ import { useAsync } from '@/miniapps/jellyfin/use-async';
 
 const PROGRESS_INTERVAL_SECONDS = 10;
 const UP_NEXT_SECONDS = 10;
+/** How long the player may buffer without getting anything before the stream is loaded again. */
+const STALL_SECONDS = 15;
+/** Reloads in a row that didn't get it playing before giving up and offering Try again. */
+const MAX_RELOADS = 3;
 
 // A full-screen modal gets the insets of the screen under it, which stay portrait when the
 // phone turns, so the controls measure this screen's own edges instead.
@@ -138,6 +142,8 @@ function Player({
   const position = useRef(startSeconds);
   const lastReport = useRef(0);
   const finished = useRef(false);
+  /** Where to pick up once the stream has been loaded again after a stall. */
+  const reload = useRef<{ at: number; audio: AudioTrack | null }>(undefined);
 
   const source: VideoSource = {
     uri: playback.url,
@@ -188,7 +194,7 @@ function Player({
       subtitleApplied.current = true;
       return;
     }
-    if ((playback.subtitleIndex ?? -1) < 0) return;
+    if ((chosenSubtitle.current ?? -1) < 0) return;
     subtitleApplied.current = showFirstSubtitleTrack(player);
   };
   useEventListener(player, 'availableSubtitleTracksChange', applySubtitle);
@@ -200,7 +206,15 @@ function Player({
       setFailure(error?.message || "This video couldn't be played.");
       return;
     }
-    if (status !== 'readyToPlay' || started.current) return;
+    if (status !== 'readyToPlay') return;
+    if (reload.current) {
+      const { at, audio } = reload.current;
+      reload.current = undefined;
+      resumeAt(player, at, audio);
+      applySubtitle();
+      return;
+    }
+    if (started.current) return;
     started.current = true;
     if (startSeconds > 0) player.seekBy(startSeconds);
     player.play();
@@ -209,11 +223,45 @@ function Player({
   });
 
   useEventListener(player, 'timeUpdate', ({ currentTime }) => {
+    if (reload.current) return;
     position.current = currentTime;
     if (Date.now() - lastReport.current >= PROGRESS_INTERVAL_SECONDS * 1000) report('progress', !player.playing);
   });
 
+  // AVPlayer can wait forever on a stream whose connection died under it (it happens going into
+  // picture in picture), so buffering that gets nothing for STALL_SECONDS loads the same stream
+  // again where it stopped. That keeps the player, and so picture in picture, where `retry` wouldn't.
+  const stall = useRef({ since: 0, buffered: 0, reloads: 0 });
+  useEffect(() => {
+    const timer = setInterval(() => {
+      const s = stall.current;
+      if (!started.current || player.status !== 'loading') {
+        s.since = 0;
+        return;
+      }
+      const buffered = player.bufferedPosition;
+      if (!s.since || buffered > s.buffered + 1) {
+        s.since = Date.now();
+        s.buffered = buffered;
+        return;
+      }
+      if (Date.now() - s.since < STALL_SECONDS * 1000) return;
+      s.since = 0;
+      if (++s.reloads > MAX_RELOADS) {
+        viewRef.current?.exitFullscreen().catch(() => undefined);
+        setFailure('The stream stopped and reloading it didn’t help.');
+        return;
+      }
+      reload.current = { at: position.current, audio: player.audioTrack };
+      subtitleApplied.current = false;
+      player.replaceAsync(source).catch(() => undefined);
+    }, 2000);
+    return () => clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [player]);
+
   useEventListener(player, 'playingChange', ({ isPlaying }) => {
+    if (isPlaying) stall.current.reloads = 0;
     position.current = player.currentTime;
     report('progress', !isPlaying);
   });
@@ -473,6 +521,14 @@ function Shell({ children, showClose = true }: { children: React.ReactNode; show
       ) : null}
     </View>
   );
+}
+
+/** Pick up a stream that was loaded again where it stopped, with the audio track it had. */
+function resumeAt(player: VideoPlayer, seconds: number, audio: AudioTrack | null) {
+  player.currentTime = seconds;
+  player.play();
+  const track = audio && player.availableAudioTracks.find((t) => t.language === audio.language && t.label === audio.label);
+  if (track) player.audioTrack = track;
 }
 
 const styles = StyleSheet.create({
