@@ -134,9 +134,6 @@ function Player({
   const viewRef = useRef<VideoView>(null);
   /** Handed over to the iOS player (for AirPlay and its menus); our controls are hidden meanwhile. */
   const [systemPlayer, setSystemPlayer] = useState(false);
-  const inPictureInPicture = useRef(false);
-  /** Briefly true to take the player off the view and put it back; see the AppState effect. */
-  const [detached, setDetached] = useState(false);
   const [ended, setEnded] = useState(false);
   /** Why playback stopped working, like a transcode that failed on the server. */
   const [failure, setFailure] = useState<string>();
@@ -286,25 +283,6 @@ function Player({
     return () => sub.remove();
   }, [player]);
 
-  // Going home while picture in picture doesn't take over (it only starts by itself from
-  // something already playing), iOS keeps the sound and subtitles going but suspends the
-  // picture, and the view doesn't always get it back. Giving the view its player again does.
-  useEffect(() => {
-    let previous = AppState.currentState;
-    let frame = 0;
-    const sub = AppState.addEventListener('change', (state) => {
-      const back = state === 'active' && previous === 'background';
-      previous = state;
-      if (!back || inPictureInPicture.current || systemPlayer) return;
-      setDetached(true);
-      frame = requestAnimationFrame(() => setDetached(false));
-    });
-    return () => {
-      sub.remove();
-      cancelAnimationFrame(frame);
-    };
-  }, [systemPlayer]);
-
   useEventListener(player, 'playingChange', ({ isPlaying }) => {
     if (isPlaying) stall.current.reloads = 0;
     if (isPlaying) wantsToPlay.current = true;
@@ -445,17 +423,11 @@ function Player({
       <VideoView
         ref={viewRef}
         style={StyleSheet.absoluteFill}
-        player={detached ? null : player}
+        player={player}
         contentFit="contain"
         nativeControls={systemPlayer}
         allowsPictureInPicture
         startsPictureInPictureAutomatically
-        onPictureInPictureStart={() => {
-          inPictureInPicture.current = true;
-        }}
-        onPictureInPictureStop={() => {
-          inPictureInPicture.current = false;
-        }}
         fullscreenOptions={{ enable: true, orientation: 'default' }}
         // Leaving the iOS player comes back to ours rather than closing.
         onFullscreenExit={() => setSystemPlayer(false)}
