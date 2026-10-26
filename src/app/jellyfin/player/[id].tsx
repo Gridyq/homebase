@@ -273,6 +273,10 @@ function Player({
   }, [player]);
 
   useEventListener(player, 'playingChange', ({ isPlaying }) => {
+    // Without waiting to minimize stalls, AVPlayer pauses itself when it runs dry and never picks
+    // up again, even once the data is there; in picture in picture that sat buffering for good. So
+    // the quick start only lasts until something plays, then AVPlayer goes back to riding out stalls.
+    if (isPlaying) waitOutStalls(player);
     if (isPlaying) stall.current.reloads = 0;
     if (isPlaying) wantsToPlay.current = true;
     else if (player.status !== 'loading') wantsToPlay.current = false;
@@ -535,6 +539,12 @@ function Shell({ children, showClose = true }: { children: React.ReactNode; show
       ) : null}
     </View>
   );
+}
+
+/** From here on, let AVPlayer wait through a stall and carry on by itself. */
+function waitOutStalls(player: VideoPlayer) {
+  if (player.bufferOptions.waitsToMinimizeStalling) return;
+  player.bufferOptions = { ...player.bufferOptions, waitsToMinimizeStalling: true };
 }
 
 /** Pick up a stream that was loaded again where it stopped, with the audio track it had. */
