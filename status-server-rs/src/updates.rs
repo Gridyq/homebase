@@ -367,7 +367,8 @@ async fn manifest(AxumState(state): AxumState<State>, ConnectInfo(peer): Connect
                 ("manifest", manifest_headers, &manifest),
                 ("extensions", vec![], r#"{"assetRequestHeaders":{}}"#),
             ]);
-            println!("{peer} serving update {update_id} for runtime {runtime_version}");
+            let running = header_str(&headers, "expo-current-update-id").unwrap_or("the build's own");
+            println!("{peer} serving update {update_id} for runtime {runtime_version} (running {running})");
             let mut headers = protocol_headers();
             headers.insert(header::CONTENT_TYPE, HeaderValue::from_str(&content_type).expect("ascii boundary"));
             (StatusCode::OK, headers, body).into_response()
@@ -377,10 +378,19 @@ async fn manifest(AxumState(state): AxumState<State>, ConnectInfo(peer): Connect
     }
 }
 
-async fn asset(AxumState(state): AxumState<State>, Query(query): Query<HashMap<String, String>>, headers: HeaderMap) -> Response {
+async fn asset(
+    AxumState(state): AxumState<State>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Query(query): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> Response {
     let server = &state.updates;
     let get = |k: &str| query.get(k).map(String::as_str).unwrap_or_default();
     let (runtime, update, rel_path) = (get("runtime"), get("update"), get("path"));
+    // Only the bundle: an update's other assets are mostly ones the phone already has.
+    if rel_path.ends_with(".hbc") {
+        println!("{} sending update {update} bundle", peer.ip().to_canonical());
+    }
     if !is_update_id(update) {
         return text(StatusCode::BAD_REQUEST, "Bad update id");
     }
