@@ -243,6 +243,12 @@ function Player({
   useEffect(() => {
     const timer = setInterval(() => {
       const s = stall.current;
+      // Without waiting to minimize stalls, AVPlayer pauses itself when it runs dry (after a seek,
+      // say) and doesn't carry on once the data is there, so do it here as soon as some has come in.
+      // Leaving the waiting off for good keeps seeks quick: with it on, every seek buffers far ahead.
+      if (started.current && wantsToPlay.current && !player.playing && player.status !== 'error') {
+        if (player.bufferedPosition - player.currentTime >= 1) player.play();
+      }
       if (!started.current || !wantsToPlay.current || player.status !== 'loading') {
         s.since = 0;
         return;
@@ -267,19 +273,18 @@ function Player({
       reload.current = { at: position.current, audio: player.audioTrack };
       subtitleApplied.current = false;
       player.replaceAsync(source).catch(() => undefined);
-    }, 2000);
+    }, 500);
     return () => clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [player]);
 
   useEventListener(player, 'playingChange', ({ isPlaying }) => {
-    // Without waiting to minimize stalls, AVPlayer pauses itself when it runs dry and never picks
-    // up again, even once the data is there; in picture in picture that sat buffering for good. So
-    // the quick start only lasts until something plays, then AVPlayer goes back to riding out stalls.
-    if (isPlaying) waitOutStalls(player);
     if (isPlaying) stall.current.reloads = 0;
     if (isPlaying) wantsToPlay.current = true;
-    else if (player.status !== 'loading') wantsToPlay.current = false;
+    // Running dry stops AVPlayer just like a pause does, and expo-video can still call that ready, so
+    // only a stop with something buffered ahead counts as one (from the lock screen or picture in
+    // picture); our own play button says so itself.
+    else if (player.status !== 'loading' && player.bufferedPosition - player.currentTime >= 1) wantsToPlay.current = false;
     position.current = player.currentTime;
     report('progress', !isPlaying);
   });
@@ -441,6 +446,7 @@ function Player({
           fallbackDuration={(item.RunTimeTicks ?? 0) / TICKS_PER_SECOND}
           trickplay={trickplay}
           actions={actions}
+          onPlayPause={(play) => (wantsToPlay.current = play)}
           onClose={() => router.back()}
         />
       ) : null}
@@ -539,12 +545,6 @@ function Shell({ children, showClose = true }: { children: React.ReactNode; show
       ) : null}
     </View>
   );
-}
-
-/** From here on, let AVPlayer wait through a stall and carry on by itself. */
-function waitOutStalls(player: VideoPlayer) {
-  if (player.bufferOptions.waitsToMinimizeStalling) return;
-  player.bufferOptions = { ...player.bufferOptions, waitsToMinimizeStalling: true };
 }
 
 /** Pick up a stream that was loaded again where it stopped, with the audio track it had. */
