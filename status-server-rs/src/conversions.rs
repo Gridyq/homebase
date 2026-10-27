@@ -295,6 +295,8 @@ struct Stream {
 #[derive(Debug, Default)]
 struct Probe {
     duration: f64,
+    /// Where the file's timestamps start.
+    start: f64,
     streams: Vec<Stream>,
 }
 
@@ -325,7 +327,8 @@ fn parse_probe(v: &Value) -> Probe {
         })
         .collect();
     let duration = v["format"]["duration"].as_str().and_then(|d| d.parse().ok()).unwrap_or(0.0);
-    Probe { duration, streams }
+    let start = v["format"]["start_time"].as_str().and_then(|d| d.parse().ok()).unwrap_or(0.0);
+    Probe { duration, start, streams }
 }
 
 async fn probe(path: &str) -> Result<Probe, String> {
@@ -361,39 +364,70 @@ fn gpu_decodes(v: &Stream) -> bool {
         && !(v.codec == "h264" && v.pix_fmt == "yuv420p10le")
 }
 
-/// ffmpeg's arguments for making the MP4 at `output` from `input`.
-fn ffmpeg_args(input: &str, output: &str, probe: &Probe, action: Action, gpu_decode: bool) -> Vec<String> {
-    let mut a = args!["-hide_banner", "-nostdin", "-nostats", "-loglevel", "error", "-progress", "pipe:1", "-y"].to_vec();
-    if action == Action::Encode {
-        if gpu_decode {
-            a.extend(args!["-hwaccel", "vaapi", "-hwaccel_device", RENDER_NODE, "-hwaccel_output_format", "vaapi"]);
-        } else {
-            a.extend(args!["-init_hw_device", format!("vaapi=va:{RENDER_NODE}"), "-filter_hw_device", "va"]);
-        }
-    }
-    a.extend(args!["-protocol_whitelist", "file", "-i", input]);
-
+/// The ffmpeg runs that make the MP4 at `output` from `input`, in order.
+///
+/// An encode takes two. AMD's driver writes the HEVC with parameter sets of its own (Mesa 26.2:
+/// deeper transform trees, dependent slices, another initial QP), not the ones ffmpeg puts in
+/// the MP4's hvcC, and an hvc1 MP4 keeps only the hvcC, so players decoded garbage, mostly
+/// without a single error (found 2026-10-27, after every encode since 2026-10-23 came out so).
+/// So the video goes to an MPEG-TS first, which keeps the driver's sets in the stream, and the
+/// second run builds the hvcC from those, taking the audio and subtitles from the original.
+/// -copyts in both keeps the video where it was against them, and the offset brings the start
+/// to zero as a single run would.
+fn ffmpeg_passes(input: &str, output: &str, probe: &Probe, action: Action, gpu_decode: bool) -> Vec<Vec<String>> {
+    let head = || args!["-hide_banner", "-nostdin", "-nostats", "-loglevel", "error", "-progress", "pipe:1", "-y"].to_vec();
+    let mut a = head();
     let mut codecs: Vec<String> = Vec::new();
     let mut out = 0;
-    if let Some(v) = probe.video() {
-        a.extend(args!["-map", format!("0:{}", v.index)]);
-        match action {
-            Action::Encode => codecs.extend(args![
-                format!("-c:{out}"),
+    let video = probe.video();
+    let mut passes = Vec::new();
+    let source = match (action, video) {
+        (Action::Encode, Some(v)) => {
+            let ts = format!("{output}.video.ts");
+            let mut first = head();
+            first.push("-copyts".into());
+            if gpu_decode {
+                first.extend(args!["-hwaccel", "vaapi", "-hwaccel_device", RENDER_NODE, "-hwaccel_output_format", "vaapi"]);
+            } else {
+                first.extend(args!["-init_hw_device", format!("vaapi=va:{RENDER_NODE}"), "-filter_hw_device", "va"]);
+            }
+            first.extend(args![
+                "-protocol_whitelist",
+                "file",
+                "-i",
+                input,
+                "-map",
+                format!("0:{}", v.index),
+                "-c:v",
                 "hevc_vaapi",
-                format!("-rc_mode:{out}"),
+                "-rc_mode:v",
                 "CQP",
-                format!("-qp:{out}"),
+                "-qp:v",
                 QP,
-                format!("-profile:{out}"),
+                "-profile:v",
                 "main10",
                 // 10-bit on the GPU: -pix_fmt can't touch frames that stay there.
-                format!("-filter:{out}"),
+                "-filter:v",
                 if gpu_decode { "scale_vaapi=format=p010" } else { "format=p010le,hwupload" },
-                format!("-tag:{out}"),
-                "hvc1",
-            ]),
-            Action::Remux => {
+                "-muxdelay",
+                "0",
+                "-muxpreload",
+                "0",
+                "-f",
+                "mpegts",
+                &ts,
+            ]);
+            passes.push(first);
+            a.extend(args!["-copyts", "-protocol_whitelist", "file", "-i", &ts, "-protocol_whitelist", "file", "-i", input]);
+            a.extend(args!["-map", "0:0"]);
+            codecs.extend(args!["-c:0", "copy", "-tag:0", "hvc1"]);
+            out += 1;
+            1
+        }
+        (_, v) => {
+            a.extend(args!["-protocol_whitelist", "file", "-i", input]);
+            if let Some(v) = v {
+                a.extend(args!["-map", format!("0:{}", v.index)]);
                 codecs.extend(args![format!("-c:{out}"), "copy"]);
                 let tag = match v.codec.as_str() {
                     "hevc" => Some("hvc1"),
@@ -403,12 +437,13 @@ fn ffmpeg_args(input: &str, output: &str, probe: &Probe, action: Action, gpu_dec
                 if let Some(tag) = tag {
                     codecs.extend(args![format!("-tag:{out}"), tag]);
                 }
+                out += 1;
             }
+            0
         }
-        out += 1;
-    }
+    };
     for s in probe.streams.iter().filter(|s| s.kind == "audio") {
-        a.extend(args!["-map", format!("0:{}", s.index)]);
+        a.extend(args!["-map", format!("{source}:{}", s.index)]);
         if PHONE_AUDIO.contains(&s.codec.as_str()) {
             codecs.extend(args![format!("-c:{out}"), "copy"]);
         } else {
@@ -420,13 +455,17 @@ fn ffmpeg_args(input: &str, output: &str, probe: &Probe, action: Action, gpu_dec
         out += 1;
     }
     for s in probe.streams.iter().filter(|s| s.kind == "subtitle" && TEXT_SUBTITLES.contains(&s.codec.as_str())) {
-        a.extend(args!["-map", format!("0:{}", s.index)]);
+        a.extend(args!["-map", format!("{source}:{}", s.index)]);
         codecs.extend(args![format!("-c:{out}"), "mov_text"]);
         out += 1;
     }
     a.extend(codecs);
+    if source == 1 && probe.start != 0.0 {
+        a.extend(args!["-output_ts_offset", format!("{}", -probe.start)]);
+    }
     a.extend(args!["-movflags", "+faststart", "-max_muxing_queue_size", "9999", output]);
-    a
+    passes.push(a);
+    passes
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -526,6 +565,30 @@ fn jellyfin_on_gpu() -> bool {
     })
 }
 
+/// `pid` and everything under it. ffmpeg runs under bwrap (and bwrap's init in the sandbox's pid
+/// namespace), so pausing the child alone stopped only bwrap and left ffmpeg on the GPU
+/// (2026-10-25 to 2026-10-27).
+fn process_tree(pid: libc::pid_t) -> Vec<libc::pid_t> {
+    let parents: Vec<(libc::pid_t, libc::pid_t)> = crate::kernel::names("/proc")
+        .iter()
+        .filter_map(|n| n.parse().ok())
+        .filter_map(|p| {
+            let stat = crate::kernel::read(format!("/proc/{p}/stat"))?;
+            // The name in parentheses may hold spaces; the state and then the parent follow it.
+            let ppid = stat.rsplit_once(')')?.1.split_whitespace().nth(1)?.parse().ok()?;
+            Some((p, ppid))
+        })
+        .collect();
+    let mut tree = vec![pid];
+    let mut i = 0;
+    while i < tree.len() {
+        let p = tree[i];
+        tree.extend(parents.iter().filter(|&&(_, parent)| parent == p).map(|&(child, _)| child));
+        i += 1;
+    }
+    tree
+}
+
 /// What's holding the conversions back for the GPU's sake: who Jellyfin transcodes for, or a
 /// background task when one of its ffmpegs is on the GPU anyway.
 fn gpu_hold(state: &State) -> Option<String> {
@@ -566,7 +629,7 @@ async fn run_ffmpeg(state: &State, input: &str, args: Vec<String>) -> Result<(),
     let (mut out_open, mut err_open) = (true, true);
     let mut errors: Vec<String> = Vec::new();
     let mut check = tokio::time::interval(GAME_CHECK);
-    // With --scope, systemd-run becomes ffmpeg, so this is ffmpeg's.
+    // With --scope, systemd-run becomes what it runs: bwrap, with ffmpeg below it.
     let pid = child.id().map(|p| p as libc::pid_t);
     let mut held = false;
     while out_open || err_open {
@@ -594,8 +657,11 @@ async fn run_ffmpeg(state: &State, input: &str, args: Vec<String>) -> Result<(),
                 if let Some(pid) = pid && hold.is_some() != held {
                     held = hold.is_some();
                     println!("{} converting while Jellyfin uses the GPU", if held { "Paused" } else { "Resumed" });
-                    // SAFETY: signals the child this owns, which kill_on_drop reaps.
-                    unsafe { libc::kill(pid, if held { libc::SIGSTOP } else { libc::SIGCONT }) };
+                    for p in process_tree(pid) {
+                        // SAFETY: signals the child this owns and what it started, which
+                        // kill_on_drop (and bwrap's --die-with-parent) take down with it.
+                        unsafe { libc::kill(p, if held { libc::SIGSTOP } else { libc::SIGCONT }) };
+                    }
                     if let Some(job) = state.conversions.job.lock().unwrap().as_mut() {
                         (job.held_for, job.progressed_at) = (hold, now_ms());
                     }
@@ -749,7 +815,14 @@ async fn convert(state: &State, path: &str) -> Outcome {
         if let Some(job) = state.conversions.job.lock().unwrap().as_mut() {
             (job.done, job.written, job.progressed_at) = (0.0, 0, now_ms());
         }
-        match run_ffmpeg(state, path, ffmpeg_args(path, &made_str, &probe, action, gpu_decode)).await {
+        let mut ran = Ok(());
+        for pass in ffmpeg_passes(path, &made_str, &probe, action, gpu_decode) {
+            ran = run_ffmpeg(state, path, pass).await;
+            if ran.is_err() {
+                break;
+            }
+        }
+        match ran {
             Err(RunError::Stopped) => break Outcome::Stopped,
             // The GPU can't decode everything it claims to; the CPU can.
             Err(RunError::Failed(e)) if action == Action::Encode && gpu_decode => {
@@ -758,6 +831,8 @@ async fn convert(state: &State, path: &str) -> Outcome {
             }
             Err(RunError::Failed(e)) => break Outcome::Failed(e),
             Ok(()) => {
+                // An encode's video on its own, from the first run.
+                let _ = std::fs::remove_file(format!("{made_str}.video.ts"));
                 let new_size = std::fs::metadata(&made).map(|m| m.len()).unwrap_or(0);
                 let ratio = new_size as f64 / seen.0.max(1) as f64;
                 if action == Action::Encode && !(KEEP_RATIO.0..=KEEP_RATIO.1).contains(&ratio) {
@@ -1162,7 +1237,7 @@ mod tests {
     }
 
     fn probe_of(streams: Vec<Stream>) -> Probe {
-        Probe { duration: 60.0, streams }
+        Probe { duration: 60.0, start: 0.0, streams }
     }
 
     #[test]
@@ -1211,21 +1286,42 @@ mod tests {
             stream(4, "subtitle", "hdmv_pgs_subtitle"),
             stream(5, "attachment", "ttf"),
         ]);
-        let a = ffmpeg_args("in.mkv", "out.mp4", &p, Action::Encode, true).join(" ");
-        assert!(a.contains(
-            "-hwaccel vaapi -hwaccel_device /dev/dri/renderD128 -hwaccel_output_format vaapi -protocol_whitelist file -i in.mkv"
+        let passes = ffmpeg_passes("in.mkv", "out.mp4", &p, Action::Encode, true);
+        assert_eq!(passes.len(), 2);
+        let (video, mux) = (passes[0].join(" "), passes[1].join(" "));
+        assert!(video.contains(
+            "-copyts -hwaccel vaapi -hwaccel_device /dev/dri/renderD128 -hwaccel_output_format vaapi -protocol_whitelist file -i in.mkv"
         ));
-        assert!(a.contains("-map 0:0 -map 0:1 -map 0:2 -map 0:3 -c:0 hevc_vaapi"));
-        assert!(!a.contains("0:4") && !a.contains("0:5"));
-        assert!(a.contains("-filter:0 scale_vaapi=format=p010 -tag:0 hvc1"));
-        assert!(a.contains("-c:1 copy -c:2 eac3 -b:2 640k -ac:2 6 -c:3 mov_text"));
-        assert!(a.ends_with("-movflags +faststart -max_muxing_queue_size 9999 out.mp4"));
-        let cpu = ffmpeg_args("in.mkv", "out.mp4", &p, Action::Encode, false).join(" ");
+        assert!(video.contains("-map 0:0 -c:v hevc_vaapi"));
+        assert!(video.contains("-filter:v scale_vaapi=format=p010"));
+        assert!(video.ends_with("-f mpegts out.mp4.video.ts"));
+        assert!(!video.contains("hvc1") && !video.contains("0:1"));
+        assert!(mux.contains("-copyts -protocol_whitelist file -i out.mp4.video.ts -protocol_whitelist file -i in.mkv"));
+        assert!(mux.contains("-map 0:0 -map 1:1 -map 1:2 -map 1:3 -c:0 copy -tag:0 hvc1"));
+        assert!(!mux.contains("1:4") && !mux.contains("1:5") && !mux.contains("vaapi"));
+        assert!(mux.contains("-c:1 copy -c:2 eac3 -b:2 640k -ac:2 6 -c:3 mov_text"));
+        assert!(mux.ends_with("-movflags +faststart -max_muxing_queue_size 9999 out.mp4"));
+        let late = Probe { start: 1.4, ..probe_of(p.streams.clone()) };
+        assert!(ffmpeg_passes("in.ts", "out.mp4", &late, Action::Encode, true)[1].join(" ").contains("-output_ts_offset -1.4"));
+        let cpu = ffmpeg_passes("in.mkv", "out.mp4", &p, Action::Encode, false)[0].join(" ");
         assert!(cpu.contains("-init_hw_device vaapi=va:/dev/dri/renderD128 -filter_hw_device va -protocol_whitelist file -i"));
-        assert!(cpu.contains("-filter:0 format=p010le,hwupload"));
-        let remux = ffmpeg_args("in.mkv", "out.mp4", &p, Action::Remux, true).join(" ");
-        assert!(!remux.contains("vaapi"));
-        assert!(remux.contains("-c:0 copy -tag:0 avc1"));
+        assert!(cpu.contains("-filter:v format=p010le,hwupload"));
+        let remux = ffmpeg_passes("in.mkv", "out.mp4", &p, Action::Remux, true);
+        assert_eq!(remux.len(), 1);
+        let remux = remux[0].join(" ");
+        assert!(!remux.contains("vaapi") && !remux.contains("copyts"));
+        assert!(remux.contains("-map 0:0 -map 0:1 -map 0:2 -map 0:3 -c:0 copy -tag:0 avc1"));
+    }
+
+    #[test]
+    fn process_tree_reaches_grandchildren() {
+        let mut child = std::process::Command::new("sh").args(["-c", "sh -c 'sleep 30 & wait' & wait"]).spawn().unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        let tree = process_tree(child.id() as libc::pid_t);
+        child.kill().unwrap();
+        let _ = child.wait();
+        // sh → sh → sleep
+        assert!(tree.len() >= 3, "{tree:?}");
     }
 
     #[test]
